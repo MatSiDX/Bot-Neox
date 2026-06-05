@@ -1,7 +1,7 @@
-import json
 import os
 
 from repositories.balance_repository import DATA_DIR
+from utils.json_store import mutate_json, read_json, write_json
 
 REPORTS_FILE = os.path.join(DATA_DIR, "reports.json")
 
@@ -14,21 +14,22 @@ class ReportRepository:
             self.save({})
 
     def load(self):
-        with open(REPORTS_FILE, "r", encoding="utf-8-sig") as f:
-            return json.load(f)
+        return read_json(REPORTS_FILE, {})
 
     def save(self, data):
-        with open(REPORTS_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=4, ensure_ascii=False)
+        write_json(REPORTS_FILE, data)
 
     def append(self, guild_id, report):
-        data = self.load()
         gid = str(guild_id)
-        if gid not in data:
-            data[gid] = []
 
-        data[gid].append(report)
-        self.save(data)
+        def mutate(data):
+            if gid not in data:
+                data[gid] = []
+
+            data[gid].append(report)
+            return data
+
+        mutate_json(REPORTS_FILE, {}, mutate)
 
     def get_by_guild(self, guild_id):
         data = self.load()

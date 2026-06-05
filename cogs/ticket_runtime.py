@@ -9,6 +9,11 @@ import discord
 from discord.ext import commands
 
 from repositories.balance_repository import DATA_DIR
+from utils.json_store import (
+    mutate_json as mutate_json_file,
+    read_json as read_json_file,
+    write_json as write_json_file,
+)
 
 TICKET_PANELS_FILE = os.path.join(DATA_DIR, "ticket_panels.json")
 TICKET_RECORDS_FILE = os.path.join(DATA_DIR, "ticket_records.json")
@@ -16,20 +21,11 @@ TICKET_MEDIA_DIR = os.path.join(DATA_DIR, "ticket_media")
 
 
 def read_json(path, fallback):
-    if not os.path.isfile(path):
-        return fallback
-
-    try:
-        with open(path, "r", encoding="utf-8-sig") as f:
-            return json.load(f)
-    except (json.JSONDecodeError, OSError):
-        return fallback
+    return read_json_file(path, fallback)
 
 
 def write_json(path, data):
-    os.makedirs(DATA_DIR, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=4, ensure_ascii=False)
+    write_json_file(path, data)
 
 
 def parse_color(value, fallback=0x38BDF8):
@@ -147,6 +143,79 @@ class TicketRuntimeCog(commands.Cog):
         self.save_records(data)
         return highest + 1
 
+    def reserve_ticket_record(self, guild, panel, owner, option_id=None):
+        panel_id = str(panel.get("id") or "")
+        guild_id = str(guild.id)
+        option = next((item for item in panel.get("options", []) if str(item.get("id")) == str(option_id)), None)
+        reserved = {}
+
+        def mutate(data):
+            records = data.setdefault(guild_id, [])
+            highest = 0
+            for record in records:
+                if str(record.get("panel_id") or "") != panel_id:
+                    continue
+                try:
+                    highest = max(highest, int(record.get("number", 0)))
+                except (TypeError, ValueError):
+                    continue
+
+            number = highest + 1
+            record = {
+                "number": number,
+                "status": "open",
+                "guild_id": guild_id,
+                "channel_id": "",
+                "channel_name": "",
+                "owner_id": str(owner.id),
+                "owner_name": owner.display_name,
+                "panel_id": panel_id,
+                "panel_name": panel.get("name", "Panel"),
+                "option_id": str(option_id or ""),
+                "option_label": option.get("label") if option else "",
+                "claimed_by_id": "",
+                "claimed_by_name": "",
+                "created_at": datetime.now().strftime("%d/%m/%Y | %H:%M"),
+                "closed_at": "",
+                "transcript": [],
+            }
+            records.append(record)
+            reserved["record"] = record
+            return data
+
+        mutate_json_file(TICKET_RECORDS_FILE, {}, mutate)
+        return dict(reserved["record"])
+
+    def update_reserved_ticket_record(self, guild_id, number, *, channel_id, channel_name):
+        gid = str(guild_id)
+
+        def mutate(data):
+            for record in data.get(gid, []):
+                if int(record.get("number", 0) or 0) != int(number):
+                    continue
+                record["channel_id"] = str(channel_id)
+                record["channel_name"] = channel_name
+                break
+            return data
+
+        mutate_json_file(TICKET_RECORDS_FILE, {}, mutate)
+
+    def release_reserved_ticket_record(self, guild_id, number):
+        gid = str(guild_id)
+
+        def mutate(data):
+            records = data.get(gid, [])
+            data[gid] = [
+                record
+                for record in records
+                if int(record.get("number", 0) or 0) != int(number)
+            ]
+            if not data[gid]:
+                data.pop(gid, None)
+            return data
+
+        mutate_json_file(TICKET_RECORDS_FILE, {}, mutate)
+
     def get_record(self, guild_id, channel_id):
         data, records = self.guild_records(guild_id)
         for record in records:
@@ -209,8 +278,8 @@ class TicketRuntimeCog(commands.Cog):
             return
 
         category = guild.get_channel(int(panel.get("open_category_id") or 0)) if str(panel.get("open_category_id") or "").isdigit() else None
-        panel_id = str(panel.get("id") or "")
-        number = self.next_number(guild.id, panel_id)
+        record = self.reserve_ticket_record(guild, panel, interaction.user, option_id)
+        number = int(record["number"])
         channel_name = f"ticket-{number:04d}"
         claim_role_ids = self.role_ids(panel, "claim_roles")
         overwrites = {
@@ -232,31 +301,15 @@ class TicketRuntimeCog(commands.Cog):
                 reason=f"Ticket abierto por {interaction.user}",
             )
         except discord.Forbidden:
+            self.release_reserved_ticket_record(guild.id, number)
             await interaction.response.send_message("No puedo crear el canal del ticket. Revisa mis permisos.", ephemeral=True)
             return
+        except discord.HTTPException:
+            self.release_reserved_ticket_record(guild.id, number)
+            await interaction.response.send_message("No pude crear el canal del ticket.", ephemeral=True)
+            return
 
-        data, records = self.guild_records(guild.id)
-        option = next((item for item in panel.get("options", []) if str(item.get("id")) == str(option_id)), None)
-        record = {
-            "number": number,
-            "status": "open",
-            "guild_id": str(guild.id),
-            "channel_id": str(channel.id),
-            "channel_name": channel.name,
-            "owner_id": str(interaction.user.id),
-            "owner_name": interaction.user.display_name,
-            "panel_id": panel_id,
-            "panel_name": panel.get("name", "Panel"),
-            "option_id": str(option_id or ""),
-            "option_label": option.get("label") if option else "",
-            "claimed_by_id": "",
-            "claimed_by_name": "",
-            "created_at": datetime.now().strftime("%d/%m/%Y | %H:%M"),
-            "closed_at": "",
-            "transcript": [],
-        }
-        records.append(record)
-        self.save_records(data)
+        self.update_reserved_ticket_record(guild.id, number, channel_id=channel.id, channel_name=channel.name)
 
         embed = discord.Embed(
             title=panel.get("ticket_open_title") or "Ticket abierto",
@@ -270,6 +323,10 @@ class TicketRuntimeCog(commands.Cog):
         data, record = self.get_record(interaction.guild.id, channel_id)
         if not record:
             await interaction.response.send_message("No encontre este ticket.", ephemeral=True)
+            return
+
+        if record.get("status") != "open":
+            await interaction.response.send_message("Solo puedes reclamar tickets abiertos.", ephemeral=True)
             return
 
         panel = self.find_panel(interaction.guild.id, record.get("panel_id"))
@@ -308,9 +365,70 @@ class TicketRuntimeCog(commands.Cog):
             await interaction.response.send_message("No encontre este ticket.", ephemeral=True)
             return
 
+        panel = self.find_panel(interaction.guild.id, record.get("panel_id"))
+        if not panel or not self.can_close(interaction.user, panel, record):
+            await interaction.response.send_message("No tienes permiso para cerrar este ticket.", ephemeral=True)
+            return
+
+        if record.get("status") != "open":
+            await interaction.response.send_message("Este ticket ya no esta abierto.", ephemeral=True)
+            return
+
         record["status"] = "closed"
         record["closed_at"] = datetime.now().strftime("%d/%m/%Y | %H:%M")
         self.save_records(data)
+        try:
+            await interaction.channel.set_permissions(
+                interaction.guild.default_role,
+                view_channel=False,
+            )
+            await interaction.channel.set_permissions(
+                interaction.guild.me,
+                view_channel=True,
+                send_messages=True,
+                read_message_history=True,
+                manage_channels=True,
+                manage_messages=True,
+            )
+            owner_id = int(record.get("owner_id", 0) or 0)
+            owner = interaction.guild.get_member(owner_id) if owner_id else None
+            if owner is not None:
+                await interaction.channel.set_permissions(
+                    owner,
+                    view_channel=True,
+                    send_messages=False,
+                    read_message_history=True,
+                    attach_files=False,
+                    embed_links=False,
+                )
+
+            claimed_by_id = int(record.get("claimed_by_id", 0) or 0)
+            claimed_member = interaction.guild.get_member(claimed_by_id) if claimed_by_id else None
+            if claimed_member is not None:
+                await interaction.channel.set_permissions(
+                    claimed_member,
+                    view_channel=True,
+                    send_messages=False,
+                    read_message_history=True,
+                    attach_files=False,
+                    embed_links=False,
+                )
+
+            for role_id in self.role_ids(panel, "claim_roles") | self.role_ids(panel, "close_roles"):
+                role = interaction.guild.get_role(role_id)
+                if role:
+                    await interaction.channel.set_permissions(
+                        role,
+                        view_channel=True,
+                        send_messages=False,
+                        read_message_history=True,
+                    )
+        except discord.Forbidden:
+            await interaction.response.send_message(
+                "Marque el ticket como cerrado, pero no pude ajustar los permisos del canal. Revisa mis permisos.",
+                ephemeral=True,
+            )
+            return
         await interaction.channel.send("Ticket cerrado.", view=self.closed_controls(channel_id))
         await interaction.response.send_message("Ticket cerrado.", ephemeral=True)
 
@@ -318,6 +436,16 @@ class TicketRuntimeCog(commands.Cog):
         data, record = self.get_record(interaction.guild.id, channel_id)
         if not record:
             await interaction.response.send_message("No encontre este ticket.", ephemeral=True)
+            return
+
+        panel = self.find_panel(interaction.guild.id, record.get("panel_id"))
+        can_transcript = panel and (self.can_close(interaction.user, panel, record) or self.can_delete(interaction.user, panel))
+        if not record or not can_transcript:
+            await interaction.response.send_message("No tienes permiso para transcribir este ticket.", ephemeral=True)
+            return
+
+        if record.get("status") not in {"closed", "deleted"}:
+            await interaction.response.send_message("Primero cierra el ticket para guardar la transcripcion final.", ephemeral=True)
             return
 
         messages = []

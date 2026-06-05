@@ -37,6 +37,11 @@ from services.permission_service import (
     PERMISSION_TEMPLATES,
     PermissionService,
 )
+from utils.json_store import (
+    mutate_json as mutate_json_file_safe,
+    read_json as read_json_file_safe,
+    write_json as write_json_file_safe,
+)
 
 
 load_dotenv()
@@ -143,14 +148,7 @@ def clean_user_name(user_name, user_id):
 
 
 def read_json_file(path, fallback):
-    if not os.path.isfile(path):
-        return fallback
-
-    try:
-        with open(path, "r", encoding="utf-8-sig") as f:
-            return json.load(f)
-    except (json.JSONDecodeError, OSError):
-        return fallback
+    return read_json_file_safe(path, fallback)
 
 
 def oauth_configured():
@@ -249,9 +247,7 @@ def load_persisted_sessions():
 
 
 def save_persisted_sessions():
-    os.makedirs(DATA_DIR, exist_ok=True)
-    with open(SESSIONS_FILE, "w", encoding="utf-8") as f:
-        json.dump(SESSIONS, f, indent=4, ensure_ascii=False)
+    write_json_file_safe(SESSIONS_FILE, SESSIONS)
 
 
 with SESSIONS_LOCK:
@@ -267,6 +263,7 @@ def create_session(user, admin_guilds, remember_device=False):
             "admin_guilds": admin_guilds,
             "expires_at": time.time() + ttl,
             "remember_device": bool(remember_device),
+            "csrf_token": secrets.token_urlsafe(24),
         }
         save_persisted_sessions()
     return session_id
@@ -286,6 +283,9 @@ def get_session_from_request(handler):
             SESSIONS.pop(session_id, None)
             save_persisted_sessions()
             return None
+        if not session.get("csrf_token"):
+            session["csrf_token"] = secrets.token_urlsafe(24)
+            save_persisted_sessions()
         return session
 
 
@@ -379,9 +379,7 @@ def load_ticket_panels():
 
 
 def save_ticket_panels(data):
-    os.makedirs(DATA_DIR, exist_ok=True)
-    with open(TICKET_PANELS_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=4, ensure_ascii=False)
+    write_json_file_safe(TICKET_PANELS_FILE, data)
 
 
 def get_guild_ticket_panels(guild_id):
@@ -391,9 +389,11 @@ def get_guild_ticket_panels(guild_id):
 
 
 def save_guild_ticket_panels(guild_id, panels):
-    data = load_ticket_panels()
-    data[str(guild_id)] = panels
-    save_ticket_panels(data)
+    def mutate(data):
+        data[str(guild_id)] = panels
+        return data
+
+    mutate_json_file_safe(TICKET_PANELS_FILE, {}, mutate)
 
 
 def load_audit_config():
@@ -402,9 +402,7 @@ def load_audit_config():
 
 
 def save_audit_config(data):
-    os.makedirs(DATA_DIR, exist_ok=True)
-    with open(AUDIT_CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=4, ensure_ascii=False)
+    write_json_file_safe(AUDIT_CONFIG_FILE, data)
 
 
 def get_guild_audit_config(guild_id):
@@ -426,15 +424,18 @@ def get_guild_audit_config(guild_id):
 
 
 def save_guild_audit_config(guild_id, config):
-    data = load_audit_config()
     channels = config.get("channels", {}) if isinstance(config, dict) else {}
-    data[str(guild_id)] = {
-        "channels": {
-            key: str(channels.get(key) or "")
-            for key, _, _ in AUDIT_CATEGORIES
+
+    def mutate(data):
+        data[str(guild_id)] = {
+            "channels": {
+                key: str(channels.get(key) or "")
+                for key, _, _ in AUDIT_CATEGORIES
+            }
         }
-    }
-    save_audit_config(data)
+        return data
+
+    mutate_json_file_safe(AUDIT_CONFIG_FILE, {}, mutate)
 
 
 def get_guild_ticket_records(guild_id):
@@ -751,11 +752,7 @@ def save_guild_bot_permissions(guild_id, payload):
         if normalized:
             cleaned[role_id] = normalized
 
-    data = service.repo.load()
-    data[str(guild_id)] = cleaned
-    if not cleaned:
-        data.pop(str(guild_id), None)
-    service.repo.save(data)
+    service.repo.set_guild_permissions(guild_id, cleaned)
     return get_guild_bot_permissions(guild_id), None
 
 
@@ -3183,6 +3180,7 @@ INDEX_HTML = r"""<!doctype html>
       auditEvents: [],
       botPermissions: {},
       botPermissionOptions: [],
+      csrfToken: "",
       permissionSearch: "",
       currentTicketPanelId: localStorage.getItem("dashboardTicketPanelId") || "",
       ticketEditorSection: localStorage.getItem("dashboardTicketEditorSection") || "identity",
@@ -4307,10 +4305,17 @@ INDEX_HTML = r"""<!doctype html>
       }
       if (!response.ok) throw new Error("No se pudo cargar la informacion.");
       state.data = await response.json();
+      state.csrfToken = state.data.csrf_token || "";
       state.guildId = state.data.selectedGuildId || "";
       if (state.guildId) localStorage.setItem("dashboardGuildId", state.guildId);
       await loadTicketConfig();
       render();
+    }
+
+    function csrfHeaders(extra = {}) {
+      const headers = { ...extra };
+      if (state.csrfToken) headers["X-CSRF-Token"] = state.csrfToken;
+      return headers;
     }
 
     async function loadTicketConfig() {
@@ -4392,7 +4397,7 @@ INDEX_HTML = r"""<!doctype html>
       persistCurrentTicketPanel();
       const response = await fetch("/api/ticket-panels", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: csrfHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({
           guild_id: state.guildId,
           panels: state.ticketPanels
@@ -4434,7 +4439,7 @@ INDEX_HTML = r"""<!doctype html>
       document.getElementById("templateStatus").textContent = "Guardando plantilla...";
       const response = await fetch("/api/ping-templates", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: csrfHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({
           guild_id: state.guildId,
           template: data
@@ -4463,7 +4468,7 @@ INDEX_HTML = r"""<!doctype html>
       document.getElementById("templateStatus").textContent = "Eliminando plantilla...";
       const response = await fetch("/api/ping-templates", {
         method: "DELETE",
-        headers: { "Content-Type": "application/json" },
+        headers: csrfHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({
           guild_id: state.guildId,
           key
@@ -4480,7 +4485,7 @@ INDEX_HTML = r"""<!doctype html>
     async function saveAuditConfig() {
       const response = await fetch("/api/audit-config", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: csrfHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({
           guild_id: state.guildId,
           config: state.auditConfig
@@ -4496,7 +4501,7 @@ INDEX_HTML = r"""<!doctype html>
     async function saveBotPermissions() {
       const response = await fetch("/api/bot-permissions", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: csrfHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({
           guild_id: state.guildId,
           permissions: collectBotPermissions()
@@ -4516,7 +4521,7 @@ INDEX_HTML = r"""<!doctype html>
       if (!panel) return;
       const response = await fetch("/api/publish-ticket-panel", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: csrfHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({
           guild_id: state.guildId,
           channel_id: panel.channel_id,
@@ -4869,6 +4874,40 @@ class DashboardHandler(BaseHTTPRequestHandler):
         bot_guild_ids = get_bot_guild_ids()
         return str(guild_id) in allowed_guilds and (bot_guild_ids is None or str(guild_id) in bot_guild_ids)
 
+    def has_same_origin(self):
+        host = self.headers.get("Host", "")
+        if not host:
+            return False
+
+        expected = {
+            f"http://{host}",
+            f"https://{host}",
+        }
+        for header_name in ("Origin", "Referer"):
+            value = self.headers.get(header_name, "")
+            if not value:
+                continue
+            parsed = urlparse(value)
+            base = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else ""
+            if base in expected:
+                return True
+            return False
+
+        return True
+
+    def validate_csrf(self, session):
+        if not self.has_same_origin():
+            self.send_json(403, {"error": "Origen invalido para esta sesion."})
+            return False
+
+        expected = str(session.get("csrf_token") or "")
+        provided = str(self.headers.get("X-CSRF-Token") or "")
+        if not expected or not provided or not secrets.compare_digest(provided, expected):
+            self.send_json(403, {"error": "Token CSRF invalido. Recarga el dashboard e intenta de nuevo."})
+            return False
+
+        return True
+
     def send_file(self, status, path, content_type):
         try:
             with open(path, "rb") as f:
@@ -5070,15 +5109,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     guild["id"]: guild["name"]
                     for guild in session.get("admin_guilds", [])
                 }
-                self.send_json(
-                    200,
-                    build_dashboard_data(
-                        guild_id,
-                        allowed_guilds=allowed_guilds,
-                        bot_guild_ids=get_bot_guild_ids(),
-                        viewer=session.get("user", {}),
-                    ),
+                payload = build_dashboard_data(
+                    guild_id,
+                    allowed_guilds=allowed_guilds,
+                    bot_guild_ids=get_bot_guild_ids(),
+                    viewer=session.get("user", {}),
                 )
+                payload["csrf_token"] = session.get("csrf_token", "")
+                self.send_json(200, payload)
             except Exception as exc:
                 self.send_json(500, {"error": str(exc)})
             return
@@ -5294,6 +5332,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             session = self.get_authenticated_session()
             if not session:
                 return
+            if not self.validate_csrf(session):
+                return
 
             try:
                 body = self.read_json_body()
@@ -5312,6 +5352,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/publish-ticket-panel":
             session = self.get_authenticated_session()
             if not session:
+                return
+            if not self.validate_csrf(session):
                 return
 
             try:
@@ -5343,6 +5385,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             session = self.get_authenticated_session()
             if not session:
                 return
+            if not self.validate_csrf(session):
+                return
 
             try:
                 body = self.read_json_body()
@@ -5360,6 +5404,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/ping-templates":
             session = self.get_authenticated_session()
             if not session:
+                return
+            if not self.validate_csrf(session):
                 return
 
             try:
@@ -5384,6 +5430,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/bot-permissions":
             session = self.get_authenticated_session()
             if not session:
+                return
+            if not self.validate_csrf(session):
                 return
 
             try:
@@ -5410,6 +5458,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/ping-templates":
             session = self.get_authenticated_session()
             if not session:
+                return
+            if not self.validate_csrf(session):
                 return
 
             try:
