@@ -185,6 +185,20 @@ class BalanceRepository:
         from repositories.database import get_connection, utc_now_iso
 
         with get_connection() as connection:
+            row = connection.execute(
+                f"""
+                SELECT {key}
+                FROM economy_balances
+                WHERE guild_id = ? AND user_id = ?
+                """,
+                (str(guild_id), str(user_id)),
+            ).fetchone()
+            current_value = int(row[key] or 0) if row is not None else 0
+            new_value = current_value + delta
+            if new_value < 0:
+                category_name = "Items" if key == "items" else "Silver"
+                raise ValueError(f"El saldo de {category_name} no puede quedar en negativo.")
+
             connection.execute(
                 f"""
                 UPDATE economy_balances

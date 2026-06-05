@@ -133,6 +133,7 @@ class AvalonSignupView(discord.ui.View):
         avalonian_service=None,
         config_service=None,
         report_service=None,
+        report_runtime_service=None,
         permission_service=None,
         balance_service=None,
         persist_callback=None,
@@ -178,6 +179,7 @@ class AvalonSignupView(discord.ui.View):
         self.avalonian_service = avalonian_service
         self.config_service = config_service
         self.report_service = report_service
+        self.report_runtime_service = report_runtime_service
         self.permission_service = permission_service
         self.balance_service = balance_service
         self.persist_callback = persist_callback
@@ -635,20 +637,27 @@ class AvalonSignupView(discord.ui.View):
 
         return distribution
 
-    def build_pp_evaluation_block(self, silver, mapa, repa, distribution):
+    def evaluate_pp_distribution(self, silver, mapa, repa, distribution):
         pp_entries = [entry for entry in distribution if entry["category"] == "silver"]
-        if not pp_entries:
-            return ""
-
-        pp_count = len(pp_entries)
         available_silver = max(silver - mapa - repa, 0)
         pp_required = sum(entry["amount"] for entry in pp_entries)
         difference = available_silver - pp_required
+        return pp_entries, available_silver, pp_required, difference
+
+    def build_pp_evaluation_block(self, silver, mapa, repa, distribution):
+        pp_entries, available_silver, pp_required, difference = self.evaluate_pp_distribution(
+            silver,
+            mapa,
+            repa,
+            distribution,
+        )
+        if not pp_entries:
+            return ""
 
         lines = [
             "",
             "## Revision PP",
-            f"**PP:** {pp_count}",
+            f"**PP:** {len(pp_entries)}",
             f"**Silver total:** {self.format_amount(available_silver)}",
             f"**Silver requerido para PP:** {self.format_amount(pp_required)}",
         ]
@@ -783,6 +792,19 @@ class AvalonSignupView(discord.ui.View):
         participant_count = self.occupied_count()
         per_user = total // participant_count if participant_count else 0
         distribution = self.build_report_distribution(per_user, adjustments)
+        _, available_silver, pp_required, pp_difference = self.evaluate_pp_distribution(
+            silver,
+            mapa,
+            repa,
+            distribution,
+        )
+        if pp_difference < 0:
+            await interaction.response.send_message(
+                "El informe no es valido: el silver disponible no alcanza para cubrir los PP indicados.",
+                ephemeral=True,
+            )
+            return
+
         evaluation_content = (
             "## Informe en evaluacion\n\n"
             f"{content}"
@@ -797,6 +819,8 @@ class AvalonSignupView(discord.ui.View):
             "evaluation_content": evaluation_content,
             "per_user": per_user,
             "distribution": distribution,
+            "available_silver": available_silver,
+            "pp_required": pp_required,
         }
         review_view = ReportReviewView(
             report_data=report_data,
@@ -805,11 +829,25 @@ class AvalonSignupView(discord.ui.View):
             permission_service=self.permission_service,
             balance_service=self.balance_service,
             source_view=self,
+            runtime_service=getattr(self, "report_runtime_service", None),
+            guild_id=interaction.guild.id,
         )
         message = await review_channel.send(
             evaluation_content,
             view=review_view,
         )
+        review_view.message = message
+        review_view.message_id = message.id
+        if getattr(self, "report_runtime_service", None):
+            self.report_runtime_service.save_review(
+                {
+                    "guild_id": interaction.guild.id,
+                    "channel_id": review_channel.id,
+                    "message_id": message.id,
+                    "approved_channel_id": approved_channel_id,
+                    "report_data": report_data,
+                }
+            )
         await self.create_report_thread(message)
 
         self.report_sent = True

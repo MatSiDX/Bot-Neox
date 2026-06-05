@@ -137,6 +137,7 @@ class ExportCog(commands.Cog):
             "Fecha",
             "Hora",
         ]
+        avalonian_headers[0] = "Ava Nro"
         avalonian_sheet.append(avalonian_headers)
 
         avalonian_interactions = self.avalonian_service.get_interactions(interaction.guild.id)
@@ -167,6 +168,7 @@ class ExportCog(commands.Cog):
             "Fecha",
             "Hora",
         ]
+        report_headers[0] = "Ava Nro"
         report_sheet.append(report_headers)
 
         report_reviews = self.report_service.get_reviews(interaction.guild.id)
@@ -298,6 +300,7 @@ class ExportCog(commands.Cog):
             row[6].alignment = left_wrapped
 
         workbook.save(file_path)
+        return await interaction.followup.send("Exportacion completada:", file=discord.File(file_path))
 
         await interaction.followup.send(
             "📊 Exportación completada:",

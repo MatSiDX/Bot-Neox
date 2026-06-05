@@ -21,6 +21,8 @@ pip install -r requirements.txt
 
 Despues, crea tu archivo `.env` a partir de `.env.example` y completa los valores necesarios.
 
+Para que Auditoria registre entradas al servidor, cambios de nombre y roles asignados/removidos a miembros, deja `ENABLE_MEMBER_INTENT=1` y activa `SERVER MEMBERS INTENT` en el Developer Portal de Discord, dentro de la aplicacion del bot.
+
 ## Ejecucion
 
 Para iniciar el bot, ejecuta:
@@ -98,6 +100,12 @@ Cuando el bot este encendido, abre:
 http://127.0.0.1:8000
 ```
 
+Primero veras una pantalla simple para ingresar con Discord. Despues del login, el panel se abre en:
+
+```text
+http://127.0.0.1:8000/dashboard
+```
+
 Tambien puedes levantar solo el dashboard manualmente para revisar datos sin encender el bot:
 
 ```bat
@@ -116,6 +124,19 @@ La pagina se actualiza automaticamente cada 3 segundos y muestra:
 - Registro Balance.
 - Registro Avas.
 - Registro Informes.
+
+El dashboard usa login de Discord. Para ver un servidor, tu usuario debe estar en ese servidor, tener permiso de administrador y el bot tambien debe estar dentro. Configura en `.env`:
+
+```env
+DASHBOARD_CLIENT_ID=ID_DE_TU_APLICACION
+DASHBOARD_CLIENT_SECRET=CLIENT_SECRET_DE_TU_APLICACION
+DASHBOARD_REDIRECT_URI=http://localhost:8000/oauth/callback
+DASHBOARD_SESSION_SECRET=UNA_CLAVE_LARGA_RANDOM
+```
+
+En Discord Developer Portal agrega esa misma URL en **OAuth2 > Redirects**.
+
+Si marcas `Recordar este dispositivo`, la sesion queda guardada hasta 30 dias en `data/dashboard_sessions.json`. `DASHBOARD_SESSION_SECRET` debe mantenerse igual para que esas sesiones sigan funcionando despues de reiniciar.
 
 En `Balances`, la columna `Usuario` muestra solo el nombre guardado o recuperado del historial, `ID` muestra el ID de Discord y `Fecha` usa formato de Argentina: `dia/mes/año | hora`.
 

@@ -1,7 +1,7 @@
-import json
 import os
 
 from repositories.balance_repository import DATA_DIR
+from utils.json_store import mutate_json, read_json, write_json
 
 PING_TEMPLATES_FILE = os.path.join(DATA_DIR, "ping_templates.json")
 
@@ -51,9 +51,7 @@ class PingTemplateRepository:
         }
 
     def load(self):
-        with open(PING_TEMPLATES_FILE, "r", encoding="utf-8-sig") as f:
-            data = json.load(f)
-
+        data = read_json(PING_TEMPLATES_FILE, self.default_storage())
         return self.normalize_storage(data)
 
     def normalize_storage(self, data):
@@ -90,15 +88,16 @@ class PingTemplateRepository:
         }
 
     def save(self, data):
-        with open(PING_TEMPLATES_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=4, ensure_ascii=False)
+        write_json(PING_TEMPLATES_FILE, data)
 
     def ensure_default_template(self):
-        data = self.load()
-        if DEFAULT_TEMPLATE_KEY not in data[GLOBAL_TEMPLATES_KEY]:
-            data[GLOBAL_TEMPLATES_KEY][DEFAULT_TEMPLATE_KEY] = DEFAULT_PING_TEMPLATE
+        def mutate(data):
+            normalized = self.normalize_storage(data)
+            if DEFAULT_TEMPLATE_KEY not in normalized[GLOBAL_TEMPLATES_KEY]:
+                normalized[GLOBAL_TEMPLATES_KEY][DEFAULT_TEMPLATE_KEY] = DEFAULT_PING_TEMPLATE
+            return normalized
 
-        self.save(data)
+        mutate_json(PING_TEMPLATES_FILE, self.default_storage(), mutate)
 
     def get_all(self, guild_id):
         data = self.load()
@@ -121,24 +120,34 @@ class PingTemplateRepository:
         return guild_templates.get(key) or global_templates.get(key) or global_templates.get(DEFAULT_TEMPLATE_KEY) or DEFAULT_PING_TEMPLATE
 
     def upsert(self, guild_id, template_key, template):
-        data = self.load()
-        guild_templates = data.setdefault(GUILD_TEMPLATES_KEY, {}).setdefault(str(guild_id), {})
         key = str(template_key).lower()
-        guild_templates[key] = template
-        self.save(data)
+
+        def mutate(data):
+            normalized = self.normalize_storage(data)
+            guild_templates = normalized.setdefault(GUILD_TEMPLATES_KEY, {}).setdefault(str(guild_id), {})
+            guild_templates[key] = template
+            return normalized
+
+        mutate_json(PING_TEMPLATES_FILE, self.default_storage(), mutate)
 
     def delete(self, guild_id, template_key):
         key = str(template_key or "").lower()
-        data = self.load()
-        guild_templates = data.setdefault(GUILD_TEMPLATES_KEY, {}).setdefault(str(guild_id), {})
-        if key not in guild_templates:
-            return False
+        changed = {"value": False}
 
-        guild_templates.pop(key, None)
-        if not guild_templates:
-            data.setdefault(GUILD_TEMPLATES_KEY, {}).pop(str(guild_id), None)
-        self.save(data)
-        return True
+        def mutate(data):
+            normalized = self.normalize_storage(data)
+            guild_templates = normalized.setdefault(GUILD_TEMPLATES_KEY, {}).setdefault(str(guild_id), {})
+            if key not in guild_templates:
+                return normalized
+
+            guild_templates.pop(key, None)
+            if not guild_templates:
+                normalized.setdefault(GUILD_TEMPLATES_KEY, {}).pop(str(guild_id), None)
+            changed["value"] = True
+            return normalized
+
+        mutate_json(PING_TEMPLATES_FILE, self.default_storage(), mutate)
+        return changed["value"]
 
     def count_guild_templates(self, guild_id):
         return len(self.get_guild_templates(guild_id))

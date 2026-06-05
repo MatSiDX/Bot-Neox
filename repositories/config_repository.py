@@ -1,7 +1,7 @@
-import json
 import os
 
 from repositories.balance_repository import DATA_DIR
+from utils.json_store import mutate_json, read_json, write_json
 
 CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
 
@@ -14,22 +14,23 @@ class ConfigRepository:
             self.save({})
 
     def load(self):
-        with open(CONFIG_FILE, "r", encoding="utf-8-sig") as f:
-            return json.load(f)
+        return read_json(CONFIG_FILE, {})
 
     def save(self, data):
-        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=4, ensure_ascii=False)
+        write_json(CONFIG_FILE, data)
 
     def get_guild_config(self, guild_id):
         data = self.load()
         return data.get(str(guild_id), {})
 
     def set_channel(self, guild_id, channel_type, channel_id):
-        data = self.load()
         gid = str(guild_id)
-        if gid not in data:
-            data[gid] = {}
 
-        data[gid][channel_type] = str(channel_id)
-        self.save(data)
+        def mutate(data):
+            if gid not in data:
+                data[gid] = {}
+
+            data[gid][channel_type] = str(channel_id)
+            return data
+
+        mutate_json(CONFIG_FILE, {}, mutate)

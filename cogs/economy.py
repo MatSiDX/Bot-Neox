@@ -15,11 +15,14 @@ from services.ping_template_service import MAX_TEMPLATES_PER_GUILD, PingTemplate
 from services.permission_service import (
     PERMISSION_ECONOMY,
     PERMISSION_GLOBAL,
+    PERMISSION_PERMISSIONS,
     PERMISSION_PING,
     PERMISSION_REPORTS,
+    PERMISSION_TEMPLATES,
     PermissionService,
 )
 from services.report_service import ReportService
+from services.report_runtime_service import ReportRuntimeService
 from utils.formatters import format_number
 from views.avalonian_ping_view import AvalonSignupView
 from views.top_view import TopView
@@ -34,14 +37,18 @@ CATEGORY_CHOICES = [
 PERMISSION_CHOICES = [
     app_commands.Choice(name="Balance", value=PERMISSION_ECONOMY),
     app_commands.Choice(name="Ping", value=PERMISSION_PING),
+    app_commands.Choice(name="Plantillas", value=PERMISSION_TEMPLATES),
     app_commands.Choice(name="Informes", value=PERMISSION_REPORTS),
+    app_commands.Choice(name="Permisos", value=PERMISSION_PERMISSIONS),
     app_commands.Choice(name="Global", value=PERMISSION_GLOBAL),
 ]
 
 PERMISSION_LABELS = {
     PERMISSION_ECONOMY: "Balance",
     PERMISSION_PING: "Ping",
+    PERMISSION_TEMPLATES: "Plantillas",
     PERMISSION_REPORTS: "Informes",
+    PERMISSION_PERMISSIONS: "Permisos",
     PERMISSION_GLOBAL: "Global",
 }
 
@@ -140,6 +147,7 @@ class EconomyCog(commands.Cog):
         self.ping_template_service = PingTemplateService()
         self.permission_service = PermissionService()
         self.report_service = ReportService()
+        self.report_runtime_service = ReportRuntimeService()
         self.active_avalonian_views = {}
         self.restore_task = None
         self.restored_active_views = False
@@ -149,6 +157,15 @@ class EconomyCog(commands.Cog):
 
     def has_ping_permission(self, interaction):
         return self.permission_service.can_manage_ping(interaction.guild.id, interaction.user)
+
+    def has_template_permission(self, interaction):
+        return self.permission_service.can_manage_templates(interaction.guild.id, interaction.user)
+
+    def can_manage_permissions(self, interaction):
+        return (
+            interaction.user.guild_permissions.administrator
+            or self.permission_service.can_manage_permissions(interaction.guild.id, interaction.user)
+        )
 
     def clean_player_name(self, display_name):
         name = re.sub(r"\[[^\]]*\]", "", display_name)
@@ -303,6 +320,7 @@ class EconomyCog(commands.Cog):
             avalonian_service=self.avalonian_service,
             config_service=self.config_service,
             report_service=self.report_service,
+            report_runtime_service=self.report_runtime_service,
             permission_service=self.permission_service,
             balance_service=self.service,
             persist_callback=self.persist_active_view_state,
@@ -469,6 +487,9 @@ class EconomyCog(commands.Cog):
     def remove_active_view_state(self, guild_id, caller_id, numero_ava):
         self.active_avalonian_service.remove_state(guild_id, caller_id, numero_ava)
 
+    def resolve_active_avalonian_view(self, *, guild_id, caller_id, numero_ava):
+        return self.active_avalonian_views.get((guild_id, caller_id, numero_ava))
+
     async def cog_load(self):
         if self.restore_task is None:
             self.restore_task = self.bot.loop.create_task(self.restore_active_avalonian_views())
@@ -526,6 +547,85 @@ class EconomyCog(commands.Cog):
 
             if view.cancelled and (view.delete_task is None or view.delete_task.done()):
                 view.delete_task = asyncio.create_task(view.delete_cancelled_message_later())
+
+        await self.restore_report_runtime_views()
+
+    async def fetch_runtime_message(self, channel_id, message_id):
+        channel = self.bot.get_channel(channel_id)
+        if channel is None:
+            try:
+                channel = await self.bot.fetch_channel(channel_id)
+            except discord.HTTPException:
+                return None
+
+        try:
+            return await channel.fetch_message(message_id)
+        except discord.HTTPException:
+            return None
+
+    async def restore_report_runtime_views(self):
+        from views.report_review_view import ApprovedReportBalanceView, ReportReviewView
+
+        for state in self.report_runtime_service.get_reviews():
+            guild_id = int(state.get("guild_id", 0))
+            channel_id = int(state.get("channel_id", 0))
+            message_id = int(state.get("message_id", 0))
+            if not all([guild_id, channel_id, message_id]):
+                self.report_runtime_service.remove_review(message_id)
+                continue
+
+            message = await self.fetch_runtime_message(channel_id, message_id)
+            if message is None:
+                self.report_runtime_service.remove_review(message_id)
+                continue
+
+            view = ReportReviewView(
+                report_data=state.get("report_data", {}),
+                approved_channel_id=int(state.get("approved_channel_id", 0)),
+                report_service=self.report_service,
+                permission_service=self.permission_service,
+                balance_service=self.service,
+                source_view_resolver=self.resolve_active_avalonian_view,
+                runtime_service=self.report_runtime_service,
+                guild_id=guild_id,
+                message_id=message_id,
+            )
+            view.message = message
+            self.bot.add_view(view, message_id=message_id)
+
+        for state in self.report_runtime_service.get_balance_decisions():
+            guild_id = int(state.get("guild_id", 0))
+            channel_id = int(state.get("channel_id", 0))
+            message_id = int(state.get("message_id", 0))
+            thread_id = int(state.get("thread_id", 0))
+            if not all([guild_id, channel_id, message_id]):
+                self.report_runtime_service.remove_balance_decision(message_id)
+                continue
+
+            message = await self.fetch_runtime_message(channel_id, message_id)
+            if message is None:
+                self.report_runtime_service.remove_balance_decision(message_id)
+                continue
+
+            report_thread = self.bot.get_channel(thread_id) if thread_id else None
+            if report_thread is None and thread_id:
+                try:
+                    report_thread = await self.bot.fetch_channel(thread_id)
+                except discord.HTTPException:
+                    report_thread = None
+
+            view = ApprovedReportBalanceView(
+                report_data=state.get("report_data", {}),
+                permission_service=self.permission_service,
+                balance_service=self.service,
+                report_thread=report_thread,
+                runtime_service=self.report_runtime_service,
+                guild_id=guild_id,
+                message_id=message_id,
+                channel_id=channel_id,
+                thread_id=thread_id,
+            )
+            self.bot.add_view(view, message_id=message_id)
 
     async def avalonian_number_autocomplete(self, interaction, current):
         choices = []
@@ -664,6 +764,81 @@ class EconomyCog(commands.Cog):
             f"{icon} {action} 💰 {format_number(amount)} al saldo de {member.mention}. [{resource_name}]"
         )
 
+    def _legacy_build_top_embed(self, guild, chunk, page_index, total_pages, viewer_rank):
+        embed = discord.Embed(
+            title="Leaderboard",
+            description=f"**Ranking de {guild.name}**",
+            color=ACCENT_COLOR,
+        )
+
+        lines = []
+        for position, user_id, total in chunk:
+            member = guild.get_member(user_id)
+            display_name = member.display_name if member else self.get_stored_user_name(guild.id, user_id)
+            display_name = display_name or f"Usuario {user_id}"
+            lines.append(f"**{position}.** {display_name} - {format_number(total)}")
+
+        embed.add_field(
+            name="Top Jugadores",
+            value="\n\n".join(lines),
+            inline=False,
+        )
+        embed.set_footer(text=f"Pagina {page_index}/{total_pages} | Tu posicion: {viewer_rank}")
+        return embed
+
+    async def _legacy_modify_balance(self, interaction, member, amount, key, add, command_name):
+        if amount <= 0:
+            await interaction.response.send_message(
+                "Debes indicar una cantidad mayor a 0.",
+                ephemeral=True,
+            )
+            return
+
+        previous_items, previous_silver = self.service.get_balance(interaction.guild, member.id)
+        previous_balance = previous_items if key == "items" else previous_silver
+
+        if not add and previous_balance < amount:
+            resource_name = "Items" if key == "items" else "Silver"
+            await interaction.response.send_message(
+                f"No puedo quitar {format_number(amount)} de {member.mention} porque su saldo de {resource_name} es {format_number(previous_balance)}.",
+                ephemeral=True,
+            )
+            return
+
+        try:
+            self.service.modify(interaction.guild, member.id, amount, key, add)
+        except ValueError as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True)
+            return
+
+        current_items, current_silver = self.service.get_balance(interaction.guild, member.id)
+        new_balance = current_items if key == "items" else current_silver
+
+        now = datetime.now()
+        self.service.log_operation(
+            interaction.guild,
+            {
+                "action": command_name,
+                "operator": interaction.user.display_name,
+                "operator_id": str(interaction.user.id),
+                "player": member.display_name,
+                "player_id": str(member.id),
+                "type": "ADD" if add else "REMOVE",
+                "category": "Items" if key == "items" else "Silver",
+                "amount": amount,
+                "previous_balance": previous_balance,
+                "new_balance": new_balance,
+                "date": now.strftime("%d/%m/%Y"),
+                "time": now.strftime("%H:%M"),
+            },
+        )
+
+        action = "Anadido" if add else "Removido"
+        resource_name = "Items" if key == "items" else "Silver"
+        await interaction.response.send_message(
+            f"{action} {format_number(amount)} al saldo de {member.mention}. [{resource_name}]"
+        )
+
     @app_commands.command(name="balance")
     async def balance(self, interaction: discord.Interaction, member: discord.Member = None):
         member = member or interaction.user
@@ -754,7 +929,7 @@ class EconomyCog(commands.Cog):
         nombre="Nombre visible de la plantilla",
     )
     async def add_ping_template(self, interaction: discord.Interaction, clave: str, nombre: str = None):
-        if not self.has_ping_permission(interaction):
+        if not self.has_template_permission(interaction):
             await interaction.response.send_message(
                 "No tienes permisos para gestionar plantillas.",
                 ephemeral=True,
@@ -795,7 +970,7 @@ class EconomyCog(commands.Cog):
     @app_commands.describe(plantilla="Plantilla que quieres eliminar")
     @app_commands.autocomplete(plantilla=saved_ping_template_autocomplete)
     async def delete_ping_template(self, interaction: discord.Interaction, plantilla: str):
-        if not self.has_ping_permission(interaction):
+        if not self.has_template_permission(interaction):
             await interaction.response.send_message(
                 "No tienes permisos para gestionar plantillas.",
                 ephemeral=True,
@@ -817,7 +992,7 @@ class EconomyCog(commands.Cog):
 
     @template_group.command(name="listar")
     async def list_ping_templates(self, interaction: discord.Interaction):
-        if not self.has_ping_permission(interaction):
+        if not self.has_template_permission(interaction):
             await interaction.response.send_message(
                 "No tienes permisos para ver plantillas.",
                 ephemeral=True,
@@ -848,7 +1023,7 @@ class EconomyCog(commands.Cog):
 
     @template_group.command(name="ayuda")
     async def ping_template_help(self, interaction: discord.Interaction):
-        if not self.has_ping_permission(interaction):
+        if not self.has_template_permission(interaction):
             await interaction.response.send_message(
                 "No tienes permisos para ver ayuda de plantillas.",
                 ephemeral=True,
@@ -1083,9 +1258,9 @@ class EconomyCog(commands.Cog):
         rol: discord.Role,
         permisos: app_commands.Choice[str],
     ):
-        if not interaction.user.guild_permissions.administrator:
+        if not self.can_manage_permissions(interaction):
             await interaction.response.send_message(
-                "Solo un administrador puede gestionar roles con permisos.",
+                "No tienes permisos para gestionar roles con permisos.",
                 ephemeral=True,
             )
             return
@@ -1114,9 +1289,9 @@ class EconomyCog(commands.Cog):
         rol: discord.Role,
         permisos: app_commands.Choice[str],
     ):
-        if not interaction.user.guild_permissions.administrator:
+        if not self.can_manage_permissions(interaction):
             await interaction.response.send_message(
-                "Solo un administrador puede gestionar roles con permisos.",
+                "No tienes permisos para gestionar roles con permisos.",
                 ephemeral=True,
             )
             return
@@ -1160,9 +1335,9 @@ class EconomyCog(commands.Cog):
 
     @app_commands.command(name="permissions")
     async def permissions(self, interaction: discord.Interaction):
-        if not interaction.user.guild_permissions.administrator:
+        if not self.can_manage_permissions(interaction):
             await interaction.response.send_message(
-                "Solo un administrador puede ver los permisos del bot.",
+                "No tienes permisos para ver los permisos del bot.",
                 ephemeral=True,
             )
             return
