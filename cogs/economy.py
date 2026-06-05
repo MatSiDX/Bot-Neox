@@ -15,8 +15,10 @@ from services.ping_template_service import MAX_TEMPLATES_PER_GUILD, PingTemplate
 from services.permission_service import (
     PERMISSION_ECONOMY,
     PERMISSION_GLOBAL,
+    PERMISSION_PERMISSIONS,
     PERMISSION_PING,
     PERMISSION_REPORTS,
+    PERMISSION_TEMPLATES,
     PermissionService,
 )
 from services.report_service import ReportService
@@ -34,14 +36,18 @@ CATEGORY_CHOICES = [
 PERMISSION_CHOICES = [
     app_commands.Choice(name="Balance", value=PERMISSION_ECONOMY),
     app_commands.Choice(name="Ping", value=PERMISSION_PING),
+    app_commands.Choice(name="Plantillas", value=PERMISSION_TEMPLATES),
     app_commands.Choice(name="Informes", value=PERMISSION_REPORTS),
+    app_commands.Choice(name="Permisos", value=PERMISSION_PERMISSIONS),
     app_commands.Choice(name="Global", value=PERMISSION_GLOBAL),
 ]
 
 PERMISSION_LABELS = {
     PERMISSION_ECONOMY: "Balance",
     PERMISSION_PING: "Ping",
+    PERMISSION_TEMPLATES: "Plantillas",
     PERMISSION_REPORTS: "Informes",
+    PERMISSION_PERMISSIONS: "Permisos",
     PERMISSION_GLOBAL: "Global",
 }
 
@@ -149,6 +155,15 @@ class EconomyCog(commands.Cog):
 
     def has_ping_permission(self, interaction):
         return self.permission_service.can_manage_ping(interaction.guild.id, interaction.user)
+
+    def has_template_permission(self, interaction):
+        return self.permission_service.can_manage_templates(interaction.guild.id, interaction.user)
+
+    def can_manage_permissions(self, interaction):
+        return (
+            interaction.user.guild_permissions.administrator
+            or self.permission_service.can_manage_permissions(interaction.guild.id, interaction.user)
+        )
 
     def clean_player_name(self, display_name):
         name = re.sub(r"\[[^\]]*\]", "", display_name)
@@ -754,7 +769,7 @@ class EconomyCog(commands.Cog):
         nombre="Nombre visible de la plantilla",
     )
     async def add_ping_template(self, interaction: discord.Interaction, clave: str, nombre: str = None):
-        if not self.has_ping_permission(interaction):
+        if not self.has_template_permission(interaction):
             await interaction.response.send_message(
                 "No tienes permisos para gestionar plantillas.",
                 ephemeral=True,
@@ -795,7 +810,7 @@ class EconomyCog(commands.Cog):
     @app_commands.describe(plantilla="Plantilla que quieres eliminar")
     @app_commands.autocomplete(plantilla=saved_ping_template_autocomplete)
     async def delete_ping_template(self, interaction: discord.Interaction, plantilla: str):
-        if not self.has_ping_permission(interaction):
+        if not self.has_template_permission(interaction):
             await interaction.response.send_message(
                 "No tienes permisos para gestionar plantillas.",
                 ephemeral=True,
@@ -817,7 +832,7 @@ class EconomyCog(commands.Cog):
 
     @template_group.command(name="listar")
     async def list_ping_templates(self, interaction: discord.Interaction):
-        if not self.has_ping_permission(interaction):
+        if not self.has_template_permission(interaction):
             await interaction.response.send_message(
                 "No tienes permisos para ver plantillas.",
                 ephemeral=True,
@@ -848,7 +863,7 @@ class EconomyCog(commands.Cog):
 
     @template_group.command(name="ayuda")
     async def ping_template_help(self, interaction: discord.Interaction):
-        if not self.has_ping_permission(interaction):
+        if not self.has_template_permission(interaction):
             await interaction.response.send_message(
                 "No tienes permisos para ver ayuda de plantillas.",
                 ephemeral=True,
@@ -1083,9 +1098,9 @@ class EconomyCog(commands.Cog):
         rol: discord.Role,
         permisos: app_commands.Choice[str],
     ):
-        if not interaction.user.guild_permissions.administrator:
+        if not self.can_manage_permissions(interaction):
             await interaction.response.send_message(
-                "Solo un administrador puede gestionar roles con permisos.",
+                "No tienes permisos para gestionar roles con permisos.",
                 ephemeral=True,
             )
             return
@@ -1114,9 +1129,9 @@ class EconomyCog(commands.Cog):
         rol: discord.Role,
         permisos: app_commands.Choice[str],
     ):
-        if not interaction.user.guild_permissions.administrator:
+        if not self.can_manage_permissions(interaction):
             await interaction.response.send_message(
-                "Solo un administrador puede gestionar roles con permisos.",
+                "No tienes permisos para gestionar roles con permisos.",
                 ephemeral=True,
             )
             return
@@ -1160,9 +1175,9 @@ class EconomyCog(commands.Cog):
 
     @app_commands.command(name="permissions")
     async def permissions(self, interaction: discord.Interaction):
-        if not interaction.user.guild_permissions.administrator:
+        if not self.can_manage_permissions(interaction):
             await interaction.response.send_message(
-                "Solo un administrador puede ver los permisos del bot.",
+                "No tienes permisos para ver los permisos del bot.",
                 ephemeral=True,
             )
             return
