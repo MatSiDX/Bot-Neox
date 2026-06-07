@@ -31,7 +31,9 @@ from repositories.albion_registration_repository import AlbionRegistrationReposi
 from repositories.active_avalonian_repository import ACTIVE_AVALONIAN_FILE
 from repositories.balance_repository import DATA_DIR
 from repositories.report_dashboard_repository import ReportDashboardRepository
+from services.config_service import ConfigService
 from services.ping_template_service import MAX_TEMPLATES_PER_GUILD, SCRATCH_TEMPLATE_KEY, PingTemplateService
+from services.fine_service import FineService
 from services.permission_service import (
     PERMISSION_ECONOMY,
     PERMISSION_GLOBAL,
@@ -41,6 +43,12 @@ from services.permission_service import (
     PERMISSION_TEMPLATES,
     PERMISSION_TICKETS,
     PermissionService,
+)
+from services.config_service import (
+    CONFIG_FINE_CHANNEL,
+    CONFIG_FINE_RESOLVER_ROLE,
+    CONFIG_FINE_ROLE,
+    CONFIG_FINE_TICKET_CATEGORY,
 )
 from utils.json_store import (
     mutate_json as mutate_json_file_safe,
@@ -58,6 +66,7 @@ AVALON_BOT_LOGO_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 
 TICKET_PANELS_FILE = os.path.join(DATA_DIR, "ticket_panels.json")
 TICKET_RECORDS_FILE = os.path.join(DATA_DIR, "ticket_records.json")
 TICKET_MEDIA_DIR = os.path.join(DATA_DIR, "ticket_media")
+FINE_PROOF_DIR = os.path.join(DATA_DIR, "fine_proofs")
 AUDIT_CONFIG_FILE = os.path.join(DATA_DIR, "audit_config.json")
 AUDIT_EVENTS_FILE = os.path.join(DATA_DIR, "audit_events.json")
 DEFAULT_LIMIT = 500
@@ -127,6 +136,7 @@ OAUTH_STATES = {}
 OAUTH_STATES_LOCK = threading.RLock()
 BOT_GUILDS_CACHE = {"expires_at": 0, "guild_ids": None}
 MEMBER_ROLES_CACHE = {}
+MEMBER_NAME_CACHE = {}
 try:
     ARGENTINA_TZ = ZoneInfo("America/Argentina/Buenos_Aires") if ZoneInfo else timezone(timedelta(hours=-3))
 except Exception:
@@ -394,20 +404,50 @@ def get_active_avalonian_state(guild_id, caller_id, numero_ava):
     return dict(state) if isinstance(state, dict) else None
 
 
+def get_active_report_calculators_for_user(guild_id, caller_id):
+    data = read_json_file(ACTIVE_AVALONIAN_FILE, {})
+    caller_states = data.get(str(guild_id), {}).get(str(caller_id), {})
+    if not isinstance(caller_states, dict):
+        return []
+
+    calculators = []
+    for numero_ava, state in caller_states.items():
+        if not isinstance(state, dict):
+            continue
+        if not state.get("finalized") or state.get("cancelled"):
+            continue
+        if state.get("report_sent") and not state.get("report_rejected"):
+            continue
+        calculators.append(
+            {
+                "numero_ava": str(state.get("numero_ava") or numero_ava),
+                "title": str(state.get("title") or f"Ava {numero_ava}"),
+                "caller_name": str(state.get("caller_name") or ""),
+                "report_sent": bool(state.get("report_sent")),
+                "report_rejected": bool(state.get("report_rejected")),
+            }
+        )
+    calculators.sort(key=lambda item: int(item.get("numero_ava", 0) or 0), reverse=True)
+    return calculators
+
+
 def serialize_report_calculator_state(state):
     slots = state.get("slots") if isinstance(state.get("slots"), dict) else {}
     participants = []
+    guild_id = str(state.get("guild_id") or "")
     for index, (slot_key, user_id) in enumerate(slots.items(), start=1):
         if not user_id:
             continue
         label = str(slot_key).split("#", 1)[0]
+        display_name = get_discord_member_display_name(guild_id, user_id)
         participants.append({
             "index": index,
             "slot": label,
             "user_id": str(user_id),
+            "display_name": display_name or f"Usuario {user_id}",
         })
     return {
-        "guild_id": str(state.get("guild_id") or ""),
+        "guild_id": guild_id,
         "caller_id": str(state.get("caller_id") or ""),
         "numero_ava": str(state.get("numero_ava") or ""),
         "title": str(state.get("title") or f"Ava {state.get('numero_ava', '')}"),
@@ -461,6 +501,115 @@ def get_discord_member_role_ids(guild_id, user_id):
         "expires_at": now + 60,
     }
     return roles
+
+
+def get_fine_config_payload(guild_id):
+    service = ConfigService()
+    config = service.get_fine_config(guild_id)
+    return {
+        "channel_id": str(config.get("channel_id") or ""),
+        "blocked_role_id": str(config.get("blocked_role_id") or ""),
+        "resolver_role_id": str(config.get("resolver_role_id") or ""),
+        "ticket_category_id": str(config.get("ticket_category_id") or ""),
+    }
+
+
+def save_fine_config(guild_id, payload):
+    service = ConfigService()
+    service.set_channel(guild_id, CONFIG_FINE_CHANNEL, str(payload.get("channel_id") or ""))
+    service.set_role(guild_id, CONFIG_FINE_ROLE, str(payload.get("blocked_role_id") or ""))
+    service.set_role(guild_id, CONFIG_FINE_RESOLVER_ROLE, str(payload.get("resolver_role_id") or ""))
+    service.set_channel(guild_id, CONFIG_FINE_TICKET_CATEGORY, str(payload.get("ticket_category_id") or ""))
+    return get_fine_config_payload(guild_id)
+
+
+def get_guild_fines_payload(guild_id):
+    fines = FineService().get_guild_fines(guild_id)
+    return {
+        "fines": [
+            {
+                "id": int(fine.get("id") or 0),
+                "report_ava": str(fine.get("report_ava") or ""),
+                "fined_user_id": str(fine.get("fined_user_id") or ""),
+                "fined_user_name": str(fine.get("fined_user_name") or fine.get("fined_user_id") or ""),
+                "amount": int(fine.get("amount") or 0),
+                "reason": str(fine.get("reason") or ""),
+                "status": str(fine.get("status") or "open"),
+                "created_by_name": str(fine.get("created_by_name") or ""),
+                "paid_by_name": str(fine.get("paid_by_name") or ""),
+                "created_at": str(fine.get("created_at") or ""),
+                "paid_at": str(fine.get("paid_at") or ""),
+                "ticket_channel_id": str(fine.get("ticket_channel_id") or ""),
+            }
+            for fine in fines
+        ]
+    }
+
+
+def store_embedded_image(data_url, *, prefix):
+    text = str(data_url or "")
+    if not text.startswith("data:") or ";base64," not in text:
+        return "", ""
+
+    header, encoded = text.split(",", 1)
+    mime_type = header[5:].split(";", 1)[0].lower()
+    extension = {
+        "image/png": ".png",
+        "image/jpeg": ".jpg",
+        "image/webp": ".webp",
+        "image/gif": ".gif",
+    }.get(mime_type, "")
+    if not extension:
+        return "", ""
+
+    try:
+        raw = base64.b64decode(encoded, validate=True)
+    except Exception:
+        return "", ""
+    if not raw:
+        return "", ""
+
+    os.makedirs(FINE_PROOF_DIR, exist_ok=True)
+    file_name = f"{prefix}{extension}"
+    path = os.path.join(FINE_PROOF_DIR, file_name)
+    with open(path, "wb") as f:
+        f.write(raw)
+    return path, file_name
+
+
+def get_discord_member_display_name(guild_id, user_id):
+    guild_id = str(guild_id or "")
+    user_id = str(user_id or "")
+    if not guild_id or not user_id or not BOT_TOKEN:
+        return ""
+
+    cache_key = (guild_id, user_id)
+    cached = MEMBER_NAME_CACHE.get(cache_key)
+    now = time.time()
+    if cached and cached.get("expires_at", 0) > now:
+        return str(cached.get("name") or "")
+
+    try:
+        member = discord_json_request(
+            f"/guilds/{guild_id}/members/{user_id}",
+            token=BOT_TOKEN,
+            auth_scheme="Bot",
+        )
+        user = member.get("user", {}) if isinstance(member, dict) else {}
+        display_name = str(
+            member.get("nick")
+            or user.get("global_name")
+            or user.get("username")
+            or user_id
+        )
+    except Exception:
+        display_name = str(user_id)
+
+    MEMBER_NAME_CACHE[cache_key] = {
+        "name": display_name,
+        "expires_at": now + 60,
+    }
+    return display_name
 
 
 def role_ids_have_permission(guild_id, role_ids, permission):
@@ -1417,6 +1566,7 @@ def build_dashboard_data(guild_id=None, allowed_guilds=None, bot_guild_ids=None,
 
     reports = get_json_records(REPORTS_FILE, selected_guild_id) if selected_guild_id else []
     avalonians = get_json_records(AVALONIAN_FILE, selected_guild_id) if selected_guild_id else []
+    fines = get_guild_fines_payload(selected_guild_id).get("fines", []) if selected_guild_id else []
     totals = {
         "players": len(balances),
         "items": sum(int(row["items"] or 0) for row in balances),
@@ -1431,6 +1581,7 @@ def build_dashboard_data(guild_id=None, allowed_guilds=None, bot_guild_ids=None,
         "operations": operations,
         "avalonians": avalonians,
         "reports": reports,
+        "fines": fines,
         "totals": totals,
         "updatedAt": argentina_now_display(),
         "viewer": viewer or {},
@@ -2340,23 +2491,67 @@ INDEX_HTML = r"""<!doctype html>
 
     .report-participant-list {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
-      gap: 8px;
+      grid-template-columns: repeat(auto-fit, minmax(196px, 1fr));
+      gap: 10px;
     }
 
     .report-participant-card {
       display: grid;
-      gap: 3px;
-      padding: 10px;
+      gap: 8px;
+      padding: 12px 14px;
       border: 1px solid var(--line);
-      border-radius: 8px;
-      background: var(--panel);
+      border-radius: 12px;
+      background: linear-gradient(180deg, color-mix(in srgb, var(--panel) 90%, transparent), var(--panel));
+      box-shadow: 0 8px 20px rgba(15, 23, 42, .08);
       min-width: 0;
+      transition: transform .18s ease, border-color .18s ease, box-shadow .18s ease;
+    }
+
+    .report-participant-card:hover {
+      transform: translateY(-1px);
+      border-color: color-mix(in srgb, var(--brand) 36%, var(--line));
+      box-shadow: 0 12px 28px rgba(15, 23, 42, .12);
     }
 
     .report-participant-card strong,
     .report-participant-card span {
       overflow-wrap: anywhere;
+    }
+
+    .report-participant-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .report-participant-card strong {
+      font-size: 16px;
+      line-height: 1.25;
+    }
+
+    .report-participant-name {
+      color: var(--ink);
+      font-size: 14px;
+      font-weight: 700;
+      line-height: 1.35;
+    }
+
+    .report-participant-role {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      min-height: 24px;
+      border-radius: 999px;
+      border: 1px solid color-mix(in srgb, var(--brand) 34%, var(--line));
+      background: color-mix(in srgb, var(--brand) 10%, var(--control-bg));
+      color: var(--active-ink);
+      padding: 0 10px;
+      font-size: 11px;
+      font-weight: 900;
+      text-transform: uppercase;
+      letter-spacing: .06em;
+      white-space: nowrap;
     }
 
     .field label {
@@ -2629,6 +2824,248 @@ INDEX_HTML = r"""<!doctype html>
     .preview-box strong {
       display: block;
       margin-bottom: 6px;
+    }
+
+    .report-calculator-shell {
+      display: grid;
+      gap: 18px;
+    }
+
+    .report-calculator-toolbar {
+      align-items: flex-end;
+      padding-bottom: 8px;
+      border-bottom: 1px solid color-mix(in srgb, var(--line) 84%, transparent);
+    }
+
+    .report-calculator-heading {
+      display: grid;
+      gap: 4px;
+      max-width: 760px;
+    }
+
+    .report-calculator-heading h2 {
+      margin: 0;
+      font-size: 28px;
+      letter-spacing: -.03em;
+    }
+
+    .report-calculator-heading p {
+      margin: 0;
+      font-size: 14px;
+    }
+
+    .report-calculator-picker {
+      min-width: min(320px, 100%);
+      display: grid;
+      gap: 6px;
+    }
+
+    .report-calculator-picker select {
+      min-width: 0;
+    }
+
+    .report-calculator-summary {
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 12px;
+    }
+
+    .report-calculator-summary .ticket-stat {
+      border-radius: 12px;
+      padding: 14px 16px;
+      background: linear-gradient(180deg, color-mix(in srgb, var(--panel) 88%, transparent), var(--panel));
+      box-shadow: 0 10px 24px rgba(15, 23, 42, .08);
+    }
+
+    .report-calculator-summary .ticket-stat span {
+      margin-bottom: 6px;
+      font-size: 11px;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+
+    .report-calculator-summary .ticket-stat strong {
+      font-size: 26px;
+      line-height: 1.1;
+    }
+
+    .report-calculator-participants {
+      padding: 14px;
+      border-radius: 12px;
+      background: color-mix(in srgb, var(--control-bg) 88%, transparent);
+    }
+
+    .report-calculator-workspace {
+      display: grid;
+      grid-template-columns: minmax(0, 1.35fr) minmax(280px, .9fr);
+      gap: 16px;
+      align-items: start;
+      min-width: 0;
+    }
+
+    .report-calculator-form {
+      gap: 14px;
+      padding: 16px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: color-mix(in srgb, var(--control-bg) 92%, transparent);
+      box-shadow: 0 10px 24px rgba(15, 23, 42, .08);
+    }
+
+    .report-calculator-form .editor-section-header {
+      padding-bottom: 10px;
+      border-bottom: 1px solid color-mix(in srgb, var(--line) 82%, transparent);
+    }
+
+    .report-calculator-form .form-grid {
+      gap: 12px;
+    }
+
+    .report-calculator-form .field {
+      display: grid;
+      gap: 6px;
+      min-width: 0;
+    }
+
+    .report-fines-section .editor-section-header {
+      align-items: flex-start;
+      flex-wrap: wrap;
+    }
+
+    .report-fines-section .editor-section-header > div {
+      min-width: 0;
+    }
+
+    .report-fine-row {
+      display: grid;
+      grid-template-columns: minmax(170px, 1.15fr) minmax(120px, .72fr) minmax(180px, 1fr);
+      gap: 12px;
+      align-items: start;
+      padding: 12px;
+      border: 1px solid color-mix(in srgb, var(--line) 86%, transparent);
+      border-radius: 12px;
+      background: color-mix(in srgb, var(--panel) 88%, var(--control-bg));
+      min-width: 0;
+    }
+
+    .report-fine-row .field {
+      gap: 5px;
+      min-width: 0;
+    }
+
+    .report-fine-user-field,
+    .report-fine-proof-field {
+      grid-column: span 2;
+    }
+
+    .report-fine-remove {
+      align-self: end;
+      min-height: 42px;
+    }
+
+    .report-fine-proof-name {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.4;
+      overflow-wrap: anywhere;
+    }
+
+    .report-calculator-form input,
+    .report-calculator-form select,
+    .report-calculator-form textarea {
+      border-radius: 10px;
+      background: color-mix(in srgb, var(--panel) 76%, var(--control-bg));
+    }
+
+    .report-calculator-form textarea {
+      min-height: 108px;
+    }
+
+    .report-calculator-actions {
+      padding-top: 6px;
+      border-top: 1px solid color-mix(in srgb, var(--line) 82%, transparent);
+    }
+
+    .report-calculator-aside {
+      display: grid;
+      gap: 12px;
+      align-content: start;
+      position: sticky;
+      top: 86px;
+    }
+
+    .report-calculator-breakdown {
+      border-radius: 12px;
+      padding: 16px;
+      background: linear-gradient(180deg, color-mix(in srgb, var(--brand-soft) 26%, var(--control-bg)), color-mix(in srgb, var(--control-bg) 96%, transparent));
+      box-shadow: 0 12px 28px rgba(15, 23, 42, .08);
+    }
+
+    .report-calculator-panel-head {
+      display: grid;
+      gap: 4px;
+      margin-bottom: 12px;
+    }
+
+    .report-calculator-panel-head strong {
+      margin: 0;
+    }
+
+    .report-calculator-panel-head span {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.4;
+    }
+
+    .report-breakdown-list {
+      display: grid;
+      gap: 9px;
+    }
+
+    .report-breakdown-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 11px 12px;
+      border: 1px solid color-mix(in srgb, var(--line) 88%, transparent);
+      border-radius: 10px;
+      background: color-mix(in srgb, var(--panel) 78%, var(--control-bg));
+    }
+
+    .report-breakdown-item.negative {
+      border-color: color-mix(in srgb, var(--red) 24%, var(--line));
+      background: color-mix(in srgb, var(--remove-bg) 56%, var(--panel));
+    }
+
+    .report-breakdown-item.accent {
+      border-color: color-mix(in srgb, var(--brand) 34%, var(--line));
+      background: color-mix(in srgb, var(--brand-soft) 38%, var(--panel));
+    }
+
+    .report-breakdown-label {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 900;
+      text-transform: uppercase;
+      letter-spacing: .08em;
+    }
+
+    .report-breakdown-value {
+      color: var(--ink);
+      font-size: 15px;
+      line-height: 1.2;
+      text-align: right;
+    }
+
+    .report-breakdown-empty {
+      border: 1px dashed var(--line);
+      border-radius: 10px;
+      padding: 14px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.5;
+      text-align: center;
+      background: color-mix(in srgb, var(--panel) 72%, transparent);
     }
 
     .discord-preview {
@@ -3807,6 +4244,10 @@ INDEX_HTML = r"""<!doctype html>
       }
       .ticket-builder { grid-template-columns: 1fr; }
       .template-builder { grid-template-columns: 1fr; }
+      .report-calculator-workspace { grid-template-columns: 1fr; }
+      .report-calculator-aside { position: static; }
+      .report-calculator-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .report-fine-row { grid-template-columns: 1fr; }
       .form-grid { grid-template-columns: 1fr; }
       .option-row { grid-template-columns: 1fr; }
       .audit-grid { grid-template-columns: 1fr; }
@@ -3826,6 +4267,9 @@ INDEX_HTML = r"""<!doctype html>
     }
 
     @media (max-width: 460px) {
+      .report-calculator-heading h2 { font-size: 24px; }
+      .report-calculator-summary { grid-template-columns: 1fr; }
+      .report-participant-head { align-items: flex-start; flex-direction: column; }
       .section-list,
       .sidebar-collapsed .section-list {
         grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -3971,7 +4415,10 @@ INDEX_HTML = r"""<!doctype html>
         <div class="economy-panel">
           <div class="module-header">
             <p>Balances, registros de balance, Avas e informes.</p>
-            <div id="status" class="status">Cargando...</div>
+            <div class="ticket-actions">
+              <button id="exportEconomyButton" class="action-button" type="button">Exportar economia</button>
+              <div id="status" class="status">Cargando...</div>
+            </div>
           </div>
 
           <nav class="tabs" aria-label="Opciones de Economia">
@@ -3979,6 +4426,7 @@ INDEX_HTML = r"""<!doctype html>
             <button class="tab" data-tab="operations">Registro Balance</button>
             <button class="tab" data-tab="avalonians">Registro Avas</button>
             <button class="tab" data-tab="reports">Registro Informes</button>
+            <button class="tab" data-tab="fines">Registro Multas</button>
           </nav>
 
           <section class="metrics" aria-label="Totales">
@@ -4005,6 +4453,7 @@ INDEX_HTML = r"""<!doctype html>
               <p>Gestiona las plantillas de ping que tambien usa el comando /plantilla.</p>
             </div>
             <div class="ticket-actions">
+              <button id="exportTemplatesButton" class="action-button" type="button">Exportar plantillas</button>
               <button id="newTemplateButton" class="action-button primary" type="button">+ Nueva plantilla</button>
               <button id="saveTemplateButton" class="action-button primary" type="button">Guardar plantilla</button>
               <button id="deleteTemplateButton" class="action-button danger" type="button">Eliminar plantilla</button>
@@ -4093,6 +4542,7 @@ INDEX_HTML = r"""<!doctype html>
               <p>Configura paneles, mensajes, opciones, emojis, permisos y publicacion en Discord.</p>
             </div>
             <div class="ticket-actions">
+              <button id="exportTicketsButton" class="action-button" type="button">Exportar tickets</button>
               <button id="createPanelButton" class="action-button primary" type="button">
                 <span>+</span>
                 Crear panel
@@ -4112,6 +4562,35 @@ INDEX_HTML = r"""<!doctype html>
             <div class="ticket-stat"><span>Paneles</span><strong id="ticketPanelTotal">0</strong></div>
             <div class="ticket-stat"><span>Abiertos</span><strong id="ticketOpenTotal">0</strong></div>
             <div class="ticket-stat"><span>Cerrados hoy</span><strong id="ticketClosedTodayTotal">0</strong></div>
+          </section>
+
+          <section class="editor-section" aria-label="Configuracion de multas">
+            <div class="editor-section-header">
+              <div>
+                <strong>Configuracion de multas</strong>
+                <span>Define el canal, rol de bloqueo, rol que resuelve multas y categoria para tickets de multa.</span>
+              </div>
+              <button id="saveFineConfigButton" class="action-button primary" type="button">Guardar multas</button>
+            </div>
+            <div class="form-grid">
+              <div class="field">
+                <label for="fineChannel">Canal de multas</label>
+                <select id="fineChannel"></select>
+              </div>
+              <div class="field">
+                <label for="fineBlockedRole">Rol multado</label>
+                <select id="fineBlockedRole"></select>
+              </div>
+              <div class="field">
+                <label for="fineResolverRole">Rol que resuelve</label>
+                <select id="fineResolverRole"></select>
+              </div>
+              <div class="field">
+                <label for="fineTicketCategory">Categoria ticket multa</label>
+                <select id="fineTicketCategory"></select>
+              </div>
+            </div>
+            <div id="fineConfigStatus" class="status"></div>
           </section>
 
           <section class="ticket-builder" aria-label="Constructor de tickets">
@@ -4366,25 +4845,30 @@ INDEX_HTML = r"""<!doctype html>
         </div>
       </section>
       <section id="reportCalculatorSection" class="module-panel" aria-label="Calculadora de reparto" hidden>
-        <div class="ticket-dashboard">
-          <div class="ticket-toolbar">
-            <div>
+        <div class="ticket-dashboard report-calculator-shell">
+          <div class="ticket-toolbar report-calculator-toolbar">
+            <div class="report-calculator-heading">
+              <div class="section-label">Modulo de reparto</div>
               <h2>Calculadora de reparto</h2>
               <p id="reportCalculatorSubtitle">Carga una Ava desde el boton Enviar informe de Discord.</p>
             </div>
-            <div class="ticket-stat">
-              <span>Integrantes</span>
-              <strong id="reportCalculatorParticipantsTotal">0</strong>
+            <div class="field report-calculator-picker">
+              <label for="reportCalculatorSelect">Pings activos</label>
+              <select id="reportCalculatorSelect">
+                <option value="">Selecciona una Ava</option>
+              </select>
             </div>
           </div>
 
-          <section class="ticket-summary">
+          <section class="ticket-summary report-calculator-summary">
+            <div class="ticket-stat"><span>Integrantes</span><strong id="reportCalculatorParticipantsTotal">0</strong></div>
+            <div class="ticket-stat"><span>Reparten</span><strong id="reportSplitParticipantsTotal">0</strong></div>
             <div id="reportItemsPerUserStat" class="ticket-stat"><span>Items C/U</span><strong id="reportItemsPerUser">0</strong></div>
             <div id="reportSilverPerUserStat" class="ticket-stat"><span>Silver C/U</span><strong id="reportSilverPerUser">0</strong></div>
             <div class="ticket-stat"><span>Total neto</span><strong id="reportNetTotal">0</strong></div>
           </section>
 
-          <section class="editor-section">
+          <section class="editor-section report-calculator-participants">
             <div class="editor-section-header">
               <div>
                 <strong>Integrantes del reparto</strong>
@@ -4394,8 +4878,8 @@ INDEX_HTML = r"""<!doctype html>
             <div id="reportParticipantsList" class="report-participant-list"></div>
           </section>
 
-          <div class="template-builder">
-            <div class="template-editor">
+          <div class="report-calculator-workspace">
+            <div class="template-editor report-calculator-form">
               <div class="editor-section-header">
                 <div>
                   <strong>Datos del informe</strong>
@@ -4431,22 +4915,51 @@ INDEX_HTML = r"""<!doctype html>
                   <label for="reportRepairCost">Reparaciones</label>
                   <input id="reportRepairCost" type="text" placeholder="Ej: 500k">
                 </div>
+                <div id="reportCallerPercentField" class="field" hidden>
+                  <label for="reportCallerPercent">Porcentaje caller</label>
+                  <input id="reportCallerPercent" type="text" placeholder="Ej: 10%">
+                </div>
+                <div id="reportLooterPaymentField" class="field" hidden>
+                  <label for="reportLooterPayment">Pago looter</label>
+                  <input id="reportLooterPayment" type="text" placeholder="Ej: 1m">
+                </div>
+                <div id="reportLooterUserField" class="field" hidden>
+                  <label for="reportLooterUser">Quien fue el looter</label>
+                  <select id="reportLooterUser">
+                    <option value="">Selecciona un integrante</option>
+                  </select>
+                </div>
+                <div id="reportTabSaleField" class="field" hidden>
+                  <label for="reportTabSalePercent">Venta de tab</label>
+                  <input id="reportTabSalePercent" type="text" placeholder="Ej: 15%">
+                </div>
                 <div class="field full">
-                  <label for="reportAdjustments">Multas</label>
-                  <textarea id="reportAdjustments" placeholder="Ej: Cobra:-50%; Heal:-25%"></textarea>
+                  <div class="editor-section report-fines-section">
+                    <div class="editor-section-header">
+                      <div>
+                        <strong>Multas</strong>
+                        <span>Asigna monto, motivo y prueba para los jugadores multados.</span>
+                      </div>
+                      <button id="addReportFineButton" class="action-button" type="button">+ Agregar multa</button>
+                    </div>
+                    <div id="reportFinesList" class="option-list"></div>
+                  </div>
                 </div>
               </div>
-              <div class="publish-row">
+              <div class="publish-row report-calculator-actions">
                 <button id="resetReportCalculatorButton" class="action-button" type="button">Reiniciar calculadora</button>
                 <button id="submitReportCalculatorButton" class="action-button primary" type="button">Enviar informe a evaluacion</button>
                 <div id="reportCalculatorStatus" class="status"></div>
               </div>
             </div>
 
-            <aside>
-              <div class="preview-box">
-                <strong>Balance del reparto</strong>
-                <div id="reportCalculatorBreakdown" class="placeholder-list"></div>
+            <aside class="report-calculator-aside">
+              <div class="preview-box report-calculator-breakdown">
+                <div class="report-calculator-panel-head">
+                  <strong>Balance del reparto</strong>
+                  <span>Resumen neto antes de enviar el informe a evaluacion.</span>
+                </div>
+                <div id="reportCalculatorBreakdown" class="report-breakdown-list"></div>
               </div>
             </aside>
           </div>
@@ -4690,12 +5203,14 @@ INDEX_HTML = r"""<!doctype html>
       albionRegistrationConfig: null,
       albionRegistrations: [],
       reportCalculator: null,
+      reportCalculatorOptions: [],
       reportRequestId: "",
       reportContext: linkedReportSection ? {
         guildId: pageParams.get("guild_id") || "",
         callerId: pageParams.get("caller_id") || "",
         ava: pageParams.get("ava") || ""
       } : null,
+      fineConfig: null,
       csrfToken: "",
       permissionSearch: "",
       loot: {
@@ -4760,6 +5275,18 @@ INDEX_HTML = r"""<!doctype html>
         ["reason", "Motivo"],
         ["date", "Fecha"],
         ["time", "Hora"]
+      ],
+      fines: [
+        ["id", "#", "number"],
+        ["report_ava", "Ava"],
+        ["fined_user_name", "Usuario"],
+        ["amount", "Monto", "number"],
+        ["reason", "Motivo"],
+        ["status", "Estado"],
+        ["created_by_name", "Creado por"],
+        ["paid_by_name", "Pagado por"],
+        ["created_at", "Creado"],
+        ["paid_at", "Pagado"]
       ]
     };
 
@@ -5450,6 +5977,7 @@ INDEX_HTML = r"""<!doctype html>
     function renderTickets() {
       document.getElementById("ticketPanelTotal").textContent = state.ticketPanels.length;
       renderTicketLiveSummary();
+      renderFineConfig();
       const hasPanel = Boolean(currentTicketPanel());
       document.getElementById("clonePanelButton").hidden = !hasPanel;
       document.getElementById("deletePanelButton").hidden = !hasPanel;
@@ -5460,6 +5988,31 @@ INDEX_HTML = r"""<!doctype html>
       renderTicketEditorSections();
       renderTicketRecords();
       renderTicketLiveViewer();
+    }
+
+    function renderFineConfig() {
+      const config = state.fineConfig || {};
+      const channelSelect = document.getElementById("fineChannel");
+      const blockedRoleSelect = document.getElementById("fineBlockedRole");
+      const resolverRoleSelect = document.getElementById("fineResolverRole");
+      const categorySelect = document.getElementById("fineTicketCategory");
+
+      channelSelect.innerHTML = `<option value="">Seleccionar canal</option>${state.ticketChannels.map(channel =>
+        `<option value="${escapeHtml(channel.id)}"># ${escapeHtml(channel.name)}</option>`
+      ).join("")}`;
+      categorySelect.innerHTML = `<option value="">Sin categoria</option>${state.ticketCategories.map(category =>
+        `<option value="${escapeHtml(category.id)}">${escapeHtml(category.name)}</option>`
+      ).join("")}`;
+      const roleOptions = `<option value="">Seleccionar rol</option>${state.ticketRoles.map(role =>
+        `<option value="${escapeHtml(role.id)}">${escapeHtml(role.name)}</option>`
+      ).join("")}`;
+      blockedRoleSelect.innerHTML = roleOptions;
+      resolverRoleSelect.innerHTML = roleOptions;
+
+      channelSelect.value = config.channel_id || "";
+      blockedRoleSelect.value = config.blocked_role_id || "";
+      resolverRoleSelect.value = config.resolver_role_id || "";
+      categorySelect.value = config.ticket_category_id || "";
     }
 
     function renderTicketLiveSummary() {
@@ -6407,8 +6960,16 @@ INDEX_HTML = r"""<!doctype html>
       return {
         showItems: mode !== "silver",
         showSilver: mode !== "items",
-        showCosts: mode !== "items"
+        showCosts: mode !== "items",
+        showBothExtras: mode === "items_silver"
       };
+    }
+
+    function parseReportPercentage(value) {
+      const text = String(value || "").trim().replace(",", ".");
+      const match = text.match(/\d+(?:\.\d+)?/);
+      if (!match) return 0;
+      return Math.max(0, Math.min(Number(match[0]), 100));
     }
 
     function setReportFieldVisible(fieldId, visible) {
@@ -6422,22 +6983,188 @@ INDEX_HTML = r"""<!doctype html>
       setReportFieldVisible("reportSilverField", config.showSilver);
       setReportFieldVisible("reportMapCostField", config.showCosts);
       setReportFieldVisible("reportRepairCostField", config.showCosts);
+      setReportFieldVisible("reportCallerPercentField", config.showBothExtras);
+      setReportFieldVisible("reportLooterPaymentField", config.showBothExtras);
+      const looterPayment = config.showBothExtras ? parseReportAmount(document.getElementById("reportLooterPayment").value) : 0;
+      setReportFieldVisible("reportLooterUserField", config.showBothExtras && looterPayment > 0);
+      setReportFieldVisible("reportTabSaleField", config.showBothExtras);
       return config;
     }
 
+    function populateReportLooterOptions(participants) {
+      const select = document.getElementById("reportLooterUser");
+      const selectedValue = select.value;
+      select.innerHTML = `<option value="">Selecciona un integrante</option>` + participants.map(participant => (
+        `<option value="${escapeHtml(participant.user_id)}">${escapeHtml(participant.display_name || participant.user_id)} - ${escapeHtml(participant.slot)}</option>`
+      )).join("");
+      if (participants.some(participant => participant.user_id === selectedValue)) {
+        select.value = selectedValue;
+      }
+    }
+
+    function reportParticipantOptionsMarkup(participants, selectedValue = "") {
+      return `<option value="">Selecciona un integrante</option>` + participants.map(participant => {
+        const selected = participant.user_id === selectedValue ? " selected" : "";
+        return `<option value="${escapeHtml(participant.user_id)}"${selected}>${escapeHtml(participant.display_name || participant.user_id)} - ${escapeHtml(participant.slot)}</option>`;
+      }).join("");
+    }
+
+    function syncReportFineParticipantOptions(participants) {
+      document.querySelectorAll(".report-fine-user").forEach(select => {
+        const previous = select.value;
+        select.innerHTML = reportParticipantOptionsMarkup(participants, previous);
+      });
+    }
+
+    async function fileToDataUrl(file) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ""));
+        reader.onerror = () => reject(new Error("No pude leer la prueba adjunta."));
+        reader.readAsDataURL(file);
+      });
+    }
+
+    function bindReportFineRow(row) {
+      row.querySelectorAll("select, input").forEach(element => {
+        element.addEventListener("input", () => renderReportCalculator());
+        element.addEventListener("change", () => renderReportCalculator());
+      });
+      row.querySelector(".report-fine-remove").addEventListener("click", () => {
+        row.remove();
+        renderReportCalculator();
+      });
+      row.querySelector(".report-fine-proof").addEventListener("change", async event => {
+        const file = event.target.files?.[0];
+        const label = row.querySelector(".report-fine-proof-name");
+        if (!file) {
+          event.target.dataset.proofDataUrl = "";
+          event.target.dataset.proofName = "";
+          label.textContent = "";
+          return;
+        }
+        try {
+          event.target.dataset.proofDataUrl = await fileToDataUrl(file);
+          event.target.dataset.proofName = file.name;
+          label.textContent = file.name;
+        } catch (error) {
+          event.target.value = "";
+          event.target.dataset.proofDataUrl = "";
+          event.target.dataset.proofName = "";
+          label.textContent = error.message;
+        }
+      });
+    }
+
+    function appendReportFineRow(fine = {}) {
+      const container = document.getElementById("reportFinesList");
+      const participants = state.reportCalculator?.participants || [];
+      const row = document.createElement("div");
+      row.className = "report-fine-row";
+      row.innerHTML = `
+        <div class="field report-fine-user-field">
+          <label>Jugador</label>
+          <select class="report-fine-user">${reportParticipantOptionsMarkup(participants, fine.user_id || "")}</select>
+        </div>
+        <div class="field report-fine-amount-field">
+          <label>Monto</label>
+          <input class="report-fine-amount" type="text" placeholder="Ej: 1m" value="${escapeHtml(fine.amount || "")}">
+        </div>
+        <div class="field report-fine-reason-field">
+          <label>Motivo</label>
+          <input class="report-fine-reason" type="text" placeholder="Describe el motivo" value="${escapeHtml(fine.reason || "")}">
+        </div>
+        <div class="field report-fine-proof-field">
+          <label>Prueba</label>
+          <input class="report-fine-proof" type="file" accept="image/*">
+          <div class="report-fine-proof-name">${escapeHtml(fine.proof_name || "")}</div>
+        </div>
+        <button class="action-button danger report-fine-remove" type="button">Quitar</button>
+      `;
+      const proofInput = row.querySelector(".report-fine-proof");
+      if (fine.proof_data_url) proofInput.dataset.proofDataUrl = fine.proof_data_url;
+      if (fine.proof_name) proofInput.dataset.proofName = fine.proof_name;
+      bindReportFineRow(row);
+      container.appendChild(row);
+    }
+
+    function collectReportFines() {
+      return [...document.querySelectorAll(".report-fine-row")].map(row => {
+        const userSelect = row.querySelector(".report-fine-user");
+        const selectedOption = userSelect.options[userSelect.selectedIndex];
+        const proofInput = row.querySelector(".report-fine-proof");
+        return {
+          user_id: userSelect.value,
+          user_name: selectedOption?.textContent?.split(" - ")[0] || "",
+          slot: selectedOption?.textContent?.split(" - ").slice(1).join(" - ") || "",
+          amount: row.querySelector(".report-fine-amount").value,
+          reason: row.querySelector(".report-fine-reason").value,
+          proof_data_url: proofInput.dataset.proofDataUrl || "",
+          proof_name: proofInput.dataset.proofName || "",
+        };
+      }).filter(fine => fine.user_id && fine.amount && fine.reason);
+    }
+
+    async function loadReportCalculatorOptions() {
+      if (!state.guildId || !state.data?.viewer?.id) {
+        state.reportCalculatorOptions = [];
+        return;
+      }
+      const params = new URLSearchParams({ guild_id: state.guildId, list: "1" });
+      const response = await fetch(`/api/report-calculator?${params.toString()}`, { cache: "no-store" });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || "No pude cargar los pings activos.");
+      state.reportCalculatorOptions = payload.calculators || [];
+      const currentAva = state.reportContext?.ava || "";
+      if (!state.reportCalculatorOptions.length) {
+        state.reportContext = null;
+        state.reportCalculator = null;
+        return;
+      }
+      const selected = state.reportCalculatorOptions.find(item => item.numero_ava === currentAva) || state.reportCalculatorOptions[0];
+      state.reportContext = {
+        guildId: state.guildId,
+        callerId: state.data.viewer.id,
+        ava: selected.numero_ava,
+      };
+    }
+
+    function renderReportCalculatorOptions() {
+      const select = document.getElementById("reportCalculatorSelect");
+      const options = state.reportCalculatorOptions || [];
+      const currentAva = state.reportContext?.ava || "";
+      select.innerHTML = `<option value="">Selecciona una Ava</option>` + options.map(option => {
+        const selected = option.numero_ava === currentAva ? " selected" : "";
+        const suffix = option.report_rejected ? " - Rechazado" : option.report_sent ? " - Enviado" : "";
+        return `<option value="${escapeHtml(option.numero_ava)}"${selected}>${escapeHtml(option.title)}${escapeHtml(suffix)}</option>`;
+      }).join("");
+      select.disabled = options.length === 0;
+    }
+
     function reportCalculatorValues() {
-      const participantCount = state.reportCalculator?.participants?.length || 0;
+      const participants = state.reportCalculator?.participants || [];
+      const participantCount = participants.length;
       const mode = document.getElementById("reportSplitMode").value;
       const config = applyReportModeVisibility(mode);
       const items = config.showItems ? parseReportAmount(document.getElementById("reportItems").value) : 0;
       const silver = config.showSilver ? parseReportAmount(document.getElementById("reportSilver").value) : 0;
       const mapCost = config.showCosts ? parseReportAmount(document.getElementById("reportMapCost").value) : 0;
       const repairCost = config.showCosts ? parseReportAmount(document.getElementById("reportRepairCost").value) : 0;
-      const netSilver = Math.max(silver - mapCost - repairCost, 0);
+      const callerPercent = config.showBothExtras ? parseReportPercentage(document.getElementById("reportCallerPercent").value) : 0;
+      const callerPayment = config.showBothExtras ? Math.floor(silver * callerPercent / 100) : 0;
+      const looterPayment = config.showBothExtras ? parseReportAmount(document.getElementById("reportLooterPayment").value) : 0;
+      const looterUserId = config.showBothExtras && looterPayment > 0 ? document.getElementById("reportLooterUser").value : "";
+      const tabSalePercent = config.showBothExtras ? parseReportPercentage(document.getElementById("reportTabSalePercent").value) : 0;
+      const netSilver = Math.max(silver - callerPayment - looterPayment - mapCost - repairCost, 0);
+      const soldTabValue = config.showBothExtras && tabSalePercent > 0
+        ? Math.floor(items * ((100 - tabSalePercent) / 100))
+        : 0;
+      const splitParticipantCount = participantCount - (looterPayment > 0 && looterUserId ? 1 : 0);
       let itemPool = 0;
       let silverPool = 0;
       if (mode === "items") itemPool = items;
       else if (mode === "silver") silverPool = netSilver;
+      else if (tabSalePercent > 0) silverPool = netSilver + soldTabValue;
       else {
         itemPool = items;
         silverPool = netSilver;
@@ -6449,17 +7176,28 @@ INDEX_HTML = r"""<!doctype html>
         silver,
         mapCost,
         repairCost,
+        callerPercent,
+        callerPayment,
+        looterPayment,
+        looterUserId,
+        tabSalePercent,
+        soldTabValue,
+        splitParticipantCount: Math.max(splitParticipantCount, 0),
         itemPool,
         silverPool,
         total: itemPool + silverPool,
-        itemPerUser: participantCount ? Math.floor(itemPool / participantCount) : 0,
-        silverPerUser: participantCount ? Math.floor(silverPool / participantCount) : 0
+        itemPerUser: splitParticipantCount > 0 ? Math.floor(itemPool / splitParticipantCount) : 0,
+        silverPerUser: splitParticipantCount > 0 ? Math.floor(silverPool / splitParticipantCount) : 0
       };
     }
 
     function renderReportCalculator() {
       const calculator = state.reportCalculator;
       const participants = calculator?.participants || [];
+      renderReportCalculatorOptions();
+      populateReportLooterOptions(participants);
+      syncReportFineParticipantOptions(participants);
+      const selectedLooterId = document.getElementById("reportLooterUser").value;
       document.getElementById("reportCalculatorParticipantsTotal").textContent = participants.length;
       document.getElementById("reportCalculatorSubtitle").textContent = calculator
         ? `${calculator.title} - Caller: ${calculator.caller_name || calculator.caller_id}`
@@ -6467,41 +7205,105 @@ INDEX_HTML = r"""<!doctype html>
       document.getElementById("reportParticipantsList").innerHTML = participants.length
         ? participants.map(participant => `
             <article class="report-participant-card">
-              <strong>${escapeHtml(`${participant.index}. ${participant.slot}`)}</strong>
-              <span class="muted">${escapeHtml(participant.user_id)}</span>
+              <div class="report-participant-head">
+                <strong>${escapeHtml(`${participant.index}. ${participant.slot}`)}</strong>
+                ${participant.user_id === selectedLooterId ? '<span class="report-participant-role">Looter</span>' : ''}
+              </div>
+              <span class="report-participant-name">${escapeHtml(participant.display_name || participant.user_id)}</span>
             </article>
           `).join("")
-        : `<article class="report-participant-card"><strong>Sin integrantes cargados</strong><span class="muted">Abre una Ava finalizada desde Discord.</span></article>`;
+        : `<article class="report-participant-card">
+              <div class="report-participant-head">
+                <strong>Sin integrantes cargados</strong>
+              </div>
+              <span class="muted">Abre una Ava finalizada desde Discord.</span>
+            </article>
+          `;
 
       const values = reportCalculatorValues();
-      document.getElementById("reportItemsPerUserStat").hidden = !values.config.showItems;
-      document.getElementById("reportSilverPerUserStat").hidden = !values.config.showSilver;
+      document.getElementById("reportSplitParticipantsTotal").textContent = formatNumber(values.splitParticipantCount);
+      document.getElementById("reportItemsPerUserStat").hidden = values.itemPool <= 0;
+      document.getElementById("reportSilverPerUserStat").hidden = values.silverPool <= 0;
       document.getElementById("reportItemsPerUser").textContent = formatNumber(values.itemPerUser);
       document.getElementById("reportSilverPerUser").textContent = formatNumber(values.silverPerUser);
       document.getElementById("reportNetTotal").textContent = formatNumber(values.total);
       const breakdown = [];
-      if (values.config.showItems) breakdown.push(`Items netos: ${escapeHtml(formatNumber(values.itemPool))}`);
-      if (values.config.showSilver) breakdown.push(`Silver neto: ${escapeHtml(formatNumber(values.silverPool))}`);
+      if (values.itemPool) {
+        breakdown.push({
+          label: "Items netos",
+          value: formatNumber(values.itemPool),
+          tone: "accent"
+        });
+      }
+      if (values.silverPool) {
+        breakdown.push({
+          label: "Silver neto",
+          value: formatNumber(values.silverPool),
+          tone: "accent"
+        });
+      }
       if (values.config.showCosts) {
-        breakdown.push(`Mapa: -${escapeHtml(formatNumber(values.mapCost))}`);
-        breakdown.push(`Reparaciones: -${escapeHtml(formatNumber(values.repairCost))}`);
+        if (values.callerPayment) {
+          breakdown.push({
+            label: `Caller (${values.callerPercent}%)`,
+            value: `-${formatNumber(values.callerPayment)}`,
+            tone: "negative"
+          });
+        }
+        if (values.looterPayment) {
+          breakdown.push({
+            label: "Pago looter",
+            value: `-${formatNumber(values.looterPayment)}`,
+            tone: "negative"
+          });
+        }
+        if (values.mapCost) {
+          breakdown.push({
+            label: "Mapa",
+            value: `-${formatNumber(values.mapCost)}`,
+            tone: "negative"
+          });
+        }
+        if (values.repairCost) {
+          breakdown.push({
+            label: "Reparaciones",
+            value: `-${formatNumber(values.repairCost)}`,
+            tone: "negative"
+          });
+        }
       }
       document.getElementById("reportCalculatorBreakdown").innerHTML = breakdown.length
-        ? breakdown.join("<br>")
-        : "Completa los datos para calcular el reparto.";
-      document.getElementById("submitReportCalculatorButton").disabled = !calculator || calculator.report_sent || calculator.cancelled || !calculator.finalized;
+        ? breakdown.map(item => `
+            <div class="report-breakdown-item ${item.tone ? escapeHtml(item.tone) : ""}">
+              <span class="report-breakdown-label">${escapeHtml(item.label)}</span>
+              <strong class="report-breakdown-value">${escapeHtml(item.value)}</strong>
+            </div>
+          `).join("")
+        : `<div class="report-breakdown-empty">Completa los datos para calcular el reparto.</div>`;
+      if (values.looterPayment && !values.looterUserId) {
+        document.getElementById("reportCalculatorBreakdown").innerHTML += `
+          <div class="report-breakdown-empty">Selecciona quien fue el looter para excluirlo del split.</div>
+        `;
+      }
+      document.getElementById("submitReportCalculatorButton").disabled = !calculator || calculator.report_sent || calculator.cancelled || !calculator.finalized || (values.looterPayment > 0 && !values.looterUserId);
     }
 
     function resetReportCalculator() {
-      ["reportEstimated", "reportItems", "reportSilver", "reportMapCost", "reportRepairCost", "reportAdjustments"].forEach(id => {
+      ["reportEstimated", "reportItems", "reportSilver", "reportMapCost", "reportRepairCost", "reportCallerPercent", "reportLooterPayment", "reportLooterUser", "reportTabSalePercent"].forEach(id => {
         document.getElementById(id).value = "";
       });
+      document.getElementById("reportFinesList").innerHTML = "";
       document.getElementById("reportCalculatorStatus").textContent = "";
       renderReportCalculator();
     }
 
     async function loadReportCalculator() {
-      if (!state.reportContext) return;
+      renderReportCalculatorOptions();
+      if (!state.reportContext) {
+        state.reportCalculator = null;
+        renderReportCalculator();
+        return;
+      }
       const params = new URLSearchParams({
         guild_id: state.reportContext.guildId,
         caller_id: state.reportContext.callerId,
@@ -6509,8 +7311,16 @@ INDEX_HTML = r"""<!doctype html>
       });
       const response = await fetch(`/api/report-calculator?${params.toString()}`, { cache: "no-store" });
       const payload = await response.json();
-      if (!response.ok) throw new Error(payload.error || "No pude cargar la calculadora.");
+      if (!response.ok) {
+        state.reportCalculator = null;
+        renderReportCalculator();
+        if (response.status === 404) {
+          throw new Error("Esta Ava ya no esta activa o ya fue cerrada. Abrela de nuevo desde Discord.");
+        }
+        throw new Error(payload.error || "No pude cargar la calculadora.");
+      }
       state.reportCalculator = payload.calculator;
+      document.getElementById("reportFinesList").innerHTML = "";
       state.guildId = payload.calculator.guild_id;
       renderReportCalculator();
     }
@@ -6533,11 +7343,23 @@ INDEX_HTML = r"""<!doctype html>
           items: config.showItems ? document.getElementById("reportItems").value : "",
           silver: config.showSilver ? document.getElementById("reportSilver").value : "",
           costs: config.showCosts ? `mapa=${document.getElementById("reportMapCost").value}; repa=${document.getElementById("reportRepairCost").value}` : "",
-          adjustments: document.getElementById("reportAdjustments").value
+          caller_percentage: config.showBothExtras ? document.getElementById("reportCallerPercent").value : "",
+          looter_payment: config.showBothExtras ? document.getElementById("reportLooterPayment").value : "",
+          looter_user_id: config.showBothExtras ? document.getElementById("reportLooterUser").value : "",
+          tab_sale_percentage: config.showBothExtras ? document.getElementById("reportTabSalePercent").value : "",
+          adjustments: "",
+          fines: collectReportFines(),
         })
       });
       const payload = await response.json();
-      if (!response.ok) throw new Error(payload.error || "No pude enviar el informe.");
+      if (!response.ok) {
+        if (response.status === 404) {
+          state.reportCalculator = null;
+          renderReportCalculator();
+          throw new Error("Esta Ava ya no esta activa o ya fue cerrada. Abrela de nuevo desde Discord.");
+        }
+        throw new Error(payload.error || "No pude enviar el informe.");
+      }
       state.reportRequestId = payload.request.id;
       status.textContent = "El bot esta procesando el informe...";
       await pollReportRequest();
@@ -6615,7 +7437,7 @@ INDEX_HTML = r"""<!doctype html>
       if (access.admin) return true;
       if (section === "tickets") return Boolean(access.tickets);
       if (section === "permissions") return Boolean(access.permissions);
-      if (section === "report-calculator") return Boolean(state.reportContext);
+      if (section === "report-calculator") return Boolean(state.guildId);
       return false;
     }
 
@@ -6634,6 +7456,7 @@ INDEX_HTML = r"""<!doctype html>
         operations: [],
         avalonians: [],
         reports: [],
+        fines: [],
         totals: { players: 0, items: 0, silver: 0, total: 0 },
         updatedAt: "",
         viewer: {}
@@ -6656,6 +7479,7 @@ INDEX_HTML = r"""<!doctype html>
       state.guildId = state.data.selectedGuildId || "";
       if (state.guildId) localStorage.setItem("dashboardGuildId", state.guildId);
       await loadTicketConfig();
+      await loadReportCalculatorOptions();
       await loadReportCalculator();
       render();
     }
@@ -6672,7 +7496,7 @@ INDEX_HTML = r"""<!doctype html>
       if (state.ticketConfigGuildId === state.guildId && state.ticketPanels.length) return;
 
       const params = new URLSearchParams({ guild_id: state.guildId });
-      const [panelsResponse, channelsResponse, categoriesResponse, emojisResponse, rolesResponse, recordsResponse, auditResponse, auditEventsResponse, templatesResponse, botPermissionsResponse, albionRegistrationResponse] = await Promise.all([
+      const [panelsResponse, channelsResponse, categoriesResponse, emojisResponse, rolesResponse, recordsResponse, auditResponse, auditEventsResponse, templatesResponse, botPermissionsResponse, albionRegistrationResponse, fineConfigResponse] = await Promise.all([
         fetch(`/api/ticket-panels?${params.toString()}`, { cache: "no-store" }),
         fetch(`/api/discord-channels?${params.toString()}`, { cache: "no-store" }),
         fetch(`/api/discord-categories?${params.toString()}`, { cache: "no-store" }),
@@ -6683,7 +7507,8 @@ INDEX_HTML = r"""<!doctype html>
         fetch(`/api/audit-events?${params.toString()}`, { cache: "no-store" }),
         fetch(`/api/ping-templates?${params.toString()}`, { cache: "no-store" }),
         fetch(`/api/bot-permissions?${params.toString()}`, { cache: "no-store" }),
-        fetch(`/api/albion-registration?${params.toString()}`, { cache: "no-store" })
+        fetch(`/api/albion-registration?${params.toString()}`, { cache: "no-store" }),
+        fetch(`/api/fine-config?${params.toString()}`, { cache: "no-store" })
       ]);
 
       if (panelsResponse.ok) {
@@ -6739,6 +7564,9 @@ INDEX_HTML = r"""<!doctype html>
         const payload = await albionRegistrationResponse.json();
         state.albionRegistrationConfig = payload.config || null;
         state.albionRegistrations = payload.registrations || [];
+      }
+      if (fineConfigResponse.ok) {
+        state.fineConfig = await fineConfigResponse.json();
       }
       state.ticketConfigGuildId = state.guildId;
       state.ticketPanelsDirty = false;
@@ -6903,6 +7731,25 @@ INDEX_HTML = r"""<!doctype html>
       state.albionRegistrations = payload.registrations || [];
       renderAlbionRegistration();
       status.textContent = `Configuracion guardada para ${payload.config?.albion_guild_name || "el gremio"}.`;
+    }
+
+    async function saveFineConfig() {
+      const response = await fetch("/api/fine-config", {
+        method: "POST",
+        headers: csrfHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({
+          guild_id: state.guildId,
+          channel_id: document.getElementById("fineChannel").value,
+          blocked_role_id: document.getElementById("fineBlockedRole").value,
+          resolver_role_id: document.getElementById("fineResolverRole").value,
+          ticket_category_id: document.getElementById("fineTicketCategory").value,
+        })
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || "No pude guardar la configuracion de multas.");
+      state.fineConfig = payload;
+      document.getElementById("fineConfigStatus").textContent = "Configuracion de multas guardada.";
+      renderFineConfig();
     }
 
     async function publishCurrentTicketPanel() {
@@ -7262,11 +8109,32 @@ INDEX_HTML = r"""<!doctype html>
       });
     });
 
+    document.getElementById("saveFineConfigButton").addEventListener("click", () => {
+      saveFineConfig().catch(error => {
+        document.getElementById("fineConfigStatus").textContent = error.message;
+      });
+    });
+
     document.getElementById("savePermissionsButton").addEventListener("click", () => {
       state.botPermissions = collectBotPermissions();
       saveBotPermissions().catch(error => {
         document.getElementById("permissionsStatus").textContent = error.message;
       });
+    });
+
+    document.getElementById("exportEconomyButton").addEventListener("click", () => {
+      if (!state.guildId) return;
+      window.location.href = `/api/export/economy?${new URLSearchParams({ guild_id: state.guildId }).toString()}`;
+    });
+
+    document.getElementById("exportTemplatesButton").addEventListener("click", () => {
+      if (!state.guildId) return;
+      window.location.href = `/api/export/templates?${new URLSearchParams({ guild_id: state.guildId }).toString()}`;
+    });
+
+    document.getElementById("exportTicketsButton").addEventListener("click", () => {
+      if (!state.guildId) return;
+      window.location.href = `/api/export/tickets?${new URLSearchParams({ guild_id: state.guildId }).toString()}`;
     });
 
     document.getElementById("saveAlbionRegistrationButton").addEventListener("click", () => {
@@ -7275,9 +8143,32 @@ INDEX_HTML = r"""<!doctype html>
       });
     });
 
-    ["reportSplitMode", "reportEstimated", "reportItems", "reportSilver", "reportMapCost", "reportRepairCost", "reportAdjustments"].forEach(id => {
+    ["reportSplitMode", "reportEstimated", "reportItems", "reportSilver", "reportMapCost", "reportRepairCost", "reportCallerPercent", "reportLooterPayment", "reportLooterUser", "reportTabSalePercent"].forEach(id => {
       document.getElementById(id).addEventListener("input", renderReportCalculator);
       document.getElementById(id).addEventListener("change", renderReportCalculator);
+    });
+
+    document.getElementById("addReportFineButton").addEventListener("click", () => {
+      appendReportFineRow();
+      renderReportCalculator();
+    });
+
+    document.getElementById("reportCalculatorSelect").addEventListener("change", event => {
+      const ava = event.target.value;
+      if (!ava) {
+        state.reportContext = null;
+        state.reportCalculator = null;
+        renderReportCalculator();
+        return;
+      }
+      state.reportContext = {
+        guildId: state.guildId,
+        callerId: state.data?.viewer?.id || "",
+        ava,
+      };
+      loadReportCalculator().catch(error => {
+        document.getElementById("reportCalculatorStatus").textContent = error.message;
+      });
     });
 
     document.getElementById("submitReportCalculatorButton").addEventListener("click", () => {
@@ -7379,6 +8270,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def send_json(self, status, data):
         self.send_text(status, json.dumps(data, ensure_ascii=False), "application/json")
+
+    def send_bytes(self, status, content, content_type, headers=None):
+        payload = content if isinstance(content, bytes) else bytes(content)
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Cache-Control", "no-store")
+        for key, value in (headers or {}).items():
+            self.send_header(key, value)
+        self.end_headers()
+        self.wfile.write(payload)
 
     def read_json_body(self):
         length = int(self.headers.get("Content-Length", "0") or 0)
@@ -7737,6 +8639,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     payload["operations"] = []
                     payload["avalonians"] = []
                     payload["reports"] = []
+                    payload["fines"] = []
                     payload["totals"] = {"players": 0, "items": 0, "silver": 0, "total": 0}
                 self.send_json(200, payload)
             except Exception as exc:
@@ -7767,6 +8670,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
             caller_id = query.get("caller_id", [""])[0]
             numero_ava = query.get("ava", [""])[0]
             request_id = query.get("request_id", [""])[0]
+            if query.get("list", [""])[0] == "1":
+                caller_id = str(session.get("user", {}).get("id") or "")
+                if not guild_id or not self.can_access_report_calculator(session, guild_id, caller_id):
+                    self.send_json(403, {"error": "No tienes acceso a ese servidor."})
+                    return
+                self.send_json(200, {"calculators": get_active_report_calculators_for_user(guild_id, caller_id)})
+                return
             if request_id:
                 request = ReportDashboardRepository().get(request_id)
                 payload = request.get("payload", {}) if request else {}
@@ -7789,9 +8699,85 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
             state = get_active_avalonian_state(guild_id, caller_id, numero_ava)
             if not state:
-                self.send_json(404, {"error": "No encontre esta Ava."})
+                self.send_json(404, {"error": "Esta Ava ya no esta activa o ya fue cerrada. Abrela de nuevo desde Discord."})
                 return
             self.send_json(200, {"calculator": serialize_report_calculator_state(state)})
+            return
+
+        if parsed.path == "/api/fine-config":
+            session = self.get_authenticated_session()
+            if not session:
+                return
+
+            query = parse_qs(parsed.query)
+            guild_id = query.get("guild_id", [""])[0]
+            if not guild_id or not self.can_access_guild_or_tickets(session, guild_id):
+                self.send_json(403, {"error": "No tienes acceso a ese servidor."})
+                return
+            self.send_json(200, get_fine_config_payload(guild_id))
+            return
+
+        if parsed.path == "/api/fines":
+            session = self.get_authenticated_session()
+            if not session:
+                return
+
+            query = parse_qs(parsed.query)
+            guild_id = query.get("guild_id", [""])[0]
+            if not guild_id or not self.can_access_guild_or_tickets(session, guild_id):
+                self.send_json(403, {"error": "No tienes acceso a ese servidor."})
+                return
+            self.send_json(200, get_guild_fines_payload(guild_id))
+            return
+
+        if parsed.path in {"/api/export/economy", "/api/export/templates", "/api/export/tickets"}:
+            session = self.get_authenticated_session()
+            if not session:
+                return
+
+            query = parse_qs(parsed.query)
+            guild_id = query.get("guild_id", [""])[0]
+            if not guild_id or not self.can_access_guild_or_tickets(session, guild_id):
+                self.send_text(403, "No tienes acceso a ese servidor.", "text/plain")
+                return
+
+            guild_name = next(
+                (guild.get("name") for guild in session.get("guilds", []) if str(guild.get("id")) == str(guild_id)),
+                f"Servidor {guild_id}",
+            )
+            if parsed.path == "/api/export/economy":
+                payload = build_dashboard_data(guild_id).copy()
+                export_data = {
+                    "guild_id": guild_id,
+                    "guild_name": guild_name,
+                    "balances": payload.get("balances", []),
+                    "operations": payload.get("operations", []),
+                    "avalonians": payload.get("avalonians", []),
+                    "reports": payload.get("reports", []),
+                    "fines": payload.get("fines", []),
+                }
+                file_name = f"economia_{guild_id}.json"
+            elif parsed.path == "/api/export/templates":
+                export_data = {
+                    "guild_id": guild_id,
+                    "guild_name": guild_name,
+                    "templates": PingTemplateService().get_templates(guild_id, include_scratch=True),
+                }
+                file_name = f"plantillas_{guild_id}.json"
+            else:
+                export_data = {
+                    "guild_id": guild_id,
+                    "guild_name": guild_name,
+                    "panels": get_guild_ticket_panels(guild_id),
+                    "records": get_guild_ticket_records(guild_id),
+                }
+                file_name = f"tickets_{guild_id}.json"
+            self.send_bytes(
+                200,
+                json.dumps(export_data, ensure_ascii=False, indent=2).encode("utf-8"),
+                "application/json",
+                headers={"Content-Disposition": f'attachment; filename="{file_name}"'},
+            )
             return
 
         if parsed.path == "/api/albion-registration":
@@ -8057,7 +9043,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
                 state = get_active_avalonian_state(guild_id, caller_id, numero_ava)
                 if not state:
-                    self.send_json(404, {"error": "No encontre esta Ava."})
+                    self.send_json(404, {"error": "Esta Ava ya no esta activa o ya fue cerrada. Abrela de nuevo desde Discord."})
                     return
                 if not state.get("finalized") or state.get("cancelled") or state.get("report_sent"):
                     self.send_json(400, {"error": "Esta Ava no esta disponible para enviar informe."})
@@ -8068,6 +9054,31 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     self.send_json(400, {"error": "Selecciona un modo de reparto valido."})
                     return
 
+                fines = []
+                raw_fines = body.get("fines", [])
+                if isinstance(raw_fines, list):
+                    for index, entry in enumerate(raw_fines, start=1):
+                        if not isinstance(entry, dict):
+                            continue
+                        proof_path = ""
+                        proof_name = ""
+                        if entry.get("proof_data_url"):
+                            proof_path, proof_name = store_embedded_image(
+                                entry.get("proof_data_url"),
+                                prefix=f"{guild_id}_{caller_id}_{numero_ava}_{index}_{int(time.time())}",
+                            )
+                        fines.append(
+                            {
+                                "user_id": str(entry.get("user_id") or ""),
+                                "user_name": str(entry.get("user_name") or "")[:120],
+                                "slot": str(entry.get("slot") or "")[:80],
+                                "amount": str(entry.get("amount") or "")[:50],
+                                "reason": str(entry.get("reason") or "")[:300],
+                                "proof_path": proof_path,
+                                "proof_name": proof_name or str(entry.get("proof_name") or "")[:120],
+                            }
+                        )
+
                 request = ReportDashboardRepository().create({
                     "guild_id": guild_id,
                     "caller_id": caller_id,
@@ -8076,10 +9087,33 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     "silver": str(body.get("silver") or "")[:50],
                     "items": str(body.get("items") or "")[:50],
                     "costs": str(body.get("costs") or "")[:120],
+                    "caller_percentage": str(body.get("caller_percentage") or "")[:20],
+                    "looter_payment": str(body.get("looter_payment") or "")[:50],
+                    "looter_user_id": str(body.get("looter_user_id") or "")[:30],
+                    "tab_sale_percentage": str(body.get("tab_sale_percentage") or "")[:20],
                     "adjustments": str(body.get("adjustments") or "")[:500],
+                    "fines": fines,
                     "split_mode": split_mode,
                 })
                 self.send_json(202, {"request": request})
+            except Exception as exc:
+                self.send_json(500, {"error": str(exc)})
+            return
+
+        if parsed.path == "/api/fine-config":
+            session = self.get_authenticated_session()
+            if not session:
+                return
+            if not self.validate_csrf(session):
+                return
+
+            try:
+                body = self.read_json_body()
+                guild_id = str(body.get("guild_id") or "")
+                if not guild_id or not self.can_access_guild_or_tickets(session, guild_id):
+                    self.send_json(403, {"error": "No tienes acceso a ese servidor."})
+                    return
+                self.send_json(200, save_fine_config(guild_id, body))
             except Exception as exc:
                 self.send_json(500, {"error": str(exc)})
             return
