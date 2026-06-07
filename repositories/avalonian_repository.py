@@ -1,7 +1,7 @@
-import json
 import os
 
 from repositories.balance_repository import DATA_DIR
+from utils.json_store import mutate_json, read_json, write_json
 
 AVALONIAN_FILE = os.path.join(DATA_DIR, "avalonian_interactions.json")
 
@@ -14,22 +14,22 @@ class AvalonianRepository:
             self.save({})
 
     def load(self):
-        with open(AVALONIAN_FILE, "r", encoding="utf-8-sig") as f:
-            return json.load(f)
+        return read_json(AVALONIAN_FILE, {})
 
     def save(self, data):
-        with open(AVALONIAN_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=4, ensure_ascii=False)
+        write_json(AVALONIAN_FILE, data)
 
     def append(self, guild_id, interaction):
-        data = self.load()
         gid = str(guild_id)
 
-        if gid not in data:
-            data[gid] = []
+        def mutate(data):
+            if gid not in data:
+                data[gid] = []
 
-        data[gid].append(interaction)
-        self.save(data)
+            data[gid].append(interaction)
+            return data
+
+        mutate_json(AVALONIAN_FILE, {}, mutate)
 
     def get_by_guild(self, guild_id):
         data = self.load()

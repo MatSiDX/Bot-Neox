@@ -1,7 +1,7 @@
-import json
 import os
 
 from repositories.balance_repository import DATA_DIR
+from utils.json_store import mutate_json, read_json, write_json
 
 ACTIVE_AVALONIAN_FILE = os.path.join(DATA_DIR, "active_avalonian_pings.json")
 
@@ -14,44 +14,48 @@ class ActiveAvalonianRepository:
             self.save({})
 
     def load(self):
-        with open(ACTIVE_AVALONIAN_FILE, "r", encoding="utf-8-sig") as f:
-            return json.load(f)
+        return read_json(ACTIVE_AVALONIAN_FILE, {})
 
     def save(self, data):
-        with open(ACTIVE_AVALONIAN_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=4, ensure_ascii=False)
+        write_json(ACTIVE_AVALONIAN_FILE, data)
 
     def upsert(self, state):
-        data = self.load()
         guild_id = str(state["guild_id"])
         caller_id = str(state["caller_id"])
         numero_ava = str(state["numero_ava"])
 
-        if guild_id not in data:
-            data[guild_id] = {}
-        if caller_id not in data[guild_id]:
-            data[guild_id][caller_id] = {}
+        def mutate(data):
+            if guild_id not in data:
+                data[guild_id] = {}
+            if caller_id not in data[guild_id]:
+                data[guild_id][caller_id] = {}
 
-        data[guild_id][caller_id][numero_ava] = state
-        self.save(data)
+            data[guild_id][caller_id][numero_ava] = state
+            return data
+
+        mutate_json(ACTIVE_AVALONIAN_FILE, {}, mutate)
 
     def remove(self, guild_id, caller_id, numero_ava):
-        data = self.load()
         gid = str(guild_id)
         cid = str(caller_id)
         ava = str(numero_ava)
+        changed = {"value": False}
 
-        if gid not in data or cid not in data[gid] or ava not in data[gid][cid]:
-            return False
+        def mutate(data):
+            if gid not in data or cid not in data[gid] or ava not in data[gid][cid]:
+                return data
 
-        data[gid][cid].pop(ava, None)
-        if not data[gid][cid]:
-            data[gid].pop(cid, None)
-        if not data[gid]:
-            data.pop(gid, None)
+            data[gid][cid].pop(ava, None)
+            if not data[gid][cid]:
+                data[gid].pop(cid, None)
+            if not data[gid]:
+                data.pop(gid, None)
 
-        self.save(data)
-        return True
+            changed["value"] = True
+            return data
+
+        mutate_json(ACTIVE_AVALONIAN_FILE, {}, mutate)
+        return changed["value"]
 
     def get_all_states(self):
         data = self.load()

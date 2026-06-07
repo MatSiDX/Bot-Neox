@@ -7,6 +7,7 @@ import discord
 from discord.ext import commands
 
 from repositories.balance_repository import DATA_DIR
+from utils.json_store import mutate_json, read_json, write_json
 
 AUDIT_CONFIG_FILE = os.path.join(DATA_DIR, "audit_config.json")
 AUDIT_EVENTS_FILE = os.path.join(DATA_DIR, "audit_events.json")
@@ -17,14 +18,7 @@ class AuditCog(commands.Cog):
         self.bot = bot
 
     def load_config(self):
-        if not os.path.isfile(AUDIT_CONFIG_FILE):
-            return {}
-
-        try:
-            with open(AUDIT_CONFIG_FILE, "r", encoding="utf-8-sig") as f:
-                return json.load(f)
-        except (json.JSONDecodeError, OSError):
-            return {}
+        return read_json(AUDIT_CONFIG_FILE, {})
 
     def get_channel_id(self, guild_id, category):
         data = self.load_config()
@@ -34,25 +28,18 @@ class AuditCog(commands.Cog):
         return int(value) if value else 0
 
     def append_event(self, guild_id, category, title, description):
-        data = {}
-        if os.path.isfile(AUDIT_EVENTS_FILE):
-            try:
-                with open(AUDIT_EVENTS_FILE, "r", encoding="utf-8-sig") as f:
-                    data = json.load(f)
-            except (json.JSONDecodeError, OSError):
-                data = {}
+        def mutate(data):
+            events = data.setdefault(str(guild_id), [])
+            events.append({
+                "category": category,
+                "title": title,
+                "description": description,
+                "created_at": datetime.now().strftime("%d/%m/%Y | %H:%M"),
+            })
+            data[str(guild_id)] = events[-1000:]
+            return data
 
-        events = data.setdefault(str(guild_id), [])
-        events.append({
-            "category": category,
-            "title": title,
-            "description": description,
-            "created_at": datetime.now().strftime("%d/%m/%Y | %H:%M"),
-        })
-        data[str(guild_id)] = events[-1000:]
-        os.makedirs(DATA_DIR, exist_ok=True)
-        with open(AUDIT_EVENTS_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=4, ensure_ascii=False)
+        mutate_json(AUDIT_EVENTS_FILE, {}, mutate)
 
     async def send_audit(self, guild, category, title, description, *, color=discord.Color.blurple()):
         self.append_event(guild.id, category, title, description)

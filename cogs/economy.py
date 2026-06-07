@@ -22,6 +22,8 @@ from services.permission_service import (
     PermissionService,
 )
 from services.report_service import ReportService
+from services.report_runtime_service import ReportRuntimeService
+from repositories.report_dashboard_repository import ReportDashboardRepository
 from utils.formatters import format_number
 from views.avalonian_ping_view import AvalonSignupView
 from views.top_view import TopView
@@ -146,8 +148,11 @@ class EconomyCog(commands.Cog):
         self.ping_template_service = PingTemplateService()
         self.permission_service = PermissionService()
         self.report_service = ReportService()
+        self.report_runtime_service = ReportRuntimeService()
+        self.report_dashboard_repository = ReportDashboardRepository()
         self.active_avalonian_views = {}
         self.restore_task = None
+        self.report_dashboard_task = None
         self.restored_active_views = False
 
     def has_economy_permission(self, interaction):
@@ -318,6 +323,7 @@ class EconomyCog(commands.Cog):
             avalonian_service=self.avalonian_service,
             config_service=self.config_service,
             report_service=self.report_service,
+            report_runtime_service=self.report_runtime_service,
             permission_service=self.permission_service,
             balance_service=self.service,
             persist_callback=self.persist_active_view_state,
@@ -484,13 +490,83 @@ class EconomyCog(commands.Cog):
     def remove_active_view_state(self, guild_id, caller_id, numero_ava):
         self.active_avalonian_service.remove_state(guild_id, caller_id, numero_ava)
 
+    def resolve_active_avalonian_view(self, *, guild_id, caller_id, numero_ava):
+        return self.active_avalonian_views.get((guild_id, caller_id, numero_ava))
+
     async def cog_load(self):
         if self.restore_task is None:
             self.restore_task = self.bot.loop.create_task(self.restore_active_avalonian_views())
+        if self.report_dashboard_task is None:
+            self.report_dashboard_task = self.bot.loop.create_task(
+                self.process_dashboard_report_requests()
+            )
 
     def cog_unload(self):
         if self.restore_task and not self.restore_task.done():
             self.restore_task.cancel()
+        if self.report_dashboard_task and not self.report_dashboard_task.done():
+            self.report_dashboard_task.cancel()
+
+    async def process_dashboard_report_requests(self):
+        await self.bot.wait_until_ready()
+        while not self.bot.is_closed():
+            if not self.restored_active_views:
+                await asyncio.sleep(1)
+                continue
+            for request in self.report_dashboard_repository.pending():
+                request_id = request.get("id")
+                payload = request.get("payload") or {}
+                key = (
+                    int(payload.get("guild_id", 0) or 0),
+                    int(payload.get("caller_id", 0) or 0),
+                    int(payload.get("numero_ava", 0) or 0),
+                )
+                view = self.active_avalonian_views.get(key)
+                if not view:
+                    self.report_dashboard_repository.mark(
+                        request_id,
+                        "error",
+                        "No encontre la Ava activa.",
+                    )
+                    continue
+
+                guild = self.bot.get_guild(key[0])
+                caller = guild.get_member(key[1]) if guild else None
+                if guild and caller is None:
+                    try:
+                        caller = await guild.fetch_member(key[1])
+                    except discord.HTTPException:
+                        caller = None
+                if not guild or not caller:
+                    self.report_dashboard_repository.mark(
+                        request_id,
+                        "error",
+                        "No encontre al caller dentro del servidor.",
+                    )
+                    continue
+
+                try:
+                    await view.publish_report(
+                        guild=guild,
+                        caller=caller,
+                        client=self.bot,
+                        estimated=payload.get("estimated", ""),
+                        silver_text=payload.get("silver", ""),
+                        items_text=payload.get("items", ""),
+                        costs_text=payload.get("costs", ""),
+                        adjustments_text=payload.get("adjustments", ""),
+                        split_mode=payload.get("split_mode", "items"),
+                    )
+                except Exception as exc:
+                    self.report_dashboard_repository.mark(
+                        request_id,
+                        "error",
+                        str(exc),
+                    )
+                else:
+                    self.report_dashboard_repository.mark(request_id, "completed")
+
+            await asyncio.sleep(2)
 
     async def restore_active_avalonian_views(self):
         await self.bot.wait_until_ready()
@@ -530,6 +606,7 @@ class EconomyCog(commands.Cog):
                 avalonian_service=self.avalonian_service,
                 config_service=self.config_service,
                 report_service=self.report_service,
+                report_runtime_service=self.report_runtime_service,
                 permission_service=self.permission_service,
                 balance_service=self.service,
                 persist_callback=self.persist_active_view_state,
@@ -541,6 +618,85 @@ class EconomyCog(commands.Cog):
 
             if view.cancelled and (view.delete_task is None or view.delete_task.done()):
                 view.delete_task = asyncio.create_task(view.delete_cancelled_message_later())
+
+        await self.restore_report_runtime_views()
+
+    async def fetch_runtime_message(self, channel_id, message_id):
+        channel = self.bot.get_channel(channel_id)
+        if channel is None:
+            try:
+                channel = await self.bot.fetch_channel(channel_id)
+            except discord.HTTPException:
+                return None
+
+        try:
+            return await channel.fetch_message(message_id)
+        except discord.HTTPException:
+            return None
+
+    async def restore_report_runtime_views(self):
+        from views.report_review_view import ApprovedReportBalanceView, ReportReviewView
+
+        for state in self.report_runtime_service.get_reviews():
+            guild_id = int(state.get("guild_id", 0))
+            channel_id = int(state.get("channel_id", 0))
+            message_id = int(state.get("message_id", 0))
+            if not all([guild_id, channel_id, message_id]):
+                self.report_runtime_service.remove_review(message_id)
+                continue
+
+            message = await self.fetch_runtime_message(channel_id, message_id)
+            if message is None:
+                self.report_runtime_service.remove_review(message_id)
+                continue
+
+            view = ReportReviewView(
+                report_data=state.get("report_data", {}),
+                approved_channel_id=int(state.get("approved_channel_id", 0)),
+                report_service=self.report_service,
+                permission_service=self.permission_service,
+                balance_service=self.service,
+                source_view_resolver=self.resolve_active_avalonian_view,
+                runtime_service=self.report_runtime_service,
+                guild_id=guild_id,
+                message_id=message_id,
+            )
+            view.message = message
+            self.bot.add_view(view, message_id=message_id)
+
+        for state in self.report_runtime_service.get_balance_decisions():
+            guild_id = int(state.get("guild_id", 0))
+            channel_id = int(state.get("channel_id", 0))
+            message_id = int(state.get("message_id", 0))
+            thread_id = int(state.get("thread_id", 0))
+            if not all([guild_id, channel_id, message_id]):
+                self.report_runtime_service.remove_balance_decision(message_id)
+                continue
+
+            message = await self.fetch_runtime_message(channel_id, message_id)
+            if message is None:
+                self.report_runtime_service.remove_balance_decision(message_id)
+                continue
+
+            report_thread = self.bot.get_channel(thread_id) if thread_id else None
+            if report_thread is None and thread_id:
+                try:
+                    report_thread = await self.bot.fetch_channel(thread_id)
+                except discord.HTTPException:
+                    report_thread = None
+
+            view = ApprovedReportBalanceView(
+                report_data=state.get("report_data", {}),
+                permission_service=self.permission_service,
+                balance_service=self.service,
+                report_thread=report_thread,
+                runtime_service=self.report_runtime_service,
+                guild_id=guild_id,
+                message_id=message_id,
+                channel_id=channel_id,
+                thread_id=thread_id,
+            )
+            self.bot.add_view(view, message_id=message_id)
 
     async def avalonian_number_autocomplete(self, interaction, current):
         choices = []
@@ -677,6 +833,81 @@ class EconomyCog(commands.Cog):
         resource_name = "Items" if key == "items" else "Silver"
         await interaction.response.send_message(
             f"{icon} {action} 💰 {format_number(amount)} al saldo de {member.mention}. [{resource_name}]"
+        )
+
+    def _legacy_build_top_embed(self, guild, chunk, page_index, total_pages, viewer_rank):
+        embed = discord.Embed(
+            title="Leaderboard",
+            description=f"**Ranking de {guild.name}**",
+            color=ACCENT_COLOR,
+        )
+
+        lines = []
+        for position, user_id, total in chunk:
+            member = guild.get_member(user_id)
+            display_name = member.display_name if member else self.get_stored_user_name(guild.id, user_id)
+            display_name = display_name or f"Usuario {user_id}"
+            lines.append(f"**{position}.** {display_name} - {format_number(total)}")
+
+        embed.add_field(
+            name="Top Jugadores",
+            value="\n\n".join(lines),
+            inline=False,
+        )
+        embed.set_footer(text=f"Pagina {page_index}/{total_pages} | Tu posicion: {viewer_rank}")
+        return embed
+
+    async def _legacy_modify_balance(self, interaction, member, amount, key, add, command_name):
+        if amount <= 0:
+            await interaction.response.send_message(
+                "Debes indicar una cantidad mayor a 0.",
+                ephemeral=True,
+            )
+            return
+
+        previous_items, previous_silver = self.service.get_balance(interaction.guild, member.id)
+        previous_balance = previous_items if key == "items" else previous_silver
+
+        if not add and previous_balance < amount:
+            resource_name = "Items" if key == "items" else "Silver"
+            await interaction.response.send_message(
+                f"No puedo quitar {format_number(amount)} de {member.mention} porque su saldo de {resource_name} es {format_number(previous_balance)}.",
+                ephemeral=True,
+            )
+            return
+
+        try:
+            self.service.modify(interaction.guild, member.id, amount, key, add)
+        except ValueError as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True)
+            return
+
+        current_items, current_silver = self.service.get_balance(interaction.guild, member.id)
+        new_balance = current_items if key == "items" else current_silver
+
+        now = datetime.now()
+        self.service.log_operation(
+            interaction.guild,
+            {
+                "action": command_name,
+                "operator": interaction.user.display_name,
+                "operator_id": str(interaction.user.id),
+                "player": member.display_name,
+                "player_id": str(member.id),
+                "type": "ADD" if add else "REMOVE",
+                "category": "Items" if key == "items" else "Silver",
+                "amount": amount,
+                "previous_balance": previous_balance,
+                "new_balance": new_balance,
+                "date": now.strftime("%d/%m/%Y"),
+                "time": now.strftime("%H:%M"),
+            },
+        )
+
+        action = "Anadido" if add else "Removido"
+        resource_name = "Items" if key == "items" else "Silver"
+        await interaction.response.send_message(
+            f"{action} {format_number(amount)} al saldo de {member.mention}. [{resource_name}]"
         )
 
     @app_commands.command(name="balance")

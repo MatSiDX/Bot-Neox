@@ -27,12 +27,22 @@ class ApprovedReportBalanceView(discord.ui.View):
         permission_service,
         balance_service,
         report_thread=None,
+        runtime_service=None,
+        guild_id=0,
+        message_id=0,
+        channel_id=0,
+        thread_id=0,
     ):
         super().__init__(timeout=None)
         self.report_data = report_data
         self.permission_service = permission_service
         self.balance_service = balance_service
         self.report_thread = report_thread
+        self.runtime_service = runtime_service
+        self.guild_id = int(guild_id or 0)
+        self.message_id = int(message_id or 0)
+        self.channel_id = int(channel_id or 0)
+        self.thread_id = int(thread_id or 0)
         self.resolved = False
 
     async def interaction_check(self, interaction):
@@ -54,11 +64,27 @@ class ApprovedReportBalanceView(discord.ui.View):
             content=f"{interaction.message.content}\n\n**Estado:** {status_text}",
             view=self,
         )
+        if self.runtime_service and self.message_id:
+            self.runtime_service.remove_balance_decision(self.message_id)
+
+    def to_runtime_state(self):
+        return {
+            "guild_id": self.guild_id,
+            "message_id": self.message_id,
+            "channel_id": self.channel_id,
+            "thread_id": self.thread_id,
+            "report_data": self.report_data,
+        }
 
     def format_full_amount(self, amount):
         return f"{int(amount):,}".replace(",", ".")
 
     async def apply_distribution(self, interaction):
+        available_silver = int(self.report_data.get("available_silver", 0) or 0)
+        pp_required = int(self.report_data.get("pp_required", 0) or 0)
+        if pp_required > available_silver:
+            raise ValueError("El informe requiere mas silver del disponible para cubrir los PP.")
+
         summary_lines = []
         for entry in self.report_data.get("distribution", []):
             user_id = entry["user_id"]
@@ -99,25 +125,52 @@ class ApprovedReportBalanceView(discord.ui.View):
 
         return summary_lines
 
-    @discord.ui.button(label="Agregar balance", style=discord.ButtonStyle.success)
+    @discord.ui.button(
+        label="Agregar balance",
+        style=discord.ButtonStyle.success,
+        custom_id="report_balance:add",
+    )
     async def add_balance_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if self.resolved:
             await interaction.response.send_message("El balance de este informe ya fue decidido.", ephemeral=True)
             return
 
-        summary_lines = await self.apply_distribution(interaction)
+        try:
+            summary_lines = await self.apply_distribution(interaction)
+        except ValueError as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True)
+            return
         if self.report_thread:
             summary_text = "\n".join(summary_lines) if summary_lines else "No habia participantes para aplicar balance."
+            base_lines = []
+            if int(self.report_data.get("item_per_user", 0) or 0):
+                base_lines.append(
+                    f"Items C/U: {self.format_full_amount(self.report_data['item_per_user'])}"
+                )
+            if int(self.report_data.get("silver_per_user", 0) or 0):
+                base_lines.append(
+                    f"Silver C/U: {self.format_full_amount(self.report_data['silver_per_user'])}"
+                )
+            if not base_lines:
+                base_lines.append(
+                    f"C/U base: {self.format_full_amount(self.report_data.get('per_user', 0))}"
+                )
             await self.report_thread.send(
                 "**Balance aplicado automaticamente**\n"
-                f"C/U base: {self.format_full_amount(self.report_data.get('per_user', 0))}\n\n"
+                f"Modo: {self.report_data.get('split_label', 'Reparto anterior')}\n"
+                + "\n".join(base_lines)
+                + "\n\n"
                 + summary_text
             )
 
         await self.disable_after_balance_decision(interaction, f"Balance agregado por {interaction.user.mention}")
         await interaction.response.send_message("Balance agregado.", ephemeral=True)
 
-    @discord.ui.button(label="No agregar balance", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(
+        label="No agregar balance",
+        style=discord.ButtonStyle.secondary,
+        custom_id="report_balance:skip",
+    )
     async def skip_balance_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if self.resolved:
             await interaction.response.send_message("El balance de este informe ya fue decidido.", ephemeral=True)
@@ -143,6 +196,10 @@ class ReportReviewView(discord.ui.View):
         permission_service,
         balance_service,
         source_view=None,
+        source_view_resolver=None,
+        runtime_service=None,
+        guild_id=0,
+        message_id=0,
     ):
         super().__init__(timeout=None)
         self.report_data = report_data
@@ -151,6 +208,10 @@ class ReportReviewView(discord.ui.View):
         self.permission_service = permission_service
         self.balance_service = balance_service
         self.source_view = source_view
+        self.source_view_resolver = source_view_resolver
+        self.runtime_service = runtime_service
+        self.guild_id = int(guild_id or 0)
+        self.message_id = int(message_id or 0)
         self.reviewed = False
 
     async def interaction_check(self, interaction):
@@ -202,6 +263,31 @@ class ReportReviewView(discord.ui.View):
             content=f"{interaction.message.content}\n\n**Estado:** {status_text}",
             view=self,
         )
+        if self.runtime_service and self.message_id:
+            self.runtime_service.remove_review(self.message_id)
+
+    def resolve_source_view(self):
+        if self.source_view is not None:
+            return self.source_view
+        if self.source_view_resolver is None:
+            return None
+
+        return self.source_view_resolver(
+            guild_id=self.guild_id,
+            caller_id=int(self.report_data.get("caller_id", 0) or 0),
+            numero_ava=int(self.report_data.get("ava", 0) or 0),
+        )
+
+    def to_runtime_state(self):
+        message = getattr(self, "message", None)
+        channel = getattr(message, "channel", None)
+        return {
+            "guild_id": self.guild_id,
+            "message_id": self.message_id,
+            "channel_id": int(getattr(channel, "id", 0) or 0),
+            "approved_channel_id": self.approved_channel_id,
+            "report_data": self.report_data,
+        }
 
     def format_full_amount(self, amount):
         return f"{int(amount):,}".replace(",", ".")
@@ -212,7 +298,11 @@ class ReportReviewView(discord.ui.View):
         except discord.HTTPException:
             return None
 
-    @discord.ui.button(label="Aceptar", style=discord.ButtonStyle.success)
+    @discord.ui.button(
+        label="Aceptar",
+        style=discord.ButtonStyle.success,
+        custom_id="report_review:approve",
+    )
     async def approve_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if self.reviewed:
             await interaction.response.send_message("Este informe ya fue revisado.", ephemeral=True)
@@ -233,8 +323,15 @@ class ReportReviewView(discord.ui.View):
             permission_service=self.permission_service,
             balance_service=self.balance_service,
             report_thread=thread,
+            runtime_service=self.runtime_service,
+            guild_id=interaction.guild.id,
+            message_id=approved_message.id,
+            channel_id=approved_message.channel.id,
+            thread_id=getattr(thread, "id", 0),
         )
         await approved_message.edit(view=balance_view)
+        if self.runtime_service:
+            self.runtime_service.save_balance_decision(balance_view.to_runtime_state())
 
         if thread:
             await thread.send("Informe aprobado. Elige en el mensaje aprobado si se agregara balance.")
@@ -243,7 +340,11 @@ class ReportReviewView(discord.ui.View):
         await self.disable_after_review(interaction, f"Aceptado por {interaction.user.mention}")
         await interaction.response.send_message("Informe aceptado y publicado. Ahora puedes decidir el balance en el canal aprobado.", ephemeral=True)
 
-    @discord.ui.button(label="Rechazar", style=discord.ButtonStyle.danger)
+    @discord.ui.button(
+        label="Rechazar",
+        style=discord.ButtonStyle.danger,
+        custom_id="report_review:reject",
+    )
     async def reject_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if self.reviewed:
             await interaction.response.send_message("Este informe ya fue revisado.", ephemeral=True)
@@ -253,7 +354,8 @@ class ReportReviewView(discord.ui.View):
 
     async def reject(self, interaction, reason):
         self.log_decision(interaction, "Rechazado", reason)
-        if self.source_view is not None:
-            await self.source_view.mark_report_rejected()
+        source_view = self.resolve_source_view()
+        if source_view is not None:
+            await source_view.mark_report_rejected()
         await self.disable_after_review(interaction, f"Rechazado por {interaction.user.mention}\n**Motivo:** {reason}")
         await interaction.response.send_message("Informe rechazado y registrado.", ephemeral=True)

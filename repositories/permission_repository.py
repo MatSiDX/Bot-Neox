@@ -2,6 +2,7 @@ import json
 import os
 
 from repositories.balance_repository import DATA_DIR
+from utils.json_store import mutate_json, read_json, write_json
 
 PERMISSIONS_FILE = os.path.join(DATA_DIR, "permissions.json")
 
@@ -14,12 +15,10 @@ class PermissionRepository:
             self.save({})
 
     def load(self):
-        with open(PERMISSIONS_FILE, "r", encoding="utf-8-sig") as f:
-            return json.load(f)
+        return read_json(PERMISSIONS_FILE, {})
 
     def save(self, data):
-        with open(PERMISSIONS_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=4, ensure_ascii=False)
+        write_json(PERMISSIONS_FILE, data)
 
     def normalize_guild_permissions(self, guild_permissions):
         if isinstance(guild_permissions, list):
@@ -43,49 +42,69 @@ class PermissionRepository:
         return self.normalize_guild_permissions(data.get(str(guild_id), {}))
 
     def add_permission(self, guild_id, role_id, permission):
-        data = self.load()
         gid = str(guild_id)
         role_value = str(role_id)
         permission_value = str(permission)
+        changed = {"value": False}
 
-        data[gid] = self.normalize_guild_permissions(data.get(gid, {}))
-        role_permissions = data[gid].setdefault(role_value, [])
+        def mutate(data):
+            data[gid] = self.normalize_guild_permissions(data.get(gid, {}))
+            role_permissions = data[gid].setdefault(role_value, [])
+            if permission_value in role_permissions:
+                return data
 
-        if permission_value not in role_permissions:
             role_permissions.append(permission_value)
-            self.save(data)
-            return True
+            changed["value"] = True
+            return data
 
-        return False
+        mutate_json(PERMISSIONS_FILE, {}, mutate)
+        return changed["value"]
 
     def remove_permission(self, guild_id, role_id, permission):
-        data = self.load()
         gid = str(guild_id)
         role_value = str(role_id)
         permission_value = str(permission)
+        changed = {"value": False}
 
-        if gid not in data:
-            return False
+        def mutate(data):
+            if gid not in data:
+                return data
 
-        data[gid] = self.normalize_guild_permissions(data.get(gid, {}))
-        role_permissions = data[gid].get(role_value, [])
+            data[gid] = self.normalize_guild_permissions(data.get(gid, {}))
+            role_permissions = data[gid].get(role_value, [])
 
-        if permission_value == "global":
-            if role_value not in data[gid]:
-                return False
+            if permission_value == "global":
+                if role_value not in data[gid]:
+                    return data
 
-            data[gid].pop(role_value, None)
-            self.save(data)
-            return True
+                data[gid].pop(role_value, None)
+                changed["value"] = True
+                return data
 
-        if permission_value not in role_permissions:
-            return False
+            if permission_value not in role_permissions:
+                return data
 
-        role_permissions.remove(permission_value)
-        if role_permissions:
-            data[gid][role_value] = role_permissions
-        else:
-            data[gid].pop(role_value, None)
+            role_permissions.remove(permission_value)
+            if role_permissions:
+                data[gid][role_value] = role_permissions
+            else:
+                data[gid].pop(role_value, None)
 
-        self.save(data)
-        return True
+            changed["value"] = True
+            return data
+
+        mutate_json(PERMISSIONS_FILE, {}, mutate)
+        return changed["value"]
+
+    def set_guild_permissions(self, guild_id, permissions):
+        gid = str(guild_id)
+        normalized_permissions = self.normalize_guild_permissions(permissions)
+
+        def mutate(data):
+            if normalized_permissions:
+                data[gid] = normalized_permissions
+            else:
+                data.pop(gid, None)
+            return data
+
+        mutate_json(PERMISSIONS_FILE, {}, mutate)
