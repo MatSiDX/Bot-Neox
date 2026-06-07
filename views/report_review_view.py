@@ -142,9 +142,24 @@ class ApprovedReportBalanceView(discord.ui.View):
             return
         if self.report_thread:
             summary_text = "\n".join(summary_lines) if summary_lines else "No habia participantes para aplicar balance."
+            base_lines = []
+            if int(self.report_data.get("item_per_user", 0) or 0):
+                base_lines.append(
+                    f"Items C/U: {self.format_full_amount(self.report_data['item_per_user'])}"
+                )
+            if int(self.report_data.get("silver_per_user", 0) or 0):
+                base_lines.append(
+                    f"Silver C/U: {self.format_full_amount(self.report_data['silver_per_user'])}"
+                )
+            if not base_lines:
+                base_lines.append(
+                    f"C/U base: {self.format_full_amount(self.report_data.get('per_user', 0))}"
+                )
             await self.report_thread.send(
                 "**Balance aplicado automaticamente**\n"
-                f"C/U base: {self.format_full_amount(self.report_data.get('per_user', 0))}\n\n"
+                f"Modo: {self.report_data.get('split_label', 'Reparto anterior')}\n"
+                + "\n".join(base_lines)
+                + "\n\n"
                 + summary_text
             )
 

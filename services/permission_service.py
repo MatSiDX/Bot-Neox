@@ -4,6 +4,7 @@ PERMISSION_ECONOMY = "economia"
 PERMISSION_PING = "ping"
 PERMISSION_TEMPLATES = "plantillas"
 PERMISSION_REPORTS = "informes"
+PERMISSION_TICKETS = "tickets"
 PERMISSION_PERMISSIONS = "permisos"
 PERMISSION_GLOBAL = "global"
 
@@ -38,6 +39,9 @@ class PermissionService:
 
     def can_review_reports(self, guild_id, member):
         return self.has_permission(guild_id, member, PERMISSION_REPORTS)
+
+    def can_manage_tickets(self, guild_id, member):
+        return self.has_permission(guild_id, member, PERMISSION_TICKETS)
 
     def can_manage_permissions(self, guild_id, member):
         return self.has_permission(guild_id, member, PERMISSION_PERMISSIONS)

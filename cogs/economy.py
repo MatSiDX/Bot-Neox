@@ -23,6 +23,7 @@ from services.permission_service import (
 )
 from services.report_service import ReportService
 from services.report_runtime_service import ReportRuntimeService
+from repositories.report_dashboard_repository import ReportDashboardRepository
 from utils.formatters import format_number
 from views.avalonian_ping_view import AvalonSignupView
 from views.top_view import TopView
@@ -148,8 +149,10 @@ class EconomyCog(commands.Cog):
         self.permission_service = PermissionService()
         self.report_service = ReportService()
         self.report_runtime_service = ReportRuntimeService()
+        self.report_dashboard_repository = ReportDashboardRepository()
         self.active_avalonian_views = {}
         self.restore_task = None
+        self.report_dashboard_task = None
         self.restored_active_views = False
 
     def has_economy_permission(self, interaction):
@@ -493,10 +496,77 @@ class EconomyCog(commands.Cog):
     async def cog_load(self):
         if self.restore_task is None:
             self.restore_task = self.bot.loop.create_task(self.restore_active_avalonian_views())
+        if self.report_dashboard_task is None:
+            self.report_dashboard_task = self.bot.loop.create_task(
+                self.process_dashboard_report_requests()
+            )
 
     def cog_unload(self):
         if self.restore_task and not self.restore_task.done():
             self.restore_task.cancel()
+        if self.report_dashboard_task and not self.report_dashboard_task.done():
+            self.report_dashboard_task.cancel()
+
+    async def process_dashboard_report_requests(self):
+        await self.bot.wait_until_ready()
+        while not self.bot.is_closed():
+            if not self.restored_active_views:
+                await asyncio.sleep(1)
+                continue
+            for request in self.report_dashboard_repository.pending():
+                request_id = request.get("id")
+                payload = request.get("payload") or {}
+                key = (
+                    int(payload.get("guild_id", 0) or 0),
+                    int(payload.get("caller_id", 0) or 0),
+                    int(payload.get("numero_ava", 0) or 0),
+                )
+                view = self.active_avalonian_views.get(key)
+                if not view:
+                    self.report_dashboard_repository.mark(
+                        request_id,
+                        "error",
+                        "No encontre la Ava activa.",
+                    )
+                    continue
+
+                guild = self.bot.get_guild(key[0])
+                caller = guild.get_member(key[1]) if guild else None
+                if guild and caller is None:
+                    try:
+                        caller = await guild.fetch_member(key[1])
+                    except discord.HTTPException:
+                        caller = None
+                if not guild or not caller:
+                    self.report_dashboard_repository.mark(
+                        request_id,
+                        "error",
+                        "No encontre al caller dentro del servidor.",
+                    )
+                    continue
+
+                try:
+                    await view.publish_report(
+                        guild=guild,
+                        caller=caller,
+                        client=self.bot,
+                        estimated=payload.get("estimated", ""),
+                        silver_text=payload.get("silver", ""),
+                        items_text=payload.get("items", ""),
+                        costs_text=payload.get("costs", ""),
+                        adjustments_text=payload.get("adjustments", ""),
+                        split_mode=payload.get("split_mode", "items"),
+                    )
+                except Exception as exc:
+                    self.report_dashboard_repository.mark(
+                        request_id,
+                        "error",
+                        str(exc),
+                    )
+                else:
+                    self.report_dashboard_repository.mark(request_id, "completed")
+
+            await asyncio.sleep(2)
 
     async def restore_active_avalonian_views(self):
         await self.bot.wait_until_ready()
@@ -536,6 +606,7 @@ class EconomyCog(commands.Cog):
                 avalonian_service=self.avalonian_service,
                 config_service=self.config_service,
                 report_service=self.report_service,
+                report_runtime_service=self.report_runtime_service,
                 permission_service=self.permission_service,
                 balance_service=self.service,
                 persist_callback=self.persist_active_view_state,

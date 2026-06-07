@@ -63,9 +63,44 @@ def init_database():
                 time TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS albion_registration_config (
+                guild_id TEXT PRIMARY KEY,
+                albion_guild_id TEXT NOT NULL,
+                albion_guild_name TEXT NOT NULL,
+                role_id TEXT NOT NULL,
+                leave_action TEXT NOT NULL DEFAULT 'remove_roles',
+                sync_nickname INTEGER NOT NULL DEFAULT 1,
+                log_channel_id TEXT,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS albion_registrations (
+                guild_id TEXT NOT NULL,
+                discord_user_id TEXT NOT NULL,
+                discord_user_name TEXT,
+                player_id TEXT NOT NULL,
+                player_name TEXT NOT NULL,
+                albion_guild_id TEXT,
+                albion_guild_name TEXT,
+                alliance_id TEXT,
+                alliance_name TEXT,
+                original_nickname TEXT,
+                status TEXT NOT NULL DEFAULT 'active',
+                consecutive_guild_misses INTEGER NOT NULL DEFAULT 0,
+                last_checked_at TEXT,
+                last_error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (guild_id, discord_user_id),
+                UNIQUE (guild_id, player_id)
+            );
             """
         )
         _ensure_guild_name_column(connection)
+        _ensure_albion_registration_columns(connection)
         connection.executescript(
             """
 
@@ -77,6 +112,12 @@ def init_database():
 
             CREATE INDEX IF NOT EXISTS idx_economy_operations_player
                 ON economy_operations (guild_id, player_id);
+
+            CREATE INDEX IF NOT EXISTS idx_albion_registrations_guild_status
+                ON albion_registrations (guild_id, status);
+
+            CREATE INDEX IF NOT EXISTS idx_albion_registrations_player
+                ON albion_registrations (player_id);
             """
         )
 
@@ -147,5 +188,16 @@ def _ensure_guild_name_column(connection):
             FROM economy_operations_old;
 
             DROP TABLE economy_operations_old;
+            """
+        )
+
+
+def _ensure_albion_registration_columns(connection):
+    columns = _table_columns(connection, "albion_registrations")
+    if "consecutive_guild_misses" not in columns:
+        connection.execute(
+            """
+            ALTER TABLE albion_registrations
+            ADD COLUMN consecutive_guild_misses INTEGER NOT NULL DEFAULT 0
             """
         )

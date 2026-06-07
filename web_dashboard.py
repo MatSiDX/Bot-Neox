@@ -8,6 +8,7 @@ import mimetypes
 import os
 import re
 import secrets
+import shutil
 import socket
 import sqlite3
 import threading
@@ -26,7 +27,10 @@ except ImportError:
     ZoneInfo = None
 
 from repositories.database import DATABASE_FILE, init_database
+from repositories.albion_registration_repository import AlbionRegistrationRepository
+from repositories.active_avalonian_repository import ACTIVE_AVALONIAN_FILE
 from repositories.balance_repository import DATA_DIR
+from repositories.report_dashboard_repository import ReportDashboardRepository
 from services.ping_template_service import MAX_TEMPLATES_PER_GUILD, SCRATCH_TEMPLATE_KEY, PingTemplateService
 from services.permission_service import (
     PERMISSION_ECONOMY,
@@ -35,6 +39,7 @@ from services.permission_service import (
     PERMISSION_PING,
     PERMISSION_REPORTS,
     PERMISSION_TEMPLATES,
+    PERMISSION_TICKETS,
     PermissionService,
 )
 from utils.json_store import (
@@ -70,6 +75,7 @@ BOT_PERMISSION_OPTIONS = [
     (PERMISSION_PING, "Ping", "Usar /ping y /ping-test para publicar pings."),
     (PERMISSION_TEMPLATES, "Plantillas", "Crear, editar, listar y eliminar plantillas de ping."),
     (PERMISSION_REPORTS, "Informes", "Revisar y gestionar informes/Avalonianas."),
+    (PERMISSION_TICKETS, "Tickets", "Ver y gestionar la seccion completa de tickets del dashboard."),
     (PERMISSION_PERMISSIONS, "Permisos", "Administrar permisos de otros roles."),
     (PERMISSION_GLOBAL, "Global", "Acceso completo a todos los permisos del bot."),
 ]
@@ -81,7 +87,30 @@ BOT_PERMISSION_KEYS = {
     key
     for key, _, _ in BOT_PERMISSION_OPTIONS
 }
+TICKET_CHANNEL_PERMISSION_OPTIONS = [
+    ("view_channel", "Ver canal"),
+    ("send_messages", "Enviar mensajes"),
+    ("read_message_history", "Leer historial"),
+    ("attach_files", "Adjuntar archivos"),
+    ("embed_links", "Insertar enlaces"),
+    ("add_reactions", "Agregar reacciones"),
+    ("use_external_emojis", "Usar emojis externos"),
+    ("use_external_stickers", "Usar stickers externos"),
+    ("mention_everyone", "Mencionar everyone/here"),
+    ("manage_messages", "Gestionar mensajes"),
+    ("manage_channels", "Gestionar canal"),
+    ("manage_threads", "Gestionar hilos"),
+    ("create_public_threads", "Crear hilos publicos"),
+    ("create_private_threads", "Crear hilos privados"),
+    ("send_messages_in_threads", "Enviar en hilos"),
+    ("use_application_commands", "Usar comandos"),
+]
+TICKET_CHANNEL_PERMISSION_KEYS = {
+    key
+    for key, _ in TICKET_CHANNEL_PERMISSION_OPTIONS
+}
 DISCORD_API_BASE = "https://discord.com/api/v10"
+ALBION_API_BASE = "https://gameinfo.albiononline.com/api/gameinfo"
 DISCORD_ADMINISTRATOR = 0x8
 SESSION_COOKIE = "dashboard_session"
 STATE_COOKIE = "dashboard_oauth_state"
@@ -97,6 +126,7 @@ SESSIONS_LOCK = threading.RLock()
 OAUTH_STATES = {}
 OAUTH_STATES_LOCK = threading.RLock()
 BOT_GUILDS_CACHE = {"expires_at": 0, "guild_ids": None}
+MEMBER_ROLES_CACHE = {}
 try:
     ARGENTINA_TZ = ZoneInfo("America/Argentina/Buenos_Aires") if ZoneInfo else timezone(timedelta(hours=-3))
 except Exception:
@@ -176,11 +206,12 @@ def make_state_cookie(value, max_age=300):
     return cookie.output(header="").strip()
 
 
-def remember_oauth_state(state, remember_device=False):
+def remember_oauth_state(state, remember_device=False, next_path="/dashboard"):
     with OAUTH_STATES_LOCK:
         OAUTH_STATES[state] = {
             "expires_at": time.time() + 300,
             "remember_device": bool(remember_device),
+            "next_path": safe_dashboard_next(next_path),
         }
 
 
@@ -254,13 +285,14 @@ with SESSIONS_LOCK:
     SESSIONS.update(load_persisted_sessions())
 
 
-def create_session(user, admin_guilds, remember_device=False):
+def create_session(user, admin_guilds, guilds=None, remember_device=False):
     session_id = secrets.token_urlsafe(32)
     ttl = REMEMBER_SESSION_TTL_SECONDS if remember_device else SESSION_TTL_SECONDS
     with SESSIONS_LOCK:
         SESSIONS[session_id] = {
             "user": user,
             "admin_guilds": admin_guilds,
+            "guilds": guilds or admin_guilds,
             "expires_at": time.time() + ttl,
             "remember_device": bool(remember_device),
             "csrf_token": secrets.token_urlsafe(24),
@@ -334,6 +366,59 @@ def admin_guilds_from_discord(guilds):
     return admin_guilds
 
 
+def guilds_from_discord(guilds):
+    return [
+        {
+            "id": str(guild.get("id")),
+            "name": str(guild.get("name") or f"Servidor {guild.get('id')}"),
+        }
+        for guild in guilds
+        if guild.get("id")
+    ]
+
+
+def safe_dashboard_next(value):
+    value = str(value or "").strip()
+    if value.startswith("/dashboard") and not value.startswith("//"):
+        return value
+    return "/dashboard"
+
+
+def get_active_avalonian_state(guild_id, caller_id, numero_ava):
+    data = read_json_file(ACTIVE_AVALONIAN_FILE, {})
+    state = (
+        data.get(str(guild_id), {})
+        .get(str(caller_id), {})
+        .get(str(numero_ava))
+    )
+    return dict(state) if isinstance(state, dict) else None
+
+
+def serialize_report_calculator_state(state):
+    slots = state.get("slots") if isinstance(state.get("slots"), dict) else {}
+    participants = []
+    for index, (slot_key, user_id) in enumerate(slots.items(), start=1):
+        if not user_id:
+            continue
+        label = str(slot_key).split("#", 1)[0]
+        participants.append({
+            "index": index,
+            "slot": label,
+            "user_id": str(user_id),
+        })
+    return {
+        "guild_id": str(state.get("guild_id") or ""),
+        "caller_id": str(state.get("caller_id") or ""),
+        "numero_ava": str(state.get("numero_ava") or ""),
+        "title": str(state.get("title") or f"Ava {state.get('numero_ava', '')}"),
+        "caller_name": str(state.get("caller_name") or ""),
+        "finalized": bool(state.get("finalized")),
+        "cancelled": bool(state.get("cancelled")),
+        "report_sent": bool(state.get("report_sent")),
+        "participants": participants,
+    }
+
+
 def get_bot_guild_ids():
     if not BOT_TOKEN:
         return None
@@ -347,6 +432,44 @@ def get_bot_guild_ids():
     BOT_GUILDS_CACHE["guild_ids"] = guild_ids
     BOT_GUILDS_CACHE["expires_at"] = now + 60
     return guild_ids
+
+
+def get_discord_member_role_ids(guild_id, user_id):
+    guild_id = str(guild_id or "")
+    user_id = str(user_id or "")
+    if not guild_id or not user_id or not BOT_TOKEN:
+        return []
+
+    cache_key = (guild_id, user_id)
+    cached = MEMBER_ROLES_CACHE.get(cache_key)
+    now = time.time()
+    if cached and cached.get("expires_at", 0) > now:
+        return list(cached.get("roles", []))
+
+    try:
+        member = discord_json_request(
+            f"/guilds/{guild_id}/members/{user_id}",
+            token=BOT_TOKEN,
+            auth_scheme="Bot",
+        )
+        roles = [str(role_id) for role_id in member.get("roles", [])]
+    except Exception:
+        roles = []
+
+    MEMBER_ROLES_CACHE[cache_key] = {
+        "roles": roles,
+        "expires_at": now + 60,
+    }
+    return roles
+
+
+def role_ids_have_permission(guild_id, role_ids, permission):
+    role_permissions = PermissionService().get_role_permissions(guild_id)
+    for role_id in role_ids:
+        permissions = role_permissions.get(str(role_id), [])
+        if PERMISSION_GLOBAL in permissions or permission in permissions:
+            return True
+    return False
 
 
 def discord_json_request(path, *, token=None, auth_scheme="Bot", method="GET", payload=None):
@@ -371,6 +494,85 @@ def discord_json_request(path, *, token=None, auth_scheme="Bot", method="GET", p
         raise RuntimeError(f"Discord respondio {exc.code}: {detail}") from exc
     except URLError as exc:
         raise RuntimeError(f"No pude conectar con Discord: {exc.reason}") from exc
+
+
+def albion_json_request(path, *, params=None):
+    query = f"?{urlencode(params)}" if params else ""
+    request = Request(
+        f"{ALBION_API_BASE}/{path.lstrip('/')}{query}",
+        headers={
+            "Accept": "application/json",
+            "User-Agent": "AvalonBot/1.0 Albion dashboard",
+        },
+    )
+    try:
+        with urlopen(request, timeout=15) as response:
+            raw = response.read().decode("utf-8")
+            return json.loads(raw) if raw else {}
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Albion Online respondio {exc.code}: {detail}") from exc
+    except URLError as exc:
+        raise RuntimeError(f"No pude conectar con Albion Online: {exc.reason}") from exc
+
+
+def find_albion_guild_exact(guild_name):
+    clean_name = str(guild_name or "").strip()
+    if not clean_name:
+        return None
+    data = albion_json_request("search", params={"q": clean_name})
+    guilds = data.get("guilds", []) if isinstance(data, dict) else []
+    exact = [
+        guild
+        for guild in guilds
+        if str(guild.get("Name") or "").casefold() == clean_name.casefold()
+    ]
+    exact.sort(key=lambda guild: str(guild.get("Name") or ""))
+    return exact[0] if exact else None
+
+
+def get_albion_registration_payload(guild_id):
+    repository = AlbionRegistrationRepository()
+    config = repository.get_config(guild_id)
+    if config:
+        config["sync_nickname"] = bool(config.get("sync_nickname"))
+        config["enabled"] = bool(config.get("enabled"))
+    return {
+        "region": "America",
+        "config": config,
+        "registrations": repository.list_registrations(guild_id),
+    }
+
+
+def save_albion_registration_config(guild_id, body):
+    albion_guild_name = str(body.get("albion_guild_name") or "").strip()
+    role_id = str(body.get("role_id") or "").strip()
+    leave_action = str(body.get("leave_action") or "remove_roles").strip()
+    log_channel_id = str(body.get("log_channel_id") or "").strip() or None
+    if not albion_guild_name:
+        raise ValueError("Escribe el nombre exacto del gremio de Albion.")
+    if not role_id.isdigit():
+        raise ValueError("Selecciona el rol que recibiran los miembros registrados.")
+    if leave_action not in {"remove_roles", "kick"}:
+        raise ValueError("La accion al abandonar el gremio no es valida.")
+
+    albion_guild = find_albion_guild_exact(albion_guild_name)
+    if not albion_guild:
+        raise ValueError(
+            f"No encontre el gremio '{albion_guild_name}' en la region America."
+        )
+
+    repository = AlbionRegistrationRepository()
+    repository.save_config(
+        guild_id,
+        albion_guild_id=albion_guild["Id"],
+        albion_guild_name=albion_guild["Name"],
+        role_id=role_id,
+        leave_action=leave_action,
+        sync_nickname=bool(body.get("sync_nickname")),
+        log_channel_id=log_channel_id,
+    )
+    return get_albion_registration_payload(guild_id)
 
 
 def load_ticket_panels():
@@ -444,11 +646,116 @@ def get_guild_ticket_records(guild_id):
     return records if isinstance(records, list) else []
 
 
+def ticket_records_summary(records):
+    today = datetime.now(ARGENTINA_TZ).strftime("%d/%m/%Y")
+    summary = {
+        "open": 0,
+        "claimed": 0,
+        "closed_today": 0,
+        "transcribed": 0,
+        "deleted": 0,
+        "total": len(records),
+        "updated_at": datetime.now(ARGENTINA_TZ).strftime("%d/%m/%Y | %H:%M:%S"),
+    }
+    for record in records:
+        status = str(record.get("status") or "open").lower()
+        if status == "open":
+            summary["open"] += 1
+        if record.get("claimed_by_id"):
+            summary["claimed"] += 1
+        if status == "deleted":
+            summary["deleted"] += 1
+        if record.get("transcribed_at") or record.get("transcript"):
+            summary["transcribed"] += 1
+        if str(record.get("closed_at") or "").startswith(today):
+            summary["closed_today"] += 1
+    return summary
+
+
+def discord_timestamp_to_display(value):
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return parsed.astimezone(ARGENTINA_TZ).strftime("%d/%m/%Y | %H:%M")
+    except Exception:
+        return str(value or "")
+
+
+def serialize_discord_message(message):
+    author = message.get("author") if isinstance(message.get("author"), dict) else {}
+    attachments = message.get("attachments") if isinstance(message.get("attachments"), list) else []
+    embeds = message.get("embeds") if isinstance(message.get("embeds"), list) else []
+    avatar = ""
+    if author.get("id") and author.get("avatar"):
+        avatar = f"https://cdn.discordapp.com/avatars/{author.get('id')}/{author.get('avatar')}.png?size=1024"
+
+    return {
+        "id": str(message.get("id") or ""),
+        "author": f"{author.get('username', 'Usuario')}#{author.get('discriminator', '0')}",
+        "author_name": str(author.get("global_name") or author.get("username") or "Usuario"),
+        "author_id": str(author.get("id") or ""),
+        "author_avatar": avatar,
+        "author_bot": bool(author.get("bot")),
+        "content": str(message.get("content") or ""),
+        "created_at": discord_timestamp_to_display(message.get("timestamp")),
+        "attachments": [
+            {
+                "id": str(item.get("id") or ""),
+                "filename": str(item.get("filename") or "Archivo adjunto"),
+                "url": str(item.get("url") or ""),
+                "content_type": str(item.get("content_type") or ""),
+            }
+            for item in attachments
+            if isinstance(item, dict)
+        ],
+        "embeds": embeds,
+        "reference": message.get("message_reference") if isinstance(message.get("message_reference"), dict) else None,
+    }
+
+
 def get_ticket_record(guild_id, record_id):
     for record in get_guild_ticket_records(guild_id):
         if str(record.get("channel_id") or record.get("number") or "") == str(record_id):
             return record
     return None
+
+
+def delete_guild_ticket_record(guild_id, record_id):
+    guild_id = str(guild_id)
+    record_id = str(record_id)
+    removed = {"record": None}
+
+    def mutate(data):
+        records = data.get(guild_id, []) if isinstance(data, dict) else []
+        remaining = []
+        for record in records:
+            current_id = str(record.get("channel_id") or record.get("number") or "")
+            if current_id == record_id and removed["record"] is None:
+                if str(record.get("status") or "open").lower() == "open":
+                    remaining.append(record)
+                    continue
+                removed["record"] = dict(record)
+                continue
+            remaining.append(record)
+        if remaining:
+            data[guild_id] = remaining
+        else:
+            data.pop(guild_id, None)
+        return data
+
+    mutate_json_file_safe(TICKET_RECORDS_FILE, {}, mutate)
+    record = removed["record"]
+    if not record:
+        return False
+
+    channel_id = str(record.get("channel_id") or "")
+    if channel_id.isdigit() and guild_id.isdigit():
+        media_root = os.path.abspath(TICKET_MEDIA_DIR)
+        media_folder = os.path.abspath(
+            os.path.join(TICKET_MEDIA_DIR, guild_id, channel_id)
+        )
+        if os.path.commonpath([media_root, media_folder]) == media_root:
+            shutil.rmtree(media_folder, ignore_errors=True)
+    return True
 
 
 def html_text(value):
@@ -564,21 +871,22 @@ def build_ticket_transcript_html(guild_name, record):
       font-family: Arial, "Segoe UI", sans-serif;
       font-size: 16px;
     }}
-    .page {{ min-height: 100vh; padding: 12px 14px 40px; }}
-    .header {{ display: grid; grid-template-columns: 78px minmax(0, 1fr); gap: 14px; align-items: center; margin-bottom: 20px; }}
+    .page {{ width: min(1380px, 100%); min-height: 100vh; margin: 0 auto; padding: 24px 24px 56px; }}
+    .header {{ display: grid; grid-template-columns: 78px minmax(0, 1fr); gap: 16px; align-items: center; margin-bottom: 24px; padding: 16px; border: 1px solid #263449; border-radius: 12px; background: #151f2c; }}
     .logo {{ width: 78px; height: 78px; object-fit: cover; background: #0b1220; }}
-    .header h1 {{ margin: 0; font-size: 24px; line-height: 1.02; font-weight: 700; }}
+    .header h1 {{ margin: 0; font-size: clamp(24px, 3vw, 34px); line-height: 1.08; font-weight: 700; }}
     .header a {{ color: #8ab4ff; text-decoration: none; font-size: 13px; display: inline-block; margin-top: 8px; }}
-    .messages {{ display: grid; gap: 18px; max-width: 1120px; }}
-    .message {{ display: grid; grid-template-columns: 50px minmax(0, 1fr); gap: 12px; align-items: start; }}
-    .avatar {{ width: 38px; height: 38px; border-radius: 50%; overflow: hidden; display: inline-flex; align-items: center; justify-content: center; background: #263449; color: #fff; font-weight: 700; margin-left: 4px; }}
+    .messages {{ display: grid; gap: 6px; }}
+    .message {{ display: grid; grid-template-columns: 56px minmax(0, 1fr); gap: 14px; align-items: start; padding: 12px 10px; border-radius: 10px; }}
+    .message:hover {{ background: rgba(255, 255, 255, .035); }}
+    .avatar {{ width: 44px; height: 44px; border-radius: 50%; overflow: hidden; display: inline-flex; align-items: center; justify-content: center; background: #263449; color: #fff; font-weight: 700; margin-left: 4px; }}
     .avatar img {{ width: 100%; height: 100%; object-fit: cover; }}
     .message-body {{ min-width: 0; }}
     .message-meta {{ display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; margin-bottom: 2px; }}
     .author {{ font-weight: 700; color: #fff; }}
     .time {{ color: #667386; font-size: 13px; }}
     .bot-badge {{ background: #5865f2; color: #fff; border-radius: 3px; padding: 1px 4px; font-size: 10px; font-weight: 700; }}
-    .message-content {{ color: #fff; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; }}
+    .message-content {{ color: #fff; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }}
     .message-content a, a {{ color: #00aff4; }}
     .reply-line {{ color: #566274; font-size: 13px; border-left: 2px solid #4b5563; padding-left: 6px; margin-bottom: 2px; }}
     .embed {{ width: min(520px, 100%); margin-top: 6px; padding: 10px 12px; border-left: 4px solid #22c55e; border-radius: 3px; background: #1d2533; color: #cfd6e2; }}
@@ -591,6 +899,12 @@ def build_ticket_transcript_html(guild_name, record):
     .attachment {{ border: 1px solid #2f3b4d; border-radius: 4px; padding: 8px 10px; color: #00aff4; background: #17202c; text-decoration: none; }}
     .chat-image {{ max-width: min(620px, 100%); max-height: 520px; object-fit: contain; border-radius: 3px; border: 1px solid #222c3a; background: #0f1722; }}
     .empty-message {{ color: #667386; font-style: italic; }}
+    @media (max-width: 680px) {{
+      .page {{ padding: 14px 12px 38px; }}
+      .header {{ grid-template-columns: 1fr; }}
+      .message {{ grid-template-columns: 44px minmax(0, 1fr); padding: 10px 4px; }}
+      .avatar {{ width: 36px; height: 36px; margin-left: 0; }}
+    }}
   </style>
 </head>
 <body>
@@ -793,11 +1107,16 @@ def normalize_ticket_panel(panel):
         "embed_color": str(panel.get("embed_color") or "#22c55e")[:20],
         "embed_footer": str(panel.get("embed_footer") or "")[:2048],
         "image_url": str(panel.get("image_url") or "")[:500],
-        "ticket_open_title": str(panel.get("ticket_open_title") or "Ticket abierto")[:256],
-        "ticket_open_description": str(panel.get("ticket_open_description") or "Un miembro del staff te atendera pronto.")[:4000],
-        "ticket_open_color": str(panel.get("ticket_open_color") or "#38bdf8")[:20],
+        "ticket_open_content": str(panel.get("ticket_open_content") or "")[:2000],
+        "ticket_open_title": str(panel.get("ticket_open_title") or "")[:256],
+        "ticket_open_description": str(panel.get("ticket_open_description") or "")[:4000],
+        "ticket_open_color": str(panel.get("ticket_open_color") or "")[:20],
+        "ticket_open_footer": str(panel.get("ticket_open_footer") or "")[:2048],
+        "ticket_open_image_url": str(panel.get("ticket_open_image_url") or "")[:500],
+        "ticket_open_thumbnail_url": str(panel.get("ticket_open_thumbnail_url") or "")[:500],
         "options": normalized_options,
         "permissions": {
+            "ticket_role_permissions": normalize_ticket_role_permissions(permissions),
             "claim_roles": normalize_id_list(permissions.get("claim_roles"))[:3],
             "close_roles": normalize_id_list(permissions.get("close_roles"))[:3],
             "reopen_roles": normalize_id_list(permissions.get("reopen_roles"))[:3],
@@ -813,6 +1132,50 @@ def normalize_id_list(value):
     if isinstance(value, str):
         return [item.strip() for item in value.split(",") if item.strip()]
     return []
+
+
+def normalize_ticket_role_permissions(permissions):
+    entries = permissions.get("ticket_role_permissions")
+    normalized = []
+    seen = set()
+    if isinstance(entries, list):
+        for entry in entries[:20]:
+            if not isinstance(entry, dict):
+                continue
+            role_id = str(entry.get("role_id") or "").strip()
+            if not role_id.isdigit() or role_id in seen:
+                continue
+            values = entry.get("permissions")
+            if not isinstance(values, list):
+                values = []
+            keys = [
+                str(value)
+                for value in values
+                if str(value) in TICKET_CHANNEL_PERMISSION_KEYS
+            ]
+            if keys:
+                normalized.append({"role_id": role_id, "permissions": keys})
+                seen.add(role_id)
+
+    if normalized:
+        return normalized
+
+    legacy = {}
+    for role_id in normalize_id_list(permissions.get("view_roles")):
+        legacy[str(role_id)] = ["view_channel", "read_message_history"]
+    for role_id in normalize_id_list(permissions.get("send_roles")):
+        legacy[str(role_id)] = [
+            "view_channel",
+            "send_messages",
+            "read_message_history",
+            "attach_files",
+            "embed_links",
+        ]
+    return [
+        {"role_id": role_id, "permissions": values}
+        for role_id, values in legacy.items()
+        if role_id.isdigit()
+    ][:20]
 
 
 def parse_hex_color(value):
@@ -1071,6 +1434,7 @@ def build_dashboard_data(guild_id=None, allowed_guilds=None, bot_guild_ids=None,
         "totals": totals,
         "updatedAt": argentina_now_display(),
         "viewer": viewer or {},
+        "access": {},
     }
 
 
@@ -1262,6 +1626,7 @@ INDEX_HTML = r"""<!doctype html>
     }
 
     * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
     body {
       margin: 0;
       min-height: 100vh;
@@ -1414,112 +1779,239 @@ INDEX_HTML = r"""<!doctype html>
 
     .app-shell {
       display: grid;
-      grid-template-columns: 230px minmax(0, 1fr);
+      grid-template-columns: 248px minmax(0, 1fr);
       gap: 16px;
       align-items: start;
+      transition: grid-template-columns .2s ease;
     }
 
     .app-shell.sidebar-collapsed {
-      grid-template-columns: 64px minmax(0, 1fr);
-    }
-
-    .app-shell.transcript-open {
-      grid-template-columns: minmax(0, 1fr);
-      padding: 0;
-      min-height: 100vh;
-    }
-
-    .app-shell.transcript-open .sections {
-      display: none;
-    }
-
-    body.transcript-open header {
-      display: none;
+      grid-template-columns: 76px minmax(0, 1fr);
     }
 
     .sections {
-      background: var(--panel);
+      position: sticky;
+      top: 86px;
+      min-width: 0;
+      overflow: hidden;
+      background:
+        linear-gradient(155deg, rgba(37, 99, 235, .08), transparent 38%),
+        var(--panel);
       border: 1px solid var(--line);
-      border-radius: 8px;
+      border-radius: 14px;
       box-shadow: var(--shadow);
-      padding: 12px;
-      transition: width .18s ease;
+      padding: 10px;
+      transition: padding .2s ease, border-radius .2s ease;
+    }
+
+    body.theme-dark .sections {
+      background:
+        linear-gradient(155deg, rgba(56, 189, 248, .10), transparent 38%),
+        var(--panel);
+    }
+
+    .sidebar-head {
+      min-height: 50px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 8px;
+      padding: 5px 4px 10px 8px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .sidebar-heading {
+      min-width: 0;
+      display: grid;
+      gap: 2px;
+    }
+
+    .sidebar-heading strong {
+      font-size: 13px;
+      line-height: 1.2;
+    }
+
+    .sidebar-heading span {
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.2;
     }
 
     .menu-button {
-      width: 40px;
+      width: 36px;
+      min-width: 36px;
       height: 36px;
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      gap: 4px;
-      flex-direction: column;
-      margin-bottom: 12px;
       border-color: var(--line);
       background: var(--control-bg);
+      color: var(--muted);
+      padding: 0;
+      transition: border-color .16s ease, color .16s ease, background .16s ease, transform .16s ease;
     }
 
-    .sidebar-collapsed .menu-button {
-      width: 100%;
+    .menu-button:hover {
+      border-color: var(--brand);
+      background: var(--brand-soft);
+      color: var(--brand);
     }
 
-    .menu-button span {
+    .menu-button svg {
       width: 18px;
-      height: 2px;
-      border-radius: 999px;
-      background: var(--ink);
+      height: 18px;
+      transition: transform .2s ease;
+    }
+
+    .sidebar-collapsed .menu-button svg {
+      transform: rotate(180deg);
     }
 
     .section-label {
       color: var(--muted);
-      font-size: 12px;
-      font-weight: 700;
+      font-size: 10px;
+      font-weight: 800;
+      letter-spacing: .08em;
       text-transform: uppercase;
-      margin: 2px 0 8px;
-    }
-
-    .sidebar-collapsed .section-label {
-      display: none;
+      margin: 12px 10px 7px;
     }
 
     .section-list {
       display: grid;
-      gap: 8px;
+      gap: 5px;
     }
 
     .section-button {
       width: 100%;
+      min-height: 48px;
+      position: relative;
       display: flex;
       align-items: center;
-      gap: 8px;
+      gap: 11px;
       justify-content: flex-start;
       text-align: left;
-      border-color: var(--line);
-      background: var(--control-bg);
+      border-color: transparent;
+      background: transparent;
       color: var(--ink);
-      font-weight: 700;
+      font-weight: 750;
+      padding: 6px 9px;
+      transition: color .16s ease, background .16s ease, border-color .16s ease, transform .16s ease;
+    }
+
+    .section-button::before {
+      content: "";
+      width: 3px;
+      height: 22px;
+      position: absolute;
+      left: -1px;
+      top: 50%;
+      border-radius: 0 999px 999px 0;
+      background: var(--brand);
+      opacity: 0;
+      transform: translateY(-50%) scaleY(.4);
+      transition: opacity .16s ease, transform .16s ease;
+    }
+
+    .section-button:hover {
+      border-color: rgba(37, 99, 235, .16);
+      background: var(--row-hover);
+      color: var(--active-ink);
+      transform: translateX(2px);
     }
 
     .section-button.active {
-      border-color: var(--brand);
-      background: var(--brand-soft);
+      border-color: rgba(37, 99, 235, .24);
+      background: linear-gradient(90deg, var(--brand-soft), rgba(37, 99, 235, .04));
       color: var(--active-ink);
+      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .22);
+    }
+
+    .section-button.active::before {
+      opacity: 1;
+      transform: translateY(-50%) scaleY(1);
     }
 
     .section-icon {
-      width: 22px;
-      min-width: 22px;
-      text-align: center;
-      font-size: 15px;
+      width: 32px;
+      min-width: 32px;
+      height: 32px;
+      display: grid;
+      place-items: center;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      background: var(--control-bg);
+      color: var(--muted);
+      transition: border-color .16s ease, background .16s ease, color .16s ease, box-shadow .16s ease;
     }
 
-    .sidebar-collapsed .section-text {
+    .section-icon svg {
+      width: 17px;
+      height: 17px;
+    }
+
+    .section-button:hover .section-icon {
+      border-color: rgba(37, 99, 235, .35);
+      color: var(--brand);
+    }
+
+    .section-button.active .section-icon {
+      border-color: var(--brand);
+      background: var(--brand);
+      color: #fff;
+      box-shadow: 0 7px 16px rgba(37, 99, 235, .22);
+    }
+
+    .section-copy {
+      min-width: 0;
+      display: grid;
+      gap: 1px;
+    }
+
+    .section-text {
+      line-height: 1.2;
+    }
+
+    .section-hint {
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 500;
+      line-height: 1.2;
+    }
+
+    .sidebar-collapsed .sections {
+      padding: 9px;
+    }
+
+    .sidebar-collapsed .sidebar-head {
+      justify-content: center;
+      padding: 5px 0 10px;
+    }
+
+    .sidebar-collapsed .sidebar-heading,
+    .sidebar-collapsed .section-label,
+    .sidebar-collapsed .section-copy {
       display: none;
+    }
+
+    .sidebar-collapsed .section-list {
+      gap: 7px;
     }
 
     .sidebar-collapsed .section-button {
       justify-content: center;
-      padding: 0;
+      min-height: 48px;
+      padding: 6px;
+    }
+
+    .sidebar-collapsed .section-button:hover {
+      transform: translateX(0) scale(1.03);
+    }
+
+    .sidebar-collapsed .section-icon {
+      width: 34px;
+      min-width: 34px;
+      height: 34px;
     }
 
     .module-header {
@@ -1606,8 +2098,10 @@ INDEX_HTML = r"""<!doctype html>
     .action-button {
       display: inline-flex;
       align-items: center;
+      justify-content: center;
       gap: 7px;
       font-weight: 800;
+      text-decoration: none;
     }
 
     .action-button.primary {
@@ -1836,8 +2330,33 @@ INDEX_HTML = r"""<!doctype html>
       min-width: 0;
     }
 
+    .field[hidden] {
+      display: none;
+    }
+
     .field.full {
       grid-column: 1 / -1;
+    }
+
+    .report-participant-list {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+      gap: 8px;
+    }
+
+    .report-participant-card {
+      display: grid;
+      gap: 3px;
+      padding: 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      min-width: 0;
+    }
+
+    .report-participant-card strong,
+    .report-participant-card span {
+      overflow-wrap: anywhere;
     }
 
     .field label {
@@ -2014,6 +2533,75 @@ INDEX_HTML = r"""<!doctype html>
       padding: 8px;
     }
 
+    .ticket-permission-list {
+      display: grid;
+      gap: 8px;
+    }
+
+    .ticket-permission-card {
+      display: grid;
+      gap: 6px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--panel);
+      padding: 8px;
+    }
+
+    .ticket-permission-card-head {
+      display: grid;
+      grid-template-columns: minmax(180px, 1fr) auto;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .ticket-permission-actions {
+      display: flex;
+      gap: 6px;
+      align-items: center;
+      justify-content: flex-end;
+      white-space: nowrap;
+    }
+
+    .ticket-permission-count {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .ticket-permission-actions .action-button {
+      min-height: 34px;
+      padding: 6px 10px;
+    }
+
+    .ticket-permission-details {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--control-bg);
+      padding: 6px 9px;
+    }
+
+    .ticket-permission-details summary {
+      cursor: pointer;
+      color: var(--brand);
+      font-size: 12px;
+      font-weight: 900;
+      text-transform: uppercase;
+      letter-spacing: .04em;
+    }
+
+    .ticket-permission-options {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+      gap: 6px;
+      margin-top: 8px;
+    }
+
+    .ticket-permission-options .permission-pill {
+      min-height: 28px;
+      padding: 3px 8px;
+      font-size: 11px;
+    }
+
     .option-row {
       display: grid;
       grid-template-columns: minmax(120px, .8fr) minmax(0, 1fr) minmax(0, 1.2fr) 36px;
@@ -2088,10 +2676,19 @@ INDEX_HTML = r"""<!doctype html>
     .records-toolbar {
       display: flex;
       justify-content: space-between;
-      gap: 10px;
+      gap: 14px;
       flex-wrap: wrap;
       align-items: center;
       margin-bottom: 8px;
+    }
+
+    .records-toolbar .ticket-actions {
+      align-items: center;
+    }
+
+    .records-toolbar input[type="search"] {
+      min-width: min(420px, 100%);
+      min-height: 42px;
     }
 
     .records-toolbar.compact {
@@ -2104,7 +2701,8 @@ INDEX_HTML = r"""<!doctype html>
       width: 100%;
     }
 
-    .ticket-records-side {
+    .ticket-records-side,
+    .ticket-records-panel {
       display: grid;
       gap: 8px;
       margin-top: 12px;
@@ -2112,8 +2710,24 @@ INDEX_HTML = r"""<!doctype html>
       padding-top: 12px;
     }
 
-    .ticket-records-side .ticket-list {
-      max-height: 420px;
+    .ticket-records-panel {
+      gap: 14px;
+      margin-top: 0;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background:
+        linear-gradient(145deg, color-mix(in srgb, var(--brand) 8%, transparent), transparent 42%),
+        var(--control-bg);
+      padding: 16px;
+    }
+
+    .ticket-records-panel .section-label {
+      margin: 0;
+    }
+
+    .ticket-records-side .ticket-list,
+    .ticket-records-panel .ticket-list {
+      max-height: 560px;
       overflow: auto;
       padding-right: 2px;
     }
@@ -2132,30 +2746,112 @@ INDEX_HTML = r"""<!doctype html>
       width: 100%;
     }
 
-    .transcript-box {
+    .ticket-records-panel .ticket-list {
       display: grid;
+      gap: 12px;
+    }
+
+    .ticket-records-panel .ticket-card {
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 18px;
+      align-items: start;
+      padding: 16px;
+      border-radius: 12px;
+    }
+
+    .ticket-records-panel .ticket-card h3 {
+      font-size: 17px;
+      line-height: 1.2;
+    }
+
+    .ticket-record-title {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      align-items: center;
+      margin-bottom: 10px;
+    }
+
+    .ticket-record-title h3 {
+      margin: 0;
+    }
+
+    .ticket-record-meta {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+      gap: 8px;
+    }
+
+    .ticket-record-meta span {
+      display: grid;
+      gap: 2px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--control-bg);
+      padding: 8px 10px;
+      color: var(--ink);
+      font-size: 12px;
+      overflow-wrap: anywhere;
+    }
+
+    .ticket-record-meta b {
+      color: var(--muted);
+      font-size: 10px;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+    }
+
+    .ticket-records-panel .ticket-card-actions {
+      min-width: 210px;
+      align-self: stretch;
+      align-items: stretch;
+      flex-direction: column;
+    }
+
+    .ticket-records-panel .ticket-card-actions button {
+      min-height: 42px;
+    }
+
+    .ticket-live-viewer {
+      display: grid;
+      gap: 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--control-bg);
+      padding: 12px;
+      min-width: 0;
+    }
+
+    .ticket-live-viewer[hidden] {
+      display: none;
+    }
+
+    .live-chat-box {
+      display: grid;
+      align-content: start;
       gap: 0;
-      height: calc(100vh - 74px);
-      min-height: 540px;
+      min-height: 620px;
+      max-height: 72vh;
       overflow: auto;
       border: 1px solid var(--line);
-      border-radius: 0;
-      background: var(--control-bg);
-      padding: 0;
-    }
-
-    .ticket-transcript-page {
-      display: grid;
-      grid-template-rows: auto minmax(0, 1fr);
-      gap: 10px;
-      min-height: calc(100vh - 86px);
-      margin: -18px;
-    }
-
-    .ticket-transcript-page .ticket-toolbar {
-      padding: 14px 18px;
-      border-bottom: 1px solid var(--line);
+      border-radius: 8px;
       background: var(--panel);
+    }
+
+    .live-chat-form {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 8px;
+      align-items: end;
+    }
+
+    .live-chat-form textarea {
+      min-height: 58px;
+      max-height: 160px;
+    }
+
+    .live-chat-form button {
+      height: 58px;
     }
 
     .transcript-summary {
@@ -2438,6 +3134,23 @@ INDEX_HTML = r"""<!doctype html>
       border: 1px solid var(--add-line);
     }
 
+    .live-status {
+      font-size: 12px;
+      line-height: 1.35;
+    }
+
+    .live-ticket.open {
+      border-left: 4px solid var(--green);
+    }
+
+    .live-ticket.closed {
+      border-left: 4px solid var(--gold);
+    }
+
+    .live-ticket.deleted {
+      border-left: 4px solid var(--red);
+    }
+
     .audit-dashboard {
       display: grid;
       gap: 14px;
@@ -2644,20 +3357,462 @@ INDEX_HTML = r"""<!doctype html>
       color: var(--muted);
     }
 
+    .loot-dashboard {
+      display: grid;
+      gap: 14px;
+    }
+
+    .loot-dropzone {
+      min-height: 220px;
+      display: grid;
+      place-items: center;
+      gap: 10px;
+      padding: 28px;
+      border: 2px dashed var(--line);
+      border-radius: 10px;
+      background: linear-gradient(135deg, var(--brand-soft), var(--teal-soft));
+      text-align: center;
+      cursor: pointer;
+      transition: border-color .18s ease, transform .18s ease, background .18s ease;
+    }
+
+    .loot-dropzone:hover,
+    .loot-dropzone.dragging {
+      border-color: var(--brand);
+      transform: translateY(-1px);
+    }
+
+    .loot-dropzone input {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    .loot-dropzone-icon {
+      width: 52px;
+      height: 52px;
+      display: grid;
+      place-items: center;
+      border-radius: 50%;
+      background: var(--panel);
+      color: var(--brand);
+      font-size: 26px;
+      font-weight: 800;
+      box-shadow: var(--shadow);
+    }
+
+    .loot-dropzone strong {
+      font-size: 18px;
+    }
+
+    .loot-dropzone span {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .loot-file-summary {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+    }
+
+    .loot-file-summary strong,
+    .loot-file-summary span {
+      display: block;
+    }
+
+    .loot-file-summary span {
+      margin-top: 3px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .loot-controls {
+      display: grid;
+      grid-template-columns: minmax(0, 1.5fr) minmax(180px, .7fr) minmax(180px, .7fr);
+      gap: 10px;
+    }
+
+    .loot-control-card {
+      display: grid;
+      align-content: start;
+      gap: 8px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+    }
+
+    .loot-control-card > strong {
+      font-size: 13px;
+    }
+
+    .loot-tier-buttons {
+      display: flex;
+      gap: 7px;
+      flex-wrap: wrap;
+    }
+
+    .loot-tier-button {
+      min-width: 48px;
+      font-weight: 800;
+    }
+
+    .loot-tier-button.all {
+      border-color: var(--violet);
+      background: var(--violet-soft);
+      color: var(--violet);
+    }
+
+    .loot-tier-button.none {
+      border-color: var(--red);
+      background: var(--remove-bg);
+      color: var(--red);
+    }
+
+    .loot-tier-button.partial {
+      border-color: var(--gold);
+      background: var(--silver-bg);
+      color: var(--gold);
+    }
+
+    .loot-range {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .loot-range input {
+      width: 100%;
+      padding: 0;
+    }
+
+    .loot-switch-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .loot-switch {
+      min-width: 72px;
+      font-weight: 800;
+    }
+
+    .loot-switch.active {
+      border-color: var(--brand);
+      background: var(--brand);
+      color: #fff;
+    }
+
+    .loot-players {
+      display: grid;
+      gap: 12px;
+    }
+
+    .loot-player-card {
+      display: grid;
+      gap: 12px;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      box-shadow: var(--shadow);
+    }
+
+    .loot-player-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .loot-player-header h3 {
+      margin: 0;
+      font-size: 18px;
+    }
+
+    .loot-player-total {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      color: var(--gold);
+      font-weight: 800;
+    }
+
+    .loot-tier-group {
+      display: grid;
+      gap: 8px;
+    }
+
+    .loot-tier-group h4 {
+      margin: 0;
+      color: var(--muted);
+      font-size: 12px;
+      text-transform: uppercase;
+    }
+
+    .loot-grid {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 9px;
+    }
+
+    .loot-item-wrap {
+      position: relative;
+    }
+
+    .loot-item {
+      width: calc(var(--loot-icon-size, 60px) + 12px);
+      height: calc(var(--loot-icon-size, 60px) + 12px);
+      position: relative;
+      display: grid;
+      place-items: center;
+      padding: 5px;
+      border-radius: 8px;
+      background: var(--control-bg);
+      overflow: hidden;
+    }
+
+    .loot-item img {
+      width: var(--loot-icon-size, 60px);
+      height: var(--loot-icon-size, 60px);
+      object-fit: contain;
+    }
+
+    .loot-item.excluded {
+      opacity: .32;
+      filter: grayscale(1);
+      border-color: var(--red);
+    }
+
+    .loot-item.no-price {
+      border-style: dashed;
+    }
+
+    .loot-quantity {
+      position: absolute;
+      right: 4px;
+      bottom: 3px;
+      min-width: 22px;
+      padding: 1px 5px;
+      border-radius: 999px;
+      background: rgba(8, 15, 28, .88);
+      color: #fff;
+      font-size: 12px;
+      font-weight: 800;
+      text-align: center;
+    }
+
+    .loot-info {
+      width: 22px;
+      height: 22px;
+      min-width: 22px;
+      position: absolute;
+      top: -6px;
+      right: -6px;
+      z-index: 1;
+      display: grid;
+      place-items: center;
+      padding: 0;
+      border-radius: 50%;
+      border-color: var(--brand);
+      background: var(--brand);
+      color: #fff;
+      font-size: 11px;
+      font-weight: 900;
+    }
+
+    .loot-error {
+      padding: 12px;
+      border: 1px solid var(--remove-line);
+      border-radius: 8px;
+      background: var(--remove-bg);
+      color: var(--red);
+    }
+
+    .loot-modal {
+      position: fixed;
+      inset: 0;
+      z-index: 20;
+      display: grid;
+      place-items: center;
+      padding: 20px;
+      background: rgba(6, 12, 24, .72);
+    }
+
+    .loot-modal[hidden] {
+      display: none;
+    }
+
+    .loot-modal-panel {
+      width: min(520px, 100%);
+      position: relative;
+      display: grid;
+      gap: 14px;
+      padding: 20px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--panel);
+      box-shadow: 0 24px 70px rgba(0, 0, 0, .36);
+    }
+
+    .loot-modal-close {
+      width: 34px;
+      min-width: 34px;
+      position: absolute;
+      top: 12px;
+      right: 12px;
+      padding: 0;
+      font-size: 20px;
+    }
+
+    .loot-modal-hero {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      padding-right: 38px;
+    }
+
+    .loot-modal-hero img {
+      width: 92px;
+      height: 92px;
+      object-fit: contain;
+    }
+
+    .loot-modal-hero h3,
+    .loot-modal-hero p {
+      margin: 0;
+    }
+
+    .loot-modal-hero p {
+      margin-top: 4px;
+      color: var(--muted);
+    }
+
+    .loot-detail-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    .loot-detail {
+      padding: 10px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: var(--control-bg);
+    }
+
+    .loot-detail span,
+    .loot-detail strong {
+      display: block;
+    }
+
+    .loot-detail span {
+      margin-bottom: 4px;
+      color: var(--muted);
+      font-size: 11px;
+      text-transform: uppercase;
+    }
+
     @media (max-width: 760px) {
       .bar { grid-template-columns: 1fr; }
       .controls, .session { justify-content: stretch; }
       select, input, button { width: 100%; }
-      .app-shell, .app-shell.sidebar-collapsed { grid-template-columns: 1fr; }
+      .app-shell, .app-shell.sidebar-collapsed { grid-template-columns: minmax(0, 1fr); }
+      .app-shell > * { min-width: 0; }
+      .sections {
+        position: static;
+        padding: 10px;
+        border-radius: 12px;
+      }
+      .sidebar-head {
+        min-height: 0;
+        margin-bottom: 9px;
+        padding: 4px 5px 9px;
+      }
+      .sidebar-heading,
+      .sidebar-collapsed .sidebar-heading {
+        display: grid;
+      }
+      .menu-button { display: none; }
+      .section-label { display: none; }
+      .section-list,
+      .sidebar-collapsed .section-list {
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 7px;
+      }
+      .section-button,
+      .sidebar-collapsed .section-button {
+        min-height: 66px;
+        flex-direction: column;
+        justify-content: center;
+        gap: 5px;
+        padding: 7px 4px;
+        text-align: center;
+      }
+      .section-button:hover,
+      .sidebar-collapsed .section-button:hover {
+        transform: translateY(-1px);
+      }
+      .section-button::before {
+        width: 22px;
+        height: 3px;
+        left: 50%;
+        top: auto;
+        bottom: -1px;
+        border-radius: 999px 999px 0 0;
+        transform: translateX(-50%) scaleX(.4);
+      }
+      .section-button.active::before {
+        transform: translateX(-50%) scaleX(1);
+      }
+      .section-icon,
+      .sidebar-collapsed .section-icon {
+        width: 30px;
+        min-width: 30px;
+        height: 30px;
+      }
+      .section-copy,
+      .sidebar-collapsed .section-copy {
+        display: grid;
+      }
+      .section-text {
+        font-size: 11px;
+      }
+      .section-hint { display: none; }
       .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .ticket-summary { grid-template-columns: 1fr; }
       .ticket-card { grid-template-columns: 1fr; }
       .ticket-card-actions { justify-content: flex-start; }
+      .ticket-records-panel .ticket-card { grid-template-columns: 1fr; }
+      .ticket-records-panel .ticket-card-actions {
+        min-width: 0;
+        justify-content: stretch;
+      }
+      .ticket-records-panel .ticket-card-actions button { width: 100%; }
+      .live-chat-box {
+        min-height: 440px;
+        max-height: 64vh;
+      }
       .ticket-builder { grid-template-columns: 1fr; }
       .template-builder { grid-template-columns: 1fr; }
       .form-grid { grid-template-columns: 1fr; }
       .option-row { grid-template-columns: 1fr; }
       .audit-grid { grid-template-columns: 1fr; }
+      .loot-controls { grid-template-columns: 1fr; }
+      .loot-file-summary { align-items: stretch; flex-direction: column; }
+      .loot-detail-grid { grid-template-columns: 1fr; }
       .permissions-list { min-width: 0; }
       .permissions-list-head { display: none; }
       .permission-row {
@@ -2668,7 +3823,13 @@ INDEX_HTML = r"""<!doctype html>
         justify-content: flex-start;
       }
       .table-wrap { max-height: calc(100vh - 330px); }
-      .transcript-box { min-height: 420px; }
+    }
+
+    @media (max-width: 460px) {
+      .section-list,
+      .sidebar-collapsed .section-list {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
     }
   </style>
 </head>
@@ -2696,36 +3857,113 @@ INDEX_HTML = r"""<!doctype html>
   <main>
     <div id="appShell" class="app-shell">
       <aside class="sections" aria-label="Modulos">
-        <button id="sidebarToggle" class="menu-button" type="button" aria-label="Minimizar secciones">
-          <span></span>
-          <span></span>
-          <span></span>
-        </button>
+        <div class="sidebar-head">
+          <div class="sidebar-heading">
+            <strong>Centro de control</strong>
+            <span>Modulos de AvalonBot</span>
+          </div>
+          <button id="sidebarToggle" class="menu-button" type="button" aria-label="Minimizar secciones">
+            <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="m15 18-6-6 6-6"></path>
+            </svg>
+          </button>
+        </div>
         <div class="section-label">Secciones</div>
         <nav class="section-list">
           <button class="section-button active" type="button" data-section="economy" title="Economia">
-            <span class="section-icon">$</span>
-            <span class="section-text">Economia</span>
+            <span class="section-icon">
+              <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="9"></circle>
+                <path d="M16 8h-6a2 2 0 0 0 0 4h4a2 2 0 0 1 0 4H8"></path>
+                <path d="M12 6v12"></path>
+              </svg>
+            </span>
+            <span class="section-copy"><span class="section-text">Economia</span><span class="section-hint">Balances y registros</span></span>
           </button>
           <button class="section-button" type="button" data-section="templates" title="Plantillas">
-            <span class="section-icon">P</span>
-            <span class="section-text">Plantillas</span>
+            <span class="section-icon">
+              <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"></path>
+                <path d="M14 2v6h6"></path>
+                <path d="M8 13h8"></path>
+                <path d="M8 17h5"></path>
+              </svg>
+            </span>
+            <span class="section-copy"><span class="section-text">Plantillas</span><span class="section-hint">Pings y contenido</span></span>
+          </button>
+          <button class="section-button" type="button" data-section="loot" title="Analizador de loot">
+            <span class="section-icon">
+              <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M4 9h16l-1 11H5L4 9Z"></path>
+                <path d="M8 9V7a4 4 0 0 1 8 0v2"></path>
+                <path d="M9 13h6"></path>
+              </svg>
+            </span>
+            <span class="section-copy"><span class="section-text">Loot</span><span class="section-hint">Analisis de reportes</span></span>
+          </button>
+          <button class="section-button" type="button" data-section="report-calculator" title="Calculadora de reparto">
+            <span class="section-icon">
+              <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="4" y="2" width="16" height="20" rx="2"></rect>
+                <path d="M8 6h8"></path>
+                <path d="M8 10h2"></path><path d="M14 10h2"></path>
+                <path d="M8 14h2"></path><path d="M14 14h2"></path>
+                <path d="M8 18h2"></path><path d="M14 18h2"></path>
+              </svg>
+            </span>
+            <span class="section-copy"><span class="section-text">Calculadora</span><span class="section-hint">Reparto de informes</span></span>
           </button>
           <button class="section-button" type="button" data-section="tickets" title="Tickets">
-            <span class="section-icon">#</span>
-            <span class="section-text">Tickets</span>
+            <span class="section-icon">
+              <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M2 9a3 3 0 0 0 0 6v4a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-4a3 3 0 0 0 0-6V5a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2Z"></path>
+                <path d="M13 5v2"></path>
+                <path d="M13 17v2"></path>
+                <path d="M13 11v2"></path>
+              </svg>
+            </span>
+            <span class="section-copy"><span class="section-text">Tickets</span><span class="section-hint">Paneles y soporte</span></span>
+          </button>
+          <button class="section-button" type="button" data-section="registration" title="Registro Albion">
+            <span class="section-icon">
+              <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
+                <circle cx="8.5" cy="7" r="4"></circle>
+                <path d="m17 11 2 2 4-4"></path>
+              </svg>
+            </span>
+            <span class="section-copy"><span class="section-text">Registro Albion</span><span class="section-hint">Miembros y gremio</span></span>
           </button>
           <button class="section-button" type="button" data-section="welcome" title="Bienvenidas">
-            <span class="section-icon">+</span>
-            <span class="section-text">Bienvenidas</span>
+            <span class="section-icon">
+              <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"></path>
+                <circle cx="9" cy="7" r="4"></circle>
+                <path d="M19 8v6"></path>
+                <path d="M22 11h-6"></path>
+              </svg>
+            </span>
+            <span class="section-copy"><span class="section-text">Bienvenidas</span><span class="section-hint">Ingreso de miembros</span></span>
           </button>
           <button class="section-button" type="button" data-section="audit" title="Auditoria">
-            <span class="section-icon">!</span>
-            <span class="section-text">Auditoria</span>
+            <span class="section-icon">
+              <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"></path>
+                <path d="M12 8v4"></path>
+                <path d="M12 16h.01"></path>
+              </svg>
+            </span>
+            <span class="section-copy"><span class="section-text">Auditoria</span><span class="section-hint">Eventos del servidor</span></span>
           </button>
           <button class="section-button" type="button" data-section="permissions" title="Permisos">
-            <span class="section-icon">*</span>
-            <span class="section-text">Permisos</span>
+            <span class="section-icon">
+              <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="8" cy="15" r="3"></circle>
+                <path d="m10.5 12.5 7-7a2.1 2.1 0 0 1 3 3l-7 7"></path>
+                <path d="m18 8 2 2"></path>
+              </svg>
+            </span>
+            <span class="section-copy"><span class="section-text">Permisos</span><span class="section-hint">Accesos por rol</span></span>
           </button>
         </nav>
       </aside>
@@ -2872,22 +4110,14 @@ INDEX_HTML = r"""<!doctype html>
 
           <section class="ticket-summary" aria-label="Resumen de tickets">
             <div class="ticket-stat"><span>Paneles</span><strong id="ticketPanelTotal">0</strong></div>
-            <div class="ticket-stat"><span>Abiertos</span><strong>0</strong></div>
-            <div class="ticket-stat"><span>Cerrados hoy</span><strong>0</strong></div>
+            <div class="ticket-stat"><span>Abiertos</span><strong id="ticketOpenTotal">0</strong></div>
+            <div class="ticket-stat"><span>Cerrados hoy</span><strong id="ticketClosedTodayTotal">0</strong></div>
           </section>
 
           <section class="ticket-builder" aria-label="Constructor de tickets">
             <aside>
               <div class="section-label">Paneles creados</div>
               <div id="ticketPanelList" class="panel-list"></div>
-              <div class="ticket-records-side">
-                <div class="section-label">Tickets y transcripciones</div>
-                <div class="records-toolbar compact">
-                  <input id="ticketRecordSearch" type="search" placeholder="Buscar ticket">
-                  <button id="refreshTicketRecordsButton" class="action-button" type="button">Actualizar</button>
-                </div>
-                <div id="ticketRecordsList" class="ticket-list"></div>
-              </div>
             </aside>
 
             <div id="ticketEmptyEditor" class="ticket-empty-editor">
@@ -2987,22 +4217,42 @@ INDEX_HTML = r"""<!doctype html>
                 <div class="editor-section-header">
                   <div>
                     <strong>Mensaje inicial del ticket</strong>
-                    <span>Primer embed que el bot envia dentro del canal del ticket.</span>
+                    <span>Todo es opcional. El bot no agregara ningun texto que no hayas configurado.</span>
                   </div>
                 </div>
                 <div class="form-grid">
-                  <div class="field">
-                    <label for="ticketOpenTitle">Titulo</label>
-                    <input id="ticketOpenTitle" type="text" placeholder="Ticket abierto">
+                  <div class="field full">
+                    <label for="ticketOpenContent">Mensaje arriba del embed</label>
+                    <textarea id="ticketOpenContent" placeholder="Ejemplo: Bienvenido {mention}, completa el formulario."></textarea>
                   </div>
                   <div class="field">
-                    <label for="ticketOpenColor">Color</label>
-                    <input id="ticketOpenColor" type="text" placeholder="#38bdf8">
+                    <label for="ticketOpenTitle">Titulo del embed</label>
+                    <input id="ticketOpenTitle" type="text" placeholder="Opcional">
+                  </div>
+                  <div class="field">
+                    <label for="ticketOpenColor">Color del embed</label>
+                    <input id="ticketOpenColor" type="text" placeholder="#38bdf8 (opcional)">
                   </div>
                   <div class="field full">
-                    <label for="ticketOpenDescription">Descripcion</label>
-                    <textarea id="ticketOpenDescription" placeholder="Un miembro del staff te atendera pronto."></textarea>
+                    <label for="ticketOpenDescription">Contenido del embed</label>
+                    <textarea id="ticketOpenDescription" placeholder="Puedes escribir instrucciones, listas y menciones."></textarea>
                   </div>
+                  <div class="field full">
+                    <label for="ticketOpenFooter">Footer del embed</label>
+                    <input id="ticketOpenFooter" type="text" placeholder="Opcional">
+                  </div>
+                  <div class="field">
+                    <label for="ticketOpenImage">Imagen grande URL</label>
+                    <input id="ticketOpenImage" type="url" placeholder="https://...">
+                  </div>
+                  <div class="field">
+                    <label for="ticketOpenThumbnail">Miniatura URL</label>
+                    <input id="ticketOpenThumbnail" type="url" placeholder="https://...">
+                  </div>
+                </div>
+                <div class="preview-box">
+                  <strong>Variables disponibles</strong>
+                  <div class="placeholder-list">{mention} {user} {username} {display_name} {user_id} {ticket_number} {ticket_name} {panel_name} {option}</div>
                 </div>
                 <div class="preview-box">
                   <strong>Vista ticket</strong>
@@ -3029,6 +4279,16 @@ INDEX_HTML = r"""<!doctype html>
                   </div>
                 </div>
                 <div class="form-grid">
+                  <div class="field full">
+                    <div class="editor-section-header">
+                      <div>
+                        <strong>Permisos en ticket por rol</strong>
+                        <span>Elige un rol y marca los permisos que tendra dentro del canal privado.</span>
+                      </div>
+                      <button id="addTicketPermissionRoleButton" class="action-button" type="button">+ Agregar rol</button>
+                    </div>
+                    <div id="ticketRolePermissionsList" class="ticket-permission-list"></div>
+                  </div>
                   <div class="field">
                     <label for="claimRolesButton">Roles que reclaman, maximo 3</label>
                     <input id="claimRoles" type="hidden">
@@ -3071,22 +4331,260 @@ INDEX_HTML = r"""<!doctype html>
               </div>
 
             </div>
+
+            <div id="ticketLiveViewer" class="ticket-live-viewer" hidden>
+              <div class="editor-section-header">
+                <div>
+                  <strong id="ticketLiveTitle">Ticket en vivo</strong>
+                  <span id="ticketLiveSubtitle">Mensajes del canal en Discord.</span>
+                </div>
+                <button id="closeLiveTicketButton" class="action-button" type="button">Cerrar vista</button>
+              </div>
+              <div id="ticketLiveMessages" class="live-chat-box"></div>
+              <form id="ticketLiveForm" class="live-chat-form">
+                <textarea id="ticketLiveMessageInput" placeholder="Escribe un mensaje para enviarlo al ticket..."></textarea>
+                <button id="sendLiveTicketMessageButton" class="action-button primary" type="submit">Enviar</button>
+              </form>
+              <div id="ticketLiveMessageStatus" class="status"></div>
+            </div>
+          </section>
+
+          <section class="ticket-records-panel" aria-label="Tickets y transcripciones">
+            <div class="records-toolbar">
+              <div>
+                <div class="section-label">Tickets y transcripciones</div>
+                <div id="ticketLiveStatus" class="muted live-status">En vivo: esperando datos.</div>
+                <div id="ticketRecordsCount" class="muted live-status">0 tickets visibles.</div>
+              </div>
+              <div class="ticket-actions">
+                <input id="ticketRecordSearch" type="search" placeholder="Buscar ticket, usuario o panel">
+                <button id="refreshTicketRecordsButton" class="action-button" type="button">Actualizar</button>
+              </div>
+            </div>
+            <div id="ticketRecordsList" class="ticket-list"></div>
           </section>
         </div>
-        <div id="ticketTranscriptViewer" class="ticket-transcript-page" hidden>
+      </section>
+      <section id="reportCalculatorSection" class="module-panel" aria-label="Calculadora de reparto" hidden>
+        <div class="ticket-dashboard">
           <div class="ticket-toolbar">
             <div>
-              <h2 id="ticketTranscriptTitle">Transcripcion</h2>
-              <p id="ticketTranscriptSubtitle">Historial completo del ticket.</p>
+              <h2>Calculadora de reparto</h2>
+              <p id="reportCalculatorSubtitle">Carga una Ava desde el boton Enviar informe de Discord.</p>
             </div>
-            <div class="ticket-actions">
-              <button id="backToTicketsButton" class="action-button" type="button">Volver a tickets</button>
+            <div class="ticket-stat">
+              <span>Integrantes</span>
+              <strong id="reportCalculatorParticipantsTotal">0</strong>
             </div>
           </div>
-          <div id="ticketTranscriptContent" class="transcript-box"></div>
+
+          <section class="ticket-summary">
+            <div id="reportItemsPerUserStat" class="ticket-stat"><span>Items C/U</span><strong id="reportItemsPerUser">0</strong></div>
+            <div id="reportSilverPerUserStat" class="ticket-stat"><span>Silver C/U</span><strong id="reportSilverPerUser">0</strong></div>
+            <div class="ticket-stat"><span>Total neto</span><strong id="reportNetTotal">0</strong></div>
+          </section>
+
+          <section class="editor-section">
+            <div class="editor-section-header">
+              <div>
+                <strong>Integrantes del reparto</strong>
+                <span>Estos jugadores vienen cargados desde la Ava seleccionada.</span>
+              </div>
+            </div>
+            <div id="reportParticipantsList" class="report-participant-list"></div>
+          </section>
+
+          <div class="template-builder">
+            <div class="template-editor">
+              <div class="editor-section-header">
+                <div>
+                  <strong>Datos del informe</strong>
+                  <span>Incluye todas las opciones del antiguo modal de Discord.</span>
+                </div>
+              </div>
+              <div class="form-grid">
+                <div class="field full">
+                  <label for="reportSplitMode">Modo de reparto</label>
+                  <select id="reportSplitMode">
+                    <option value="items">Solo items</option>
+                    <option value="silver">Solo silver</option>
+                    <option value="items_silver">Items + silver</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label for="reportEstimated">Estimado</label>
+                  <input id="reportEstimated" type="text" placeholder="Ej: 12.5m">
+                </div>
+                <div id="reportItemsField" class="field">
+                  <label for="reportItems">Valor de items</label>
+                  <input id="reportItems" type="text" placeholder="Ej: 10m">
+                </div>
+                <div id="reportSilverField" class="field">
+                  <label for="reportSilver">Silver / bolsas</label>
+                  <input id="reportSilver" type="text" placeholder="Ej: 2.5m">
+                </div>
+                <div id="reportMapCostField" class="field">
+                  <label for="reportMapCost">Costo del mapa</label>
+                  <input id="reportMapCost" type="text" placeholder="Ej: 1m">
+                </div>
+                <div id="reportRepairCostField" class="field">
+                  <label for="reportRepairCost">Reparaciones</label>
+                  <input id="reportRepairCost" type="text" placeholder="Ej: 500k">
+                </div>
+                <div class="field full">
+                  <label for="reportAdjustments">Multas</label>
+                  <textarea id="reportAdjustments" placeholder="Ej: Cobra:-50%; Heal:-25%"></textarea>
+                </div>
+              </div>
+              <div class="publish-row">
+                <button id="resetReportCalculatorButton" class="action-button" type="button">Reiniciar calculadora</button>
+                <button id="submitReportCalculatorButton" class="action-button primary" type="button">Enviar informe a evaluacion</button>
+                <div id="reportCalculatorStatus" class="status"></div>
+              </div>
+            </div>
+
+            <aside>
+              <div class="preview-box">
+                <strong>Balance del reparto</strong>
+                <div id="reportCalculatorBreakdown" class="placeholder-list"></div>
+              </div>
+            </aside>
+          </div>
+        </div>
+      </section>
+      <section id="registrationSection" class="module-panel" aria-label="Registro Albion" hidden>
+        <div class="ticket-dashboard">
+          <div class="ticket-toolbar">
+            <div>
+              <h2>Registro de Albion</h2>
+              <p>Configura el registro por personaje para la region America y controla que pasa cuando alguien abandona el gremio.</p>
+            </div>
+            <div class="ticket-actions">
+              <button id="refreshAlbionRegistrationButton" class="action-button" type="button">Recargar</button>
+              <button id="saveAlbionRegistrationButton" class="action-button primary" type="button">Guardar configuracion</button>
+            </div>
+          </div>
+
+          <section class="ticket-summary" aria-label="Resumen de registro">
+            <div class="ticket-stat"><span>Region</span><strong>America</strong></div>
+            <div class="ticket-stat"><span>Registrados</span><strong id="albionRegistrationTotal">0</strong></div>
+            <div class="ticket-stat"><span>Activos</span><strong id="albionRegistrationActiveTotal">0</strong></div>
+          </section>
+
+          <div class="editor-section">
+            <div class="editor-section-header">
+              <div>
+                <strong>Configuracion del gremio</strong>
+                <span>El nombre se valida contra la API oficial de Albion Online antes de guardar.</span>
+              </div>
+            </div>
+            <div class="form-grid">
+              <div class="field">
+                <label for="albionGuildName">Nombre exacto del gremio</label>
+                <input id="albionGuildName" type="text" placeholder="Nombre del gremio">
+              </div>
+              <div class="field">
+                <label for="albionRole">Rol para miembros registrados</label>
+                <select id="albionRole"><option value="">Seleccionar rol</option></select>
+              </div>
+              <div class="field">
+                <label for="albionLeaveAction">Si abandona el gremio</label>
+                <select id="albionLeaveAction">
+                  <option value="remove_roles">Quitar los roles</option>
+                  <option value="kick">Expulsar del Discord</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="albionLogChannel">Canal de registros</label>
+                <select id="albionLogChannel"><option value="">Sin canal de registros</option></select>
+              </div>
+              <label class="check-row">
+                <input id="albionSyncNickname" type="checkbox">
+                <span>Cambiar el apodo de Discord al nombre del personaje de Albion</span>
+              </label>
+            </div>
+            <div id="albionRegistrationStatus" class="status"></div>
+          </div>
+
+          <div class="editor-section">
+            <div class="editor-section-header">
+              <div>
+                <strong>Personas registradas</strong>
+                <span>Los usuarios se registran con el comando /albion registrar.</span>
+              </div>
+            </div>
+            <section class="table-wrap">
+              <table>
+                <thead>
+                  <tr><th>Discord</th><th>Personaje</th><th>Gremio</th><th>Estado</th><th>Ultima revision</th></tr>
+                </thead>
+                <tbody id="albionRegistrationsBody"></tbody>
+              </table>
+              <div id="albionRegistrationsEmpty" class="empty">Todavia no hay personas registradas.</div>
+            </section>
+          </div>
         </div>
       </section>
       <section id="welcomeSection" class="module-panel" aria-label="Bienvenidas" hidden></section>
+      <section id="lootSection" class="module-panel" aria-label="Analizador de loot" hidden>
+        <div class="loot-dashboard">
+          <div class="ticket-toolbar">
+            <div>
+              <h2>Analizador de loot</h2>
+              <p>Importa reportes de StatisticsAnalysisTool y consolida el botin por jugador.</p>
+            </div>
+            <div class="ticket-actions">
+              <button id="lootReplaceButton" class="action-button primary" type="button" hidden>Cargar otro archivo</button>
+              <button id="lootClearButton" class="action-button danger" type="button" hidden>Limpiar</button>
+            </div>
+          </div>
+
+          <label id="lootDropzone" class="loot-dropzone">
+            <input id="lootFileInput" type="file" accept=".csv,.json">
+            <span class="loot-dropzone-icon" aria-hidden="true">+</span>
+            <strong>Arrastra un CSV o JSON</strong>
+            <span>Tambien puedes hacer clic para seleccionar el reporte. El archivo se procesa localmente.</span>
+          </label>
+
+          <div id="lootError" class="loot-error" hidden></div>
+
+          <div id="lootResults" hidden>
+            <div class="loot-file-summary">
+              <div>
+                <strong id="lootFileName">Reporte</strong>
+                <span id="lootFileMeta"></span>
+              </div>
+              <div class="loot-player-total">
+                <span id="lootGrandTotal"></span>
+              </div>
+            </div>
+
+            <section class="loot-controls" aria-label="Opciones de loot">
+              <div class="loot-control-card">
+                <strong>Filtro por tier</strong>
+                <div id="lootTierButtons" class="loot-tier-buttons"></div>
+                <span class="muted">Morado: visible. Rojo: oculto. Amarillo: visible parcialmente.</span>
+              </div>
+              <div class="loot-control-card">
+                <strong>Tamano de iconos</strong>
+                <div class="loot-range">
+                  <input id="lootIconSize" type="range" min="48" max="96" value="60">
+                  <span id="lootIconSizeLabel">60px</span>
+                </div>
+              </div>
+              <div class="loot-control-card">
+                <strong>Agrupacion</strong>
+                <div class="loot-switch-row">
+                  <span>Separar objetos por tier</span>
+                  <button id="lootGroupToggle" class="loot-switch" type="button" aria-pressed="false">No</button>
+                </div>
+              </div>
+            </section>
+
+            <div id="lootPlayers" class="loot-players"></div>
+          </div>
+        </div>
+      </section>
       <section id="auditSection" class="module-panel" aria-label="Auditoria" hidden>
         <div class="audit-dashboard">
           <div class="ticket-toolbar">
@@ -3151,10 +4649,16 @@ INDEX_HTML = r"""<!doctype html>
     </div>
   </main>
 
+  <div id="lootModal" class="loot-modal" role="dialog" aria-modal="true" aria-labelledby="lootModalTitle" hidden>
+    <div id="lootModalPanel" class="loot-modal-panel"></div>
+  </div>
+
   <script>
+    const pageParams = new URLSearchParams(window.location.search);
+    const linkedReportSection = pageParams.get("section") === "report-calculator";
     const state = {
       data: null,
-      section: localStorage.getItem("dashboardSection") || "economy",
+      section: linkedReportSection ? "report-calculator" : (localStorage.getItem("dashboardSection") || "economy"),
       sidebarCollapsed: localStorage.getItem("dashboardSidebarCollapsed") === "1",
       theme: localStorage.getItem("dashboardTheme") || "light",
       tab: "balances",
@@ -3171,17 +4675,39 @@ INDEX_HTML = r"""<!doctype html>
       ticketEmojis: [],
       ticketRoles: [],
       ticketRecords: [],
+      ticketRecordsSummary: {},
       ticketRecordSearch: "",
       selectedTicketRecordId: "",
-      ticketTranscriptOpen: false,
+      selectedLiveTicketId: "",
+      ticketLiveMessages: [],
+      ticketLiveStatus: "",
       templateStatusMessage: "",
       auditCategories: [],
       auditConfig: { channels: {} },
       auditEvents: [],
       botPermissions: {},
       botPermissionOptions: [],
+      albionRegistrationConfig: null,
+      albionRegistrations: [],
+      reportCalculator: null,
+      reportRequestId: "",
+      reportContext: linkedReportSection ? {
+        guildId: pageParams.get("guild_id") || "",
+        callerId: pageParams.get("caller_id") || "",
+        ava: pageParams.get("ava") || ""
+      } : null,
       csrfToken: "",
       permissionSearch: "",
+      loot: {
+        data: null,
+        fileName: "",
+        format: "",
+        iconSize: 60,
+        groupByTier: false,
+        excludedTiers: new Set(),
+        manualHides: new Set(),
+        manualShows: new Set()
+      },
       currentTicketPanelId: localStorage.getItem("dashboardTicketPanelId") || "",
       ticketEditorSection: localStorage.getItem("dashboardTicketEditorSection") || "identity",
       openRolePicker: "",
@@ -3273,6 +4799,25 @@ INDEX_HTML = r"""<!doctype html>
       ["\uD83D\uDD12", "\uD83D\uDD12"]
     ];
 
+    const ticketChannelPermissionOptions = [
+      ["view_channel", "Ver canal"],
+      ["send_messages", "Enviar mensajes"],
+      ["read_message_history", "Leer historial"],
+      ["attach_files", "Adjuntar archivos"],
+      ["embed_links", "Insertar enlaces"],
+      ["add_reactions", "Agregar reacciones"],
+      ["use_external_emojis", "Usar emojis externos"],
+      ["use_external_stickers", "Usar stickers externos"],
+      ["mention_everyone", "Mencionar everyone/here"],
+      ["manage_messages", "Gestionar mensajes"],
+      ["manage_channels", "Gestionar canal"],
+      ["manage_threads", "Gestionar hilos"],
+      ["create_public_threads", "Crear hilos publicos"],
+      ["create_private_threads", "Crear hilos privados"],
+      ["send_messages_in_threads", "Enviar en hilos"],
+      ["use_application_commands", "Usar comandos"]
+    ];
+
     function newTicketPanel(name = "Nuevo panel") {
       const id = crypto.randomUUID ? crypto.randomUUID() : String(Date.now());
       return {
@@ -3287,9 +4832,13 @@ INDEX_HTML = r"""<!doctype html>
         embed_color: "#22c55e",
         embed_footer: "AvalonBot Tickets",
         image_url: "",
-        ticket_open_title: "Ticket abierto",
-        ticket_open_description: "Un miembro del staff te atendera pronto.",
-        ticket_open_color: "#38bdf8",
+        ticket_open_content: "",
+        ticket_open_title: "",
+        ticket_open_description: "",
+        ticket_open_color: "",
+        ticket_open_footer: "",
+        ticket_open_image_url: "",
+        ticket_open_thumbnail_url: "",
         options: [
           {
             id: crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-option`,
@@ -3299,6 +4848,7 @@ INDEX_HTML = r"""<!doctype html>
           }
         ],
         permissions: {
+          ticket_role_permissions: [],
           claim_roles: "",
           close_roles: "",
           reopen_roles: "",
@@ -3319,6 +4869,342 @@ INDEX_HTML = r"""<!doctype html>
         .replaceAll(">", "&gt;")
         .replaceAll('"', "&quot;")
         .replaceAll("'", "&#039;");
+    }
+
+    const lootTiers = [4, 5, 6, 7, 8];
+
+    function lootItemKey(playerName, itemId) {
+      return `${playerName}\u0000${itemId}`;
+    }
+
+    function resolveLootTier(itemId) {
+      if (itemId === "QUESTITEM_TOKEN_AVALON") return 6;
+      if (itemId.startsWith("QUESTITEM_EXP_TOKEN")) return 4;
+      const treasure = itemId.match(/^TREASURE_.+_(RARITY[123])$/);
+      if (treasure) return { RARITY1: 4, RARITY2: 5, RARITY3: 6 }[treasure[1]] || null;
+      const prefix = itemId.match(/^T([4-8])_/);
+      return prefix ? Number(prefix[1]) : null;
+    }
+
+    function lootTierLabel(tier) {
+      return tier == null ? "N/A" : `T${tier}`;
+    }
+
+    function lootImageUrl(itemId) {
+      return `https://render.albiononline.com/v1/item/${encodeURIComponent(itemId)}.png`;
+    }
+
+    function createLootItem(itemId, itemName) {
+      return {
+        itemId,
+        itemName: itemName || itemId || "Objeto desconocido",
+        tier: resolveLootTier(itemId),
+        totalQuantity: 0,
+        price: 0,
+        totalPrice: 0,
+        imageUrl: lootImageUrl(itemId)
+      };
+    }
+
+    function addLootEntry(lootMap, playerName, itemId, itemName, quantity, price = 0) {
+      const cleanPlayer = String(playerName || "").trim();
+      const cleanItemId = String(itemId || "").trim();
+      const numericQuantity = Number(quantity);
+      const numericPrice = Number(price || 0);
+      if (!cleanPlayer || !cleanItemId || !Number.isFinite(numericQuantity) || numericQuantity <= 0) return;
+      if (!lootMap[cleanPlayer]) lootMap[cleanPlayer] = {};
+      if (!lootMap[cleanPlayer][cleanItemId]) {
+        lootMap[cleanPlayer][cleanItemId] = createLootItem(cleanItemId, itemName);
+      }
+      const item = lootMap[cleanPlayer][cleanItemId];
+      item.totalQuantity += numericQuantity;
+      if (!item.price && Number.isFinite(numericPrice)) item.price = numericPrice;
+      if (Number.isFinite(numericPrice)) item.totalPrice += numericPrice * numericQuantity;
+    }
+
+    function detectCsvDelimiter(text) {
+      const firstLine = String(text || "").split(/\r?\n/, 1)[0] || "";
+      const delimiters = [";", ",", "\t"];
+      return delimiters.sort((a, b) => firstLine.split(b).length - firstLine.split(a).length)[0];
+    }
+
+    function parseCsvRows(text, delimiter) {
+      const rows = [];
+      let row = [];
+      let field = "";
+      let quoted = false;
+      for (let index = 0; index < text.length; index += 1) {
+        const character = text[index];
+        if (quoted) {
+          if (character === '"' && text[index + 1] === '"') {
+            field += '"';
+            index += 1;
+          } else if (character === '"') {
+            quoted = false;
+          } else {
+            field += character;
+          }
+          continue;
+        }
+        if (character === '"') {
+          quoted = true;
+        } else if (character === delimiter) {
+          row.push(field);
+          field = "";
+        } else if (character === "\n") {
+          row.push(field.replace(/\r$/, ""));
+          if (row.some(value => value.trim())) rows.push(row);
+          row = [];
+          field = "";
+        } else {
+          field += character;
+        }
+      }
+      row.push(field.replace(/\r$/, ""));
+      if (row.some(value => value.trim())) rows.push(row);
+      return rows;
+    }
+
+    function parseLootCsvText(text) {
+      const rows = parseCsvRows(text.replace(/^\uFEFF/, ""), detectCsvDelimiter(text));
+      if (rows.length < 2) throw new Error("El CSV no contiene filas de loot.");
+      const headers = rows[0].map(value => value.trim().toLowerCase());
+      const required = ["looted_by__name", "item_id", "quantity"];
+      const missing = required.filter(name => !headers.includes(name));
+      if (missing.length) throw new Error(`Faltan columnas requeridas: ${missing.join(", ")}.`);
+      const lootMap = {};
+      rows.slice(1).forEach(values => {
+        const row = Object.fromEntries(headers.map((header, index) => [header, values[index] ?? ""]));
+        addLootEntry(
+          lootMap,
+          row.looted_by__name,
+          row.item_id,
+          row.item_name,
+          Number.parseInt(row.quantity, 10),
+          0
+        );
+      });
+      return lootMap;
+    }
+
+    function parseLootJsonValue(value) {
+      const entries = Array.isArray(value) ? value : value?.entries;
+      if (!Array.isArray(entries)) throw new Error('El JSON debe contener una lista "entries" o ser una lista de eventos.');
+      const lootMap = {};
+      entries.forEach(entry => {
+        if (!entry || entry.type !== "loot") return;
+        const item = entry.loot?.item || {};
+        addLootEntry(
+          lootMap,
+          entry.loot?.looted_by?.name,
+          item.id,
+          item.name || item.id,
+          item.quantity,
+          item.average_est_market_value
+        );
+      });
+      return lootMap;
+    }
+
+    function resetLootVisibility() {
+      state.loot.excludedTiers = new Set();
+      state.loot.manualHides = new Set();
+      state.loot.manualShows = new Set();
+    }
+
+    function isLootItemIncluded(playerName, item) {
+      const key = lootItemKey(playerName, item.itemId);
+      if (item.tier == null) return !state.loot.manualHides.has(key);
+      if (state.loot.excludedTiers.has(item.tier)) return state.loot.manualShows.has(key);
+      return !state.loot.manualHides.has(key);
+    }
+
+    function lootItemsForTier(tier) {
+      const matches = [];
+      Object.entries(state.loot.data || {}).forEach(([playerName, items]) => {
+        Object.values(items).forEach(item => {
+          if (item.tier === tier) matches.push([playerName, item]);
+        });
+      });
+      return matches;
+    }
+
+    function lootTierState(tier) {
+      if (!state.loot.excludedTiers.has(tier)) return "all";
+      return lootItemsForTier(tier).some(([playerName, item]) =>
+        state.loot.manualShows.has(lootItemKey(playerName, item.itemId))
+      ) ? "partial" : "none";
+    }
+
+    function clearLootTierOverrides(tier) {
+      lootItemsForTier(tier).forEach(([playerName, item]) => {
+        const key = lootItemKey(playerName, item.itemId);
+        state.loot.manualHides.delete(key);
+        state.loot.manualShows.delete(key);
+      });
+    }
+
+    function toggleLootTier(tier) {
+      clearLootTierOverrides(tier);
+      if (state.loot.excludedTiers.has(tier)) state.loot.excludedTiers.delete(tier);
+      else state.loot.excludedTiers.add(tier);
+      renderLoot();
+    }
+
+    function toggleLootItem(playerName, itemId) {
+      const item = state.loot.data?.[playerName]?.[itemId];
+      if (!item) return;
+      const key = lootItemKey(playerName, itemId);
+      const visible = isLootItemIncluded(playerName, item);
+      if (item.tier != null && state.loot.excludedTiers.has(item.tier)) {
+        if (visible) state.loot.manualShows.delete(key);
+        else state.loot.manualShows.add(key);
+      } else if (visible) {
+        state.loot.manualHides.add(key);
+      } else {
+        state.loot.manualHides.delete(key);
+      }
+      renderLoot();
+    }
+
+    function sortedLootItems(items) {
+      return [...items].sort((a, b) => {
+        const tierDifference = (a.tier ?? 99) - (b.tier ?? 99);
+        return tierDifference || b.totalQuantity - a.totalQuantity || a.itemName.localeCompare(b.itemName);
+      });
+    }
+
+    function lootItemHtml(playerName, item) {
+      const included = isLootItemIncluded(playerName, item);
+      const noPrice = item.price === 0 && item.totalPrice === 0;
+      return `
+        <div class="loot-item-wrap">
+          <button class="loot-item${included ? "" : " excluded"}${noPrice ? " no-price" : ""}" type="button"
+            data-loot-player="${escapeHtml(playerName)}" data-loot-item="${escapeHtml(item.itemId)}"
+            title="${escapeHtml(item.itemName)} - ${included ? "clic para excluir" : "clic para incluir"}">
+            <img src="${escapeHtml(item.imageUrl)}" alt="${escapeHtml(item.itemName)}" loading="lazy">
+            <span class="loot-quantity">${formatNumber(item.totalQuantity)}</span>
+          </button>
+          <button class="loot-info" type="button" data-loot-detail-player="${escapeHtml(playerName)}"
+            data-loot-detail-item="${escapeHtml(item.itemId)}" aria-label="Ver detalles de ${escapeHtml(item.itemName)}">i</button>
+        </div>
+      `;
+    }
+
+    function lootPlayerHtml(playerName, items) {
+      const itemList = sortedLootItems(Object.values(items));
+      const total = itemList.reduce((sum, item) =>
+        isLootItemIncluded(playerName, item) ? sum + item.totalPrice : sum, 0
+      );
+      let content = "";
+      if (state.loot.groupByTier) {
+        content = [...lootTiers, null].map(tier => {
+          const tierItems = itemList.filter(item => item.tier === tier);
+          if (!tierItems.length) return "";
+          return `<section class="loot-tier-group"><h4>${lootTierLabel(tier)}</h4><div class="loot-grid">${tierItems.map(item => lootItemHtml(playerName, item)).join("")}</div></section>`;
+        }).join("");
+      } else {
+        content = `<div class="loot-grid">${itemList.map(item => lootItemHtml(playerName, item)).join("")}</div>`;
+      }
+      return `
+        <article class="loot-player-card">
+          <div class="loot-player-header">
+            <h3>${escapeHtml(playerName)}</h3>
+            ${state.loot.format === "json" ? `<span class="loot-player-total">${formatNumber(total)} silver</span>` : `<span class="muted">${itemList.length} objetos</span>`}
+          </div>
+          ${content}
+        </article>
+      `;
+    }
+
+    function renderLoot() {
+      const hasData = Boolean(state.loot.data);
+      document.getElementById("lootDropzone").hidden = hasData;
+      document.getElementById("lootResults").hidden = !hasData;
+      document.getElementById("lootReplaceButton").hidden = !hasData;
+      document.getElementById("lootClearButton").hidden = !hasData;
+      if (!hasData) return;
+
+      const players = Object.entries(state.loot.data);
+      const itemKinds = players.reduce((sum, [, items]) => sum + Object.keys(items).length, 0);
+      document.getElementById("lootFileName").textContent = state.loot.fileName;
+      document.getElementById("lootFileMeta").textContent =
+        `${players.length} jugadores - ${itemKinds} objetos agrupados - ${state.loot.format.toUpperCase()}`;
+      document.getElementById("lootGrandTotal").textContent = state.loot.format === "json"
+        ? `${formatNumber(players.reduce((sum, [playerName, items]) => sum + Object.values(items).reduce((subtotal, item) => isLootItemIncluded(playerName, item) ? subtotal + item.totalPrice : subtotal, 0), 0))} silver total`
+        : "";
+      document.getElementById("lootTierButtons").innerHTML = lootTiers.map(tier =>
+        `<button class="loot-tier-button ${lootTierState(tier)}" type="button" data-loot-tier="${tier}">T${tier}</button>`
+      ).join("");
+      document.getElementById("lootIconSize").value = state.loot.iconSize;
+      document.getElementById("lootIconSizeLabel").textContent = `${state.loot.iconSize}px`;
+      document.getElementById("lootGroupToggle").classList.toggle("active", state.loot.groupByTier);
+      document.getElementById("lootGroupToggle").textContent = state.loot.groupByTier ? "Si" : "No";
+      document.getElementById("lootGroupToggle").setAttribute("aria-pressed", String(state.loot.groupByTier));
+      document.getElementById("lootPlayers").style.setProperty("--loot-icon-size", `${state.loot.iconSize}px`);
+      document.getElementById("lootPlayers").innerHTML = players.map(([playerName, items]) =>
+        lootPlayerHtml(playerName, items)
+      ).join("");
+    }
+
+    function showLootDetail(playerName, itemId) {
+      const item = state.loot.data?.[playerName]?.[itemId];
+      if (!item) return;
+      const noPrice = item.price === 0 && item.totalPrice === 0;
+      document.getElementById("lootModalPanel").innerHTML = `
+        <button class="loot-modal-close" type="button" data-loot-modal-close aria-label="Cerrar">x</button>
+        <div class="loot-modal-hero">
+          <img src="${escapeHtml(item.imageUrl)}" alt="${escapeHtml(item.itemName)}">
+          <div><h3 id="lootModalTitle">${escapeHtml(item.itemName)}</h3><p>${escapeHtml(playerName)}</p></div>
+        </div>
+        <div class="loot-detail-grid">
+          <div class="loot-detail"><span>ID</span><strong>${escapeHtml(item.itemId)}</strong></div>
+          <div class="loot-detail"><span>Tier</span><strong>${lootTierLabel(item.tier)}</strong></div>
+          <div class="loot-detail"><span>Cantidad total</span><strong>${formatNumber(item.totalQuantity)}</strong></div>
+          <div class="loot-detail"><span>Precio estimado</span><strong>${noPrice ? "N/A" : `${formatNumber(item.price)} silver`}</strong></div>
+          <div class="loot-detail"><span>Valor total</span><strong>${noPrice ? "N/A" : `${formatNumber(item.totalPrice)} silver`}</strong></div>
+          <div class="loot-detail"><span>Estado</span><strong>${isLootItemIncluded(playerName, item) ? "Incluido" : "Excluido"}</strong></div>
+        </div>
+      `;
+      document.getElementById("lootModal").hidden = false;
+    }
+
+    function closeLootDetail() {
+      document.getElementById("lootModal").hidden = true;
+    }
+
+    async function loadLootFile(file) {
+      if (!file) return;
+      const extension = file.name.split(".").pop()?.toLowerCase();
+      if (!["csv", "json"].includes(extension)) throw new Error("Formato no soportado. Usa un archivo CSV o JSON.");
+      const text = await file.text();
+      const data = extension === "csv" ? parseLootCsvText(text) : parseLootJsonValue(JSON.parse(text));
+      if (!Object.keys(data).length) throw new Error("No se encontraron eventos de loot validos en el archivo.");
+      state.loot.data = data;
+      state.loot.fileName = file.name;
+      state.loot.format = extension;
+      resetLootVisibility();
+      document.getElementById("lootError").hidden = true;
+      renderLoot();
+    }
+
+    function clearLoot() {
+      state.loot.data = null;
+      state.loot.fileName = "";
+      state.loot.format = "";
+      resetLootVisibility();
+      document.getElementById("lootFileInput").value = "";
+      document.getElementById("lootError").hidden = true;
+      closeLootDetail();
+      renderLoot();
+    }
+
+    function showLootError(error) {
+      const element = document.getElementById("lootError");
+      element.textContent = error instanceof SyntaxError
+        ? "El archivo JSON no tiene un formato valido."
+        : (error.message || "No pude procesar el archivo.");
+      element.hidden = false;
     }
 
     function badge(value, field) {
@@ -3401,6 +5287,9 @@ INDEX_HTML = r"""<!doctype html>
       renderTickets();
       renderAudit();
       renderPermissions();
+      renderAlbionRegistration();
+      renderReportCalculator();
+      renderLoot();
       document.querySelectorAll(".tab").forEach(button => {
         button.classList.toggle("active", button.dataset.tab === state.tab);
       });
@@ -3559,11 +5448,8 @@ INDEX_HTML = r"""<!doctype html>
     }
 
     function renderTickets() {
-      document.getElementById("appShell").classList.toggle("transcript-open", state.section === "tickets" && state.ticketTranscriptOpen);
-      document.body.classList.toggle("transcript-open", state.section === "tickets" && state.ticketTranscriptOpen);
-      document.getElementById("ticketDashboardMain").hidden = state.ticketTranscriptOpen;
-      document.getElementById("ticketTranscriptViewer").hidden = !state.ticketTranscriptOpen;
       document.getElementById("ticketPanelTotal").textContent = state.ticketPanels.length;
+      renderTicketLiveSummary();
       const hasPanel = Boolean(currentTicketPanel());
       document.getElementById("clonePanelButton").hidden = !hasPanel;
       document.getElementById("deletePanelButton").hidden = !hasPanel;
@@ -3573,7 +5459,16 @@ INDEX_HTML = r"""<!doctype html>
       renderTicketEditor();
       renderTicketEditorSections();
       renderTicketRecords();
-      renderTicketTranscript();
+      renderTicketLiveViewer();
+    }
+
+    function renderTicketLiveSummary() {
+      const summary = state.ticketRecordsSummary || {};
+      document.getElementById("ticketOpenTotal").textContent = summary.open ?? 0;
+      document.getElementById("ticketClosedTodayTotal").textContent = summary.closed_today ?? 0;
+      document.getElementById("ticketLiveStatus").textContent = summary.updated_at
+        ? `En vivo: ${summary.open || 0} abiertos, ${summary.claimed || 0} reclamados, ${summary.transcribed || 0} transcritos. Ultima actualizacion: ${summary.updated_at}`
+        : "En vivo: esperando datos.";
     }
 
     function renderTicketEditorSections() {
@@ -3809,6 +5704,8 @@ INDEX_HTML = r"""<!doctype html>
         if (!query) return true;
         return JSON.stringify(record).toLowerCase().includes(query);
       });
+      const countLabel = records.length === 1 ? "1 ticket visible." : `${records.length} tickets visibles.`;
+      document.getElementById("ticketRecordsCount").textContent = countLabel;
       if (!records.length) {
         list.innerHTML = `
           <article class="ticket-card">
@@ -3818,31 +5715,66 @@ INDEX_HTML = r"""<!doctype html>
             </div>
           </article>`;
         state.selectedTicketRecordId = "";
-        state.ticketTranscriptOpen = false;
         return;
       }
 
-      list.innerHTML = records.map(record => `
-        <article class="ticket-card">
-          <div>
-            <h3>${escapeHtml(record.channel_name || `ticket-${record.number || ""}`)}</h3>
-            <div class="ticket-meta">
-              <span class="ticket-status">${escapeHtml(record.status || "abierto")}</span>
-              <span>Usuario: ${escapeHtml(record.owner_name || record.owner_id || "Desconocido")}</span>
-              <span>Panel: ${escapeHtml(record.panel_name || "Sin panel")}</span>
-              ${record.claimed_by_name ? `<span>Reclamado por: ${escapeHtml(record.claimed_by_name)}</span>` : ""}
-              ${record.transcribed_at ? `<span>Transcrito: ${escapeHtml(record.transcribed_at)}</span>` : ""}
+      list.innerHTML = records.map(record => {
+        const status = String(record.status || "open").toLowerCase();
+        const label = status === "open" ? "Abierto" : status === "closed" ? "Cerrado" : status === "deleted" ? "Eliminado" : status;
+        const recordId = record.channel_id || record.number || "";
+        const hasTranscript = Boolean(record.transcribed_at || (Array.isArray(record.transcript) && record.transcript.length));
+        const metadata = [
+          ["Usuario", record.owner_name || record.owner_id || "Desconocido"],
+          ["Panel", record.panel_name || "Sin panel"],
+          record.option_label ? ["Opcion", record.option_label] : null,
+          record.created_at ? ["Creado", record.created_at] : null,
+          record.claimed_by_name ? ["Reclamado por", record.claimed_by_name] : null,
+          record.closed_at ? ["Cerrado", record.closed_at] : null,
+          record.transcribed_at ? ["Transcrito", record.transcribed_at] : null
+        ].filter(Boolean);
+        return `
+          <article class="ticket-card live-ticket ${escapeHtml(status)}">
+            <div>
+              <div class="ticket-record-title">
+                <h3>${escapeHtml(record.channel_name || `ticket-${record.number || ""}`)}</h3>
+                <span class="ticket-status">${escapeHtml(label)}</span>
+              </div>
+              <div class="ticket-record-meta">
+                ${metadata.map(([name, value]) => `<span><b>${escapeHtml(name)}</b>${escapeHtml(value)}</span>`).join("")}
+              </div>
             </div>
-          </div>
-          <div class="ticket-card-actions">
-            <button class="action-button view-transcript-button${String(state.selectedTicketRecordId) === String(record.channel_id || record.number || "") ? " active" : ""}" type="button" data-record-id="${escapeHtml(record.channel_id || record.number || "")}" title="Ver transcripcion" aria-label="Ver transcripcion">Ver transcripcion</button>
-          </div>
-        </article>
-      `).join("");
+            <div class="ticket-card-actions">
+              ${status === "open" && record.channel_id ? `<button class="action-button view-live-ticket-button${String(state.selectedLiveTicketId) === String(record.channel_id) ? " active" : ""}" type="button" data-channel-id="${escapeHtml(record.channel_id)}">Ver ticket</button>` : ""}
+              <button class="action-button view-transcript-button${String(state.selectedTicketRecordId) === String(recordId) ? " active" : ""}" type="button" data-record-id="${escapeHtml(recordId)}" title="Ver transcripcion" aria-label="Ver transcripcion"${hasTranscript ? "" : " disabled"}>Ver transcripcion</button>
+              ${status !== "open" ? `<button class="action-button danger delete-ticket-record-button" type="button" data-record-id="${escapeHtml(recordId)}" data-channel-id="${escapeHtml(record.channel_id || "")}" data-record-name="${escapeHtml(record.channel_name || `ticket-${record.number || ""}`)}">Eliminar registro</button>` : ""}
+            </div>
+          </article>
+        `;
+      }).join("");
+
+      list.querySelectorAll(".view-live-ticket-button").forEach(button => {
+        button.addEventListener("click", () => {
+          openLiveTicket(button.dataset.channelId).catch(error => {
+            document.getElementById("ticketLiveMessageStatus").textContent = error.message;
+          });
+        });
+      });
 
       list.querySelectorAll(".view-transcript-button").forEach(button => {
         button.addEventListener("click", () => {
           openTicketTranscript(button.dataset.recordId);
+        });
+      });
+
+      list.querySelectorAll(".delete-ticket-record-button").forEach(button => {
+        button.addEventListener("click", () => {
+          deleteTicketRecord(
+            button.dataset.recordId,
+            button.dataset.channelId,
+            button.dataset.recordName
+          ).catch(error => {
+            document.getElementById("ticketStatus").textContent = error.message;
+          });
         });
       });
     }
@@ -3855,14 +5787,113 @@ INDEX_HTML = r"""<!doctype html>
       window.location.href = `/ticket-transcript?${params.toString()}`;
     }
 
-    function closeTicketTranscript() {
-      state.ticketTranscriptOpen = false;
-      document.getElementById("appShell").classList.remove("transcript-open");
-      document.body.classList.remove("transcript-open");
-      document.getElementById("ticketTranscriptViewer").hidden = true;
-      document.getElementById("ticketDashboardMain").hidden = false;
-      renderTicketRecords();
-      window.scrollTo({ top: 0, behavior: "smooth" });
+    async function deleteTicketRecord(recordId, channelId, recordName) {
+      const confirmed = window.confirm(
+        `Eliminar definitivamente ${recordName || "este ticket"} de la base de datos? Desaparecera de la lista junto con su transcripcion y archivos guardados.`
+      );
+      if (!confirmed) return;
+
+      const response = await fetch("/api/ticket-record", {
+        method: "DELETE",
+        headers: csrfHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({
+          guild_id: state.guildId,
+          record_id: recordId
+        })
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload.error || "No pude eliminar el registro del ticket.");
+      }
+
+      state.ticketRecords = payload.records || [];
+      state.ticketRecordsSummary = payload.summary || {};
+      if (String(state.selectedTicketRecordId) === String(recordId)) {
+        state.selectedTicketRecordId = "";
+      }
+      if (String(state.selectedLiveTicketId) === String(channelId)) {
+        closeLiveTicket();
+      }
+      document.getElementById("ticketStatus").textContent = "Registro del ticket eliminado definitivamente.";
+      renderTickets();
+    }
+
+    function liveTicketRecord() {
+      return (state.ticketRecords || []).find(record => String(record.channel_id || "") === String(state.selectedLiveTicketId || ""));
+    }
+
+    async function openLiveTicket(channelId) {
+      state.selectedLiveTicketId = String(channelId || "");
+      state.ticketLiveMessages = [];
+      state.ticketLiveStatus = "Cargando mensajes...";
+      renderTickets();
+      await loadLiveTicketMessages();
+    }
+
+    function closeLiveTicket() {
+      state.selectedLiveTicketId = "";
+      state.ticketLiveMessages = [];
+      state.ticketLiveStatus = "";
+      renderTickets();
+    }
+
+    async function loadLiveTicketMessages() {
+      if (!state.guildId || !state.selectedLiveTicketId) return;
+      const params = new URLSearchParams({
+        guild_id: state.guildId,
+        channel_id: state.selectedLiveTicketId
+      });
+      const response = await fetch(`/api/ticket-live?${params.toString()}`, { cache: "no-store" });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || "No pude cargar el ticket en vivo.");
+      state.ticketLiveMessages = payload.messages || [];
+      state.ticketLiveStatus = payload.updated_at ? `Actualizado: ${payload.updated_at}` : "";
+      renderTicketLiveViewer();
+    }
+
+    async function sendLiveTicketMessage() {
+      const input = document.getElementById("ticketLiveMessageInput");
+      const content = input.value.trim();
+      if (!content) return;
+      const response = await fetch("/api/ticket-live-message", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          guild_id: state.guildId,
+          channel_id: state.selectedLiveTicketId,
+          content
+        })
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || "No pude enviar el mensaje.");
+      input.value = "";
+      state.ticketLiveStatus = "Mensaje enviado.";
+      await loadLiveTicketMessages();
+    }
+
+    function renderTicketLiveViewer() {
+      const viewer = document.getElementById("ticketLiveViewer");
+      const empty = document.getElementById("ticketEmptyEditor");
+      const editor = document.getElementById("ticketEditor");
+      const record = liveTicketRecord();
+      const open = Boolean(state.selectedLiveTicketId && record && String(record.status || "open").toLowerCase() === "open");
+      viewer.hidden = !open;
+      if (!open) {
+        if (!currentTicketPanel()) empty.hidden = false;
+        editor.hidden = !currentTicketPanel();
+        return;
+      }
+
+      empty.hidden = true;
+      editor.hidden = true;
+      document.getElementById("ticketLiveTitle").textContent = record.channel_name || `ticket-${record.number || ""}`;
+      document.getElementById("ticketLiveSubtitle").textContent = `${record.panel_name || "Sin panel"} - ${record.owner_name || record.owner_id || "Usuario desconocido"}`;
+      document.getElementById("ticketLiveMessageStatus").textContent = state.ticketLiveStatus || "";
+      const box = document.getElementById("ticketLiveMessages");
+      box.innerHTML = state.ticketLiveMessages.length
+        ? state.ticketLiveMessages.map(renderTranscriptMessage).join("")
+        : `<div class="transcript-message"><div></div><div class="muted">Todavia no hay mensajes cargados.</div></div>`;
+      box.scrollTop = box.scrollHeight;
     }
 
     function initialForName(name) {
@@ -3944,51 +5975,6 @@ INDEX_HTML = r"""<!doctype html>
       `;
     }
 
-    function renderTicketTranscript() {
-      const viewer = document.getElementById("ticketTranscriptViewer");
-      const content = document.getElementById("ticketTranscriptContent");
-      const title = document.getElementById("ticketTranscriptTitle");
-      const subtitle = document.getElementById("ticketTranscriptSubtitle");
-      const record = (state.ticketRecords || []).find(item => String(item.channel_id || item.number || "") === String(state.selectedTicketRecordId));
-      if (!state.ticketTranscriptOpen) {
-        viewer.hidden = true;
-        content.innerHTML = "";
-        return;
-      }
-
-      if (!record) {
-        state.ticketTranscriptOpen = false;
-        document.getElementById("ticketDashboardMain").hidden = false;
-        viewer.hidden = true;
-        content.innerHTML = "";
-        return;
-      }
-
-      viewer.hidden = false;
-      document.getElementById("ticketDashboardMain").hidden = true;
-      const transcript = Array.isArray(record.transcript) ? record.transcript : [];
-      title.textContent = record.channel_name || `ticket-${record.number || ""}`;
-      subtitle.textContent = `${record.panel_name || "Sin panel"} - ${record.owner_name || record.owner_id || "Usuario desconocido"}`;
-      const summary = `
-        <div class="transcript-summary">
-          <strong>${escapeHtml(record.channel_name || `ticket-${record.number || ""}`)}</strong>
-          <span>Usuario: ${escapeHtml(record.owner_name || record.owner_id || "Desconocido")}</span>
-          <span>Panel: ${escapeHtml(record.panel_name || "Sin panel")}</span>
-          <span>Estado: ${escapeHtml(record.status || "abierto")}</span>
-          ${record.created_at ? `<span>Creado: ${escapeHtml(record.created_at)}</span>` : ""}
-          ${record.closed_at ? `<span>Cerrado: ${escapeHtml(record.closed_at)}</span>` : ""}
-          ${record.deleted_at ? `<span>Eliminado: ${escapeHtml(record.deleted_at)}</span>` : ""}
-          ${record.transcribed_at ? `<span>Transcrito: ${escapeHtml(record.transcribed_at)}</span>` : ""}
-        </div>
-      `;
-      if (!transcript.length) {
-        content.innerHTML = `${summary}<div class="muted">Este ticket todavia no tiene transcripcion guardada.</div>`;
-        return;
-      }
-
-      content.innerHTML = summary + transcript.map(renderTranscriptMessage).join("");
-    }
-
     function permissionValues(value) {
       if (Array.isArray(value)) return value.map(String);
       return String(value || "").split(",").map(item => item.trim()).filter(Boolean);
@@ -4050,6 +6036,102 @@ INDEX_HTML = r"""<!doctype html>
       `;
     }
 
+    function normalizeTicketRolePermissions(entries) {
+      if (!Array.isArray(entries)) return [];
+      const seen = new Set();
+      return entries.map(entry => {
+        const roleId = String(entry?.role_id || "").trim();
+        const values = Array.isArray(entry?.permissions) ? entry.permissions : [];
+        const permissions = values.map(String).filter(value => ticketChannelPermissionOptions.some(([key]) => key === value));
+        return { role_id: roleId, permissions };
+      }).filter(entry => {
+        if (!entry.role_id || seen.has(entry.role_id) || !entry.permissions.length) return false;
+        seen.add(entry.role_id);
+        return true;
+      }).slice(0, 20);
+    }
+
+    function roleOptionsHtml(selectedRoleId) {
+      return `<option value="">Seleccionar rol</option>` + state.ticketRoles.map(role => {
+        const selected = String(role.id) === String(selectedRoleId || "") ? " selected" : "";
+        return `<option value="${escapeHtml(role.id)}"${selected}>@${escapeHtml(role.name)}</option>`;
+      }).join("");
+    }
+
+    function renderTicketRolePermissions(panel) {
+      const container = document.getElementById("ticketRolePermissionsList");
+      if (!container) return;
+      const savedEntries = panel?.permissions?.ticket_role_permissions;
+      const entries = Array.isArray(savedEntries)
+        ? savedEntries.map(entry => ({
+            role_id: String(entry?.role_id || ""),
+            permissions: Array.isArray(entry?.permissions) ? entry.permissions.map(String) : []
+          }))
+        : [];
+      container.innerHTML = entries.length ? entries.map((entry, index) => {
+        const selected = new Set(entry.permissions || []);
+        const selectedLabels = ticketChannelPermissionOptions
+          .filter(([key]) => selected.has(key))
+          .map(([, label]) => label);
+        const permissionCount = selectedLabels.length;
+        return `
+          <article class="ticket-permission-card" data-ticket-permission-index="${index}">
+            <div class="ticket-permission-card-head">
+              <div class="field">
+                <label>Permisos en ticket para rol</label>
+                <select class="ticket-permission-role">${roleOptionsHtml(entry.role_id)}</select>
+              </div>
+              <div class="ticket-permission-actions">
+                <span class="ticket-permission-count">${permissionCount} permiso${permissionCount === 1 ? "" : "s"}</span>
+                <button class="action-button danger remove-ticket-permission-role" type="button">Quitar</button>
+              </div>
+            </div>
+            <details class="ticket-permission-details">
+              <summary>Editar permisos</summary>
+              <div class="ticket-permission-options">
+                ${ticketChannelPermissionOptions.map(([key, label]) => `
+                  <label class="permission-pill${selected.has(key) ? " active" : ""}">
+                    <input class="ticket-permission-checkbox" type="checkbox" value="${escapeHtml(key)}"${selected.has(key) ? " checked" : ""}>
+                    ${escapeHtml(label)}
+                  </label>
+                `).join("")}
+              </div>
+            </details>
+          </article>
+        `;
+      }).join("") : `<div class="ticket-empty-editor"><strong>Sin roles configurados</strong><p>Agrega un rol para elegir que permisos tendra dentro del canal del ticket.</p></div>`;
+
+      container.querySelectorAll("select, input").forEach(input => {
+        input.addEventListener("change", () => {
+          persistCurrentTicketPanel();
+          renderTicketRolePermissions(currentTicketPanel());
+        });
+      });
+      container.querySelectorAll(".remove-ticket-permission-role").forEach(button => {
+        button.addEventListener("click", event => {
+          const row = event.target.closest("[data-ticket-permission-index]");
+          const index = Number(row?.dataset.ticketPermissionIndex || -1);
+          const current = currentTicketPanel();
+          if (!current || index < 0) return;
+          current.permissions = current.permissions || {};
+          current.permissions.ticket_role_permissions = Array.isArray(current.permissions.ticket_role_permissions)
+            ? current.permissions.ticket_role_permissions
+            : [];
+          current.permissions.ticket_role_permissions.splice(index, 1);
+          state.ticketPanelsDirty = true;
+          renderTicketRolePermissions(current);
+        });
+      });
+    }
+
+    function collectTicketRolePermissions() {
+      return Array.from(document.querySelectorAll("[data-ticket-permission-index]")).map(row => {
+        const roleId = row.querySelector(".ticket-permission-role")?.value || "";
+        const permissions = Array.from(row.querySelectorAll(".ticket-permission-checkbox:checked")).map(input => input.value);
+        return { role_id: roleId, permissions };
+      }).filter(entry => entry.role_id && entry.permissions.length);
+    }
+
     function renderAllRolePickers(panel) {
       renderRoleSelect("claimRoles", panel.permissions?.claim_roles || []);
       renderRoleSelect("closeRoles", panel.permissions?.close_roles || []);
@@ -4083,7 +6165,7 @@ INDEX_HTML = r"""<!doctype html>
       document.getElementById("ticketEmptyEditor").hidden = Boolean(panel);
       document.getElementById("ticketEditor").hidden = !panel;
       const disabled = !panel;
-      ["ticketName", "ticketMode", "ticketChannel", "ticketOpenCategory", "ticketColor", "ticketContent", "ticketTitle", "ticketFooter", "ticketDescription", "ticketImage", "ticketOpenTitle", "ticketOpenColor", "ticketOpenDescription", "claimRoles", "closeRoles", "reopenRoles", "deleteRoles"].forEach(id => {
+      ["ticketName", "ticketMode", "ticketChannel", "ticketOpenCategory", "ticketColor", "ticketContent", "ticketTitle", "ticketFooter", "ticketDescription", "ticketImage", "ticketOpenContent", "ticketOpenTitle", "ticketOpenColor", "ticketOpenDescription", "ticketOpenFooter", "ticketOpenImage", "ticketOpenThumbnail", "claimRoles", "closeRoles", "reopenRoles", "deleteRoles"].forEach(id => {
         document.getElementById(id).disabled = disabled;
       });
 
@@ -4092,10 +6174,12 @@ INDEX_HTML = r"""<!doctype html>
       document.getElementById("clonePanelButton").disabled = disabled;
       document.getElementById("deletePanelButton").disabled = disabled;
       document.getElementById("addTicketOptionButton").disabled = disabled;
+      document.getElementById("addTicketPermissionRoleButton").disabled = disabled;
 
       if (!panel) {
         document.getElementById("ticketPreview").textContent = "Crea un panel para empezar.";
         document.getElementById("ticketOptions").innerHTML = "";
+        document.getElementById("ticketRolePermissionsList").innerHTML = "";
         ["claimRoles", "closeRoles", "reopenRoles", "deleteRoles"].forEach(id => {
           document.getElementById(id).value = "";
           document.getElementById(`${id}Picker`).innerHTML = "";
@@ -4113,9 +6197,14 @@ INDEX_HTML = r"""<!doctype html>
       document.getElementById("ticketFooter").value = panel.embed_footer || "";
       document.getElementById("ticketDescription").value = panel.embed_description || "";
       document.getElementById("ticketImage").value = panel.image_url || "";
-      document.getElementById("ticketOpenTitle").value = panel.ticket_open_title || "Ticket abierto";
-      document.getElementById("ticketOpenColor").value = panel.ticket_open_color || "#38bdf8";
-      document.getElementById("ticketOpenDescription").value = panel.ticket_open_description || "Un miembro del staff te atendera pronto.";
+      document.getElementById("ticketOpenContent").value = panel.ticket_open_content || "";
+      document.getElementById("ticketOpenTitle").value = panel.ticket_open_title || "";
+      document.getElementById("ticketOpenColor").value = panel.ticket_open_color || "";
+      document.getElementById("ticketOpenDescription").value = panel.ticket_open_description || "";
+      document.getElementById("ticketOpenFooter").value = panel.ticket_open_footer || "";
+      document.getElementById("ticketOpenImage").value = panel.ticket_open_image_url || "";
+      document.getElementById("ticketOpenThumbnail").value = panel.ticket_open_thumbnail_url || "";
+      renderTicketRolePermissions(panel);
       renderAllRolePickers(panel);
       renderTicketOptions(panel);
       renderTicketPreview(panel);
@@ -4191,11 +6280,16 @@ INDEX_HTML = r"""<!doctype html>
       panel.embed_footer = document.getElementById("ticketFooter").value.trim();
       panel.embed_description = document.getElementById("ticketDescription").value || "Selecciona una opcion para abrir un ticket.";
       panel.image_url = document.getElementById("ticketImage").value.trim();
-      panel.ticket_open_title = document.getElementById("ticketOpenTitle").value.trim() || "Ticket abierto";
-      panel.ticket_open_color = document.getElementById("ticketOpenColor").value.trim() || "#38bdf8";
-      panel.ticket_open_description = document.getElementById("ticketOpenDescription").value || "Un miembro del staff te atendera pronto.";
+      panel.ticket_open_content = document.getElementById("ticketOpenContent").value;
+      panel.ticket_open_title = document.getElementById("ticketOpenTitle").value.trim();
+      panel.ticket_open_color = document.getElementById("ticketOpenColor").value.trim();
+      panel.ticket_open_description = document.getElementById("ticketOpenDescription").value;
+      panel.ticket_open_footer = document.getElementById("ticketOpenFooter").value.trim();
+      panel.ticket_open_image_url = document.getElementById("ticketOpenImage").value.trim();
+      panel.ticket_open_thumbnail_url = document.getElementById("ticketOpenThumbnail").value.trim();
       panel.options = collectTicketOptions();
       panel.permissions = {
+        ticket_role_permissions: normalizeTicketRolePermissions(collectTicketRolePermissions()),
         claim_roles: rolePickerValues("claimRoles"),
         close_roles: rolePickerValues("closeRoles"),
         reopen_roles: rolePickerValues("reopenRoles"),
@@ -4230,16 +6324,244 @@ INDEX_HTML = r"""<!doctype html>
 
     function renderTicketOpenPreview(panel) {
       if (!panel) return;
+      const hasEmbed = Boolean(
+        panel.ticket_open_title ||
+        panel.ticket_open_description ||
+        panel.ticket_open_footer ||
+        panel.ticket_open_image_url ||
+        panel.ticket_open_thumbnail_url
+      );
+      const embed = hasEmbed ? `
+        <div class="discord-preview" style="${panel.ticket_open_color ? `border-left-color:${escapeHtml(panel.ticket_open_color)}` : ""}">
+          ${panel.ticket_open_title ? `<div class="discord-preview-title">${escapeHtml(panel.ticket_open_title)}</div>` : ""}
+          ${panel.ticket_open_description ? `<div class="discord-preview-description">${escapeHtml(panel.ticket_open_description)}</div>` : ""}
+          ${panel.ticket_open_thumbnail_url ? `<div class="muted">Miniatura: ${escapeHtml(panel.ticket_open_thumbnail_url)}</div>` : ""}
+          ${panel.ticket_open_image_url ? `<div class="muted">Imagen: ${escapeHtml(panel.ticket_open_image_url)}</div>` : ""}
+          ${panel.ticket_open_footer ? `<div class="muted">${escapeHtml(panel.ticket_open_footer)}</div>` : ""}
+        </div>
+      ` : `<div class="muted">Sin embed configurado.</div>`;
       document.getElementById("ticketOpenPreview").innerHTML = `
-        <div class="discord-preview" style="border-left-color:${escapeHtml(panel.ticket_open_color || "#38bdf8")}">
-          <div class="discord-preview-title">${escapeHtml(panel.ticket_open_title || "Ticket abierto")}</div>
-          <div class="discord-preview-description">${escapeHtml(panel.ticket_open_description || "")}</div>
-          <div class="discord-preview-actions">
-            <span class="discord-preview-action">Reclamar ticket</span>
-            <span class="discord-preview-action">Cerrar ticket</span>
-          </div>
+        ${panel.ticket_open_content ? `<div class="discord-preview-description">${escapeHtml(panel.ticket_open_content)}</div>` : `<div class="muted">Sin mensaje superior.</div>`}
+        ${embed}
+        <div class="discord-preview-actions">
+          <span class="discord-preview-action">Reclamar ticket</span>
+          <span class="discord-preview-action">Cerrar ticket</span>
         </div>
       `;
+    }
+
+    function renderAlbionRegistration() {
+      const config = state.albionRegistrationConfig || {};
+      const roleSelect = document.getElementById("albionRole");
+      const channelSelect = document.getElementById("albionLogChannel");
+      roleSelect.innerHTML = `<option value="">Seleccionar rol</option>${state.ticketRoles.map(role =>
+        `<option value="${escapeHtml(role.id)}">${escapeHtml(role.name)}</option>`
+      ).join("")}`;
+      channelSelect.innerHTML = `<option value="">Sin canal de registros</option>${state.ticketChannels.map(channel =>
+        `<option value="${escapeHtml(channel.id)}"># ${escapeHtml(channel.name)}</option>`
+      ).join("")}`;
+
+      document.getElementById("albionGuildName").value = config.albion_guild_name || "";
+      roleSelect.value = config.role_id || "";
+      document.getElementById("albionLeaveAction").value = config.leave_action || "remove_roles";
+      channelSelect.value = config.log_channel_id || "";
+      document.getElementById("albionSyncNickname").checked = Boolean(config.sync_nickname);
+
+      const active = state.albionRegistrations.filter(item => item.status === "active").length;
+      document.getElementById("albionRegistrationTotal").textContent = state.albionRegistrations.length;
+      document.getElementById("albionRegistrationActiveTotal").textContent = active;
+      const body = document.getElementById("albionRegistrationsBody");
+      body.innerHTML = state.albionRegistrations.map(item => `
+        <tr>
+          <td>${escapeHtml(item.discord_user_name || item.discord_user_id || "")}</td>
+          <td>${escapeHtml(item.player_name || "")}</td>
+          <td>${escapeHtml(item.albion_guild_name || "Sin gremio")}</td>
+          <td>${escapeHtml(item.status === "active" ? "Activo" : item.status === "kicked" ? "Expulsado" : "Fuera del gremio")}</td>
+          <td>${escapeHtml(item.last_checked_at || "")}</td>
+        </tr>
+      `).join("");
+      document.getElementById("albionRegistrationsEmpty").hidden = state.albionRegistrations.length > 0;
+    }
+
+    function parseReportAmount(value) {
+      const text = String(value || "").trim().toLowerCase().replace(",", ".");
+      const suffixMatch = text.match(/(k|m|b|mil|millon|millones)\b/);
+      const multipliers = {
+        k: 1000,
+        mil: 1000,
+        m: 1000000,
+        millon: 1000000,
+        millones: 1000000,
+        b: 1000000000
+      };
+      if (suffixMatch) {
+        const amountMatch = text.match(/\d+(?:\.\d+)?/);
+        if (!amountMatch) return 0;
+        return Math.floor(Number(amountMatch[0]) * (multipliers[suffixMatch[1]] || 1));
+      }
+      const digits = text.replace(/\D/g, "");
+      return digits ? Number(digits) : 0;
+    }
+
+    function reportCalculatorModeConfig(mode) {
+      return {
+        showItems: mode !== "silver",
+        showSilver: mode !== "items",
+        showCosts: mode !== "items"
+      };
+    }
+
+    function setReportFieldVisible(fieldId, visible) {
+      const field = document.getElementById(fieldId);
+      if (field) field.hidden = !visible;
+    }
+
+    function applyReportModeVisibility(mode) {
+      const config = reportCalculatorModeConfig(mode);
+      setReportFieldVisible("reportItemsField", config.showItems);
+      setReportFieldVisible("reportSilverField", config.showSilver);
+      setReportFieldVisible("reportMapCostField", config.showCosts);
+      setReportFieldVisible("reportRepairCostField", config.showCosts);
+      return config;
+    }
+
+    function reportCalculatorValues() {
+      const participantCount = state.reportCalculator?.participants?.length || 0;
+      const mode = document.getElementById("reportSplitMode").value;
+      const config = applyReportModeVisibility(mode);
+      const items = config.showItems ? parseReportAmount(document.getElementById("reportItems").value) : 0;
+      const silver = config.showSilver ? parseReportAmount(document.getElementById("reportSilver").value) : 0;
+      const mapCost = config.showCosts ? parseReportAmount(document.getElementById("reportMapCost").value) : 0;
+      const repairCost = config.showCosts ? parseReportAmount(document.getElementById("reportRepairCost").value) : 0;
+      const netSilver = Math.max(silver - mapCost - repairCost, 0);
+      let itemPool = 0;
+      let silverPool = 0;
+      if (mode === "items") itemPool = items;
+      else if (mode === "silver") silverPool = netSilver;
+      else {
+        itemPool = items;
+        silverPool = netSilver;
+      }
+      return {
+        mode,
+        config,
+        items,
+        silver,
+        mapCost,
+        repairCost,
+        itemPool,
+        silverPool,
+        total: itemPool + silverPool,
+        itemPerUser: participantCount ? Math.floor(itemPool / participantCount) : 0,
+        silverPerUser: participantCount ? Math.floor(silverPool / participantCount) : 0
+      };
+    }
+
+    function renderReportCalculator() {
+      const calculator = state.reportCalculator;
+      const participants = calculator?.participants || [];
+      document.getElementById("reportCalculatorParticipantsTotal").textContent = participants.length;
+      document.getElementById("reportCalculatorSubtitle").textContent = calculator
+        ? `${calculator.title} - Caller: ${calculator.caller_name || calculator.caller_id}`
+        : "Abre esta seccion desde el boton Enviar informe de una Ava finalizada.";
+      document.getElementById("reportParticipantsList").innerHTML = participants.length
+        ? participants.map(participant => `
+            <article class="report-participant-card">
+              <strong>${escapeHtml(`${participant.index}. ${participant.slot}`)}</strong>
+              <span class="muted">${escapeHtml(participant.user_id)}</span>
+            </article>
+          `).join("")
+        : `<article class="report-participant-card"><strong>Sin integrantes cargados</strong><span class="muted">Abre una Ava finalizada desde Discord.</span></article>`;
+
+      const values = reportCalculatorValues();
+      document.getElementById("reportItemsPerUserStat").hidden = !values.config.showItems;
+      document.getElementById("reportSilverPerUserStat").hidden = !values.config.showSilver;
+      document.getElementById("reportItemsPerUser").textContent = formatNumber(values.itemPerUser);
+      document.getElementById("reportSilverPerUser").textContent = formatNumber(values.silverPerUser);
+      document.getElementById("reportNetTotal").textContent = formatNumber(values.total);
+      const breakdown = [];
+      if (values.config.showItems) breakdown.push(`Items netos: ${escapeHtml(formatNumber(values.itemPool))}`);
+      if (values.config.showSilver) breakdown.push(`Silver neto: ${escapeHtml(formatNumber(values.silverPool))}`);
+      if (values.config.showCosts) {
+        breakdown.push(`Mapa: -${escapeHtml(formatNumber(values.mapCost))}`);
+        breakdown.push(`Reparaciones: -${escapeHtml(formatNumber(values.repairCost))}`);
+      }
+      document.getElementById("reportCalculatorBreakdown").innerHTML = breakdown.length
+        ? breakdown.join("<br>")
+        : "Completa los datos para calcular el reparto.";
+      document.getElementById("submitReportCalculatorButton").disabled = !calculator || calculator.report_sent || calculator.cancelled || !calculator.finalized;
+    }
+
+    function resetReportCalculator() {
+      ["reportEstimated", "reportItems", "reportSilver", "reportMapCost", "reportRepairCost", "reportAdjustments"].forEach(id => {
+        document.getElementById(id).value = "";
+      });
+      document.getElementById("reportCalculatorStatus").textContent = "";
+      renderReportCalculator();
+    }
+
+    async function loadReportCalculator() {
+      if (!state.reportContext) return;
+      const params = new URLSearchParams({
+        guild_id: state.reportContext.guildId,
+        caller_id: state.reportContext.callerId,
+        ava: state.reportContext.ava
+      });
+      const response = await fetch(`/api/report-calculator?${params.toString()}`, { cache: "no-store" });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || "No pude cargar la calculadora.");
+      state.reportCalculator = payload.calculator;
+      state.guildId = payload.calculator.guild_id;
+      renderReportCalculator();
+    }
+
+    async function submitReportCalculator() {
+      if (!state.reportCalculator) throw new Error("No hay una Ava cargada.");
+      const status = document.getElementById("reportCalculatorStatus");
+      const mode = document.getElementById("reportSplitMode").value;
+      const config = reportCalculatorModeConfig(mode);
+      status.textContent = "Enviando informe al bot...";
+      const response = await fetch("/api/report-calculator", {
+        method: "POST",
+        headers: csrfHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({
+          guild_id: state.reportCalculator.guild_id,
+          caller_id: state.reportCalculator.caller_id,
+          numero_ava: state.reportCalculator.numero_ava,
+          split_mode: mode,
+          estimated: document.getElementById("reportEstimated").value,
+          items: config.showItems ? document.getElementById("reportItems").value : "",
+          silver: config.showSilver ? document.getElementById("reportSilver").value : "",
+          costs: config.showCosts ? `mapa=${document.getElementById("reportMapCost").value}; repa=${document.getElementById("reportRepairCost").value}` : "",
+          adjustments: document.getElementById("reportAdjustments").value
+        })
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || "No pude enviar el informe.");
+      state.reportRequestId = payload.request.id;
+      status.textContent = "El bot esta procesando el informe...";
+      await pollReportRequest();
+    }
+
+    async function pollReportRequest() {
+      if (!state.reportRequestId) return;
+      const params = new URLSearchParams({ request_id: state.reportRequestId });
+      const response = await fetch(`/api/report-calculator?${params.toString()}`, { cache: "no-store" });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || "No pude consultar el envio.");
+      const request = payload.request;
+      if (request.status === "completed") {
+        document.getElementById("reportCalculatorStatus").textContent = "Informe enviado a evaluacion.";
+        state.reportCalculator.report_sent = true;
+        renderReportCalculator();
+        return;
+      }
+      if (request.status === "error") {
+        throw new Error(request.error || "El bot no pudo enviar el informe.");
+      }
+      setTimeout(() => pollReportRequest().catch(error => {
+        document.getElementById("reportCalculatorStatus").textContent = error.message;
+      }), 1500);
     }
 
     function applyTheme() {
@@ -4258,18 +6580,43 @@ INDEX_HTML = r"""<!doctype html>
 
     function renderSections() {
       document.getElementById("appShell").classList.toggle("sidebar-collapsed", state.sidebarCollapsed);
-      document.getElementById("appShell").classList.toggle("transcript-open", state.section === "tickets" && state.ticketTranscriptOpen);
-      document.body.classList.toggle("transcript-open", state.section === "tickets" && state.ticketTranscriptOpen);
+      const sidebarToggle = document.getElementById("sidebarToggle");
+      const sidebarToggleLabel = state.sidebarCollapsed ? "Expandir secciones" : "Minimizar secciones";
+      sidebarToggle.setAttribute("aria-label", sidebarToggleLabel);
+      sidebarToggle.title = sidebarToggleLabel;
+      sidebarToggle.setAttribute("aria-expanded", String(!state.sidebarCollapsed));
+      if (!canUseSection(state.section)) {
+        const firstAllowed = [...document.querySelectorAll(".section-button")]
+          .find(button => canUseSection(button.dataset.section));
+        state.section = firstAllowed?.dataset.section || "tickets";
+        localStorage.setItem("dashboardSection", state.section);
+      }
       document.getElementById("economySection").hidden = state.section !== "economy";
       document.getElementById("templatesSection").hidden = state.section !== "templates";
+      document.getElementById("lootSection").hidden = state.section !== "loot";
       document.getElementById("ticketsSection").hidden = state.section !== "tickets";
+      document.getElementById("reportCalculatorSection").hidden = state.section !== "report-calculator";
+      document.getElementById("registrationSection").hidden = state.section !== "registration";
       document.getElementById("welcomeSection").hidden = state.section !== "welcome";
       document.getElementById("auditSection").hidden = state.section !== "audit";
       document.getElementById("permissionsSection").hidden = state.section !== "permissions";
       document.getElementById("searchInput").hidden = state.section !== "economy";
       document.querySelectorAll(".section-button").forEach(button => {
-        button.classList.toggle("active", button.dataset.section === state.section);
+        button.hidden = !canUseSection(button.dataset.section);
+        const active = button.dataset.section === state.section;
+        button.classList.toggle("active", active);
+        if (active) button.setAttribute("aria-current", "page");
+        else button.removeAttribute("aria-current");
       });
+    }
+
+    function canUseSection(section) {
+      const access = state.data?.access || {};
+      if (access.admin) return true;
+      if (section === "tickets") return Boolean(access.tickets);
+      if (section === "permissions") return Boolean(access.permissions);
+      if (section === "report-calculator") return Boolean(state.reportContext);
+      return false;
     }
 
     function renderSession() {
@@ -4309,6 +6656,7 @@ INDEX_HTML = r"""<!doctype html>
       state.guildId = state.data.selectedGuildId || "";
       if (state.guildId) localStorage.setItem("dashboardGuildId", state.guildId);
       await loadTicketConfig();
+      await loadReportCalculator();
       render();
     }
 
@@ -4324,7 +6672,7 @@ INDEX_HTML = r"""<!doctype html>
       if (state.ticketConfigGuildId === state.guildId && state.ticketPanels.length) return;
 
       const params = new URLSearchParams({ guild_id: state.guildId });
-      const [panelsResponse, channelsResponse, categoriesResponse, emojisResponse, rolesResponse, recordsResponse, auditResponse, auditEventsResponse, templatesResponse, botPermissionsResponse] = await Promise.all([
+      const [panelsResponse, channelsResponse, categoriesResponse, emojisResponse, rolesResponse, recordsResponse, auditResponse, auditEventsResponse, templatesResponse, botPermissionsResponse, albionRegistrationResponse] = await Promise.all([
         fetch(`/api/ticket-panels?${params.toString()}`, { cache: "no-store" }),
         fetch(`/api/discord-channels?${params.toString()}`, { cache: "no-store" }),
         fetch(`/api/discord-categories?${params.toString()}`, { cache: "no-store" }),
@@ -4334,7 +6682,8 @@ INDEX_HTML = r"""<!doctype html>
         fetch(`/api/audit-config?${params.toString()}`, { cache: "no-store" }),
         fetch(`/api/audit-events?${params.toString()}`, { cache: "no-store" }),
         fetch(`/api/ping-templates?${params.toString()}`, { cache: "no-store" }),
-        fetch(`/api/bot-permissions?${params.toString()}`, { cache: "no-store" })
+        fetch(`/api/bot-permissions?${params.toString()}`, { cache: "no-store" }),
+        fetch(`/api/albion-registration?${params.toString()}`, { cache: "no-store" })
       ]);
 
       if (panelsResponse.ok) {
@@ -4360,6 +6709,7 @@ INDEX_HTML = r"""<!doctype html>
       if (recordsResponse.ok) {
         const payload = await recordsResponse.json();
         state.ticketRecords = payload.records || [];
+        state.ticketRecordsSummary = payload.summary || {};
       }
       if (auditResponse.ok) {
         const payload = await auditResponse.json();
@@ -4385,12 +6735,29 @@ INDEX_HTML = r"""<!doctype html>
         state.botPermissions = payload.permissions || {};
         state.botPermissionOptions = payload.options || [];
       }
+      if (albionRegistrationResponse.ok) {
+        const payload = await albionRegistrationResponse.json();
+        state.albionRegistrationConfig = payload.config || null;
+        state.albionRegistrations = payload.registrations || [];
+      }
       state.ticketConfigGuildId = state.guildId;
       state.ticketPanelsDirty = false;
       if (!state.ticketPanels.some(panel => panel.id === state.currentTicketPanelId)) {
         state.currentTicketPanelId = "";
         localStorage.removeItem("dashboardTicketPanelId");
       }
+    }
+
+    async function loadTicketRecordsLive() {
+      if (!state.guildId) return;
+      const params = new URLSearchParams({ guild_id: state.guildId });
+      const response = await fetch(`/api/ticket-records?${params.toString()}`, { cache: "no-store" });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || "No pude cargar tickets en vivo.");
+      state.ticketRecords = payload.records || [];
+      state.ticketRecordsSummary = payload.summary || {};
+      renderTicketLiveSummary();
+      renderTicketRecords();
     }
 
     async function saveTicketPanels() {
@@ -4515,8 +6882,34 @@ INDEX_HTML = r"""<!doctype html>
       renderPermissions();
     }
 
+    async function saveAlbionRegistration() {
+      const status = document.getElementById("albionRegistrationStatus");
+      status.textContent = "Validando el gremio en Albion Online...";
+      const response = await fetch("/api/albion-registration", {
+        method: "POST",
+        headers: csrfHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({
+          guild_id: state.guildId,
+          albion_guild_name: document.getElementById("albionGuildName").value.trim(),
+          role_id: document.getElementById("albionRole").value,
+          leave_action: document.getElementById("albionLeaveAction").value,
+          log_channel_id: document.getElementById("albionLogChannel").value,
+          sync_nickname: document.getElementById("albionSyncNickname").checked
+        })
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || "No pude guardar el registro de Albion.");
+      state.albionRegistrationConfig = payload.config || null;
+      state.albionRegistrations = payload.registrations || [];
+      renderAlbionRegistration();
+      status.textContent = `Configuracion guardada para ${payload.config?.albion_guild_name || "el gremio"}.`;
+    }
+
     async function publishCurrentTicketPanel() {
       persistCurrentTicketPanel();
+      if (state.ticketPanelsDirty) {
+        await saveTicketPanels();
+      }
       const panel = currentTicketPanel();
       if (!panel) return;
       const response = await fetch("/api/publish-ticket-panel", {
@@ -4562,10 +6955,79 @@ INDEX_HTML = r"""<!doctype html>
 
     document.querySelectorAll(".section-button").forEach(button => {
       button.addEventListener("click", () => {
+        if (!canUseSection(button.dataset.section)) return;
         state.section = button.dataset.section;
         localStorage.setItem("dashboardSection", state.section);
         render();
       });
+    });
+
+    document.getElementById("lootFileInput").addEventListener("change", event => {
+      const file = event.target.files?.[0];
+      loadLootFile(file)
+        .catch(showLootError)
+        .finally(() => {
+          event.target.value = "";
+        });
+    });
+
+    document.getElementById("lootReplaceButton").addEventListener("click", () => {
+      document.getElementById("lootFileInput").value = "";
+      document.getElementById("lootFileInput").click();
+    });
+
+    document.getElementById("lootClearButton").addEventListener("click", clearLoot);
+
+    document.getElementById("lootIconSize").addEventListener("input", event => {
+      state.loot.iconSize = Number(event.target.value);
+      renderLoot();
+    });
+
+    document.getElementById("lootGroupToggle").addEventListener("click", () => {
+      state.loot.groupByTier = !state.loot.groupByTier;
+      renderLoot();
+    });
+
+    const lootDropzone = document.getElementById("lootDropzone");
+    ["dragenter", "dragover"].forEach(eventName => {
+      lootDropzone.addEventListener(eventName, event => {
+        event.preventDefault();
+        lootDropzone.classList.add("dragging");
+      });
+    });
+    ["dragleave", "drop"].forEach(eventName => {
+      lootDropzone.addEventListener(eventName, event => {
+        event.preventDefault();
+        lootDropzone.classList.remove("dragging");
+      });
+    });
+    lootDropzone.addEventListener("drop", event => {
+      loadLootFile(event.dataTransfer?.files?.[0]).catch(showLootError);
+    });
+
+    document.getElementById("lootTierButtons").addEventListener("click", event => {
+      const button = event.target.closest("[data-loot-tier]");
+      if (button) toggleLootTier(Number(button.dataset.lootTier));
+    });
+
+    document.getElementById("lootPlayers").addEventListener("click", event => {
+      const detail = event.target.closest("[data-loot-detail-item]");
+      if (detail) {
+        showLootDetail(detail.dataset.lootDetailPlayer, detail.dataset.lootDetailItem);
+        return;
+      }
+      const item = event.target.closest("[data-loot-item]");
+      if (item) toggleLootItem(item.dataset.lootPlayer, item.dataset.lootItem);
+    });
+
+    document.getElementById("lootModal").addEventListener("click", event => {
+      if (event.target.id === "lootModal" || event.target.closest("[data-loot-modal-close]")) {
+        closeLootDetail();
+      }
+    });
+
+    document.addEventListener("keydown", event => {
+      if (event.key === "Escape" && !document.getElementById("lootModal").hidden) closeLootDetail();
     });
 
     document.querySelectorAll(".editor-tab").forEach(button => {
@@ -4576,7 +7038,7 @@ INDEX_HTML = r"""<!doctype html>
       });
     });
 
-    ["ticketName", "ticketMode", "ticketChannel", "ticketOpenCategory", "ticketColor", "ticketContent", "ticketTitle", "ticketFooter", "ticketDescription", "ticketImage", "ticketOpenTitle", "ticketOpenColor", "ticketOpenDescription", "claimRoles", "closeRoles", "reopenRoles", "deleteRoles"].forEach(id => {
+    ["ticketName", "ticketMode", "ticketChannel", "ticketOpenCategory", "ticketColor", "ticketContent", "ticketTitle", "ticketFooter", "ticketDescription", "ticketImage", "ticketOpenContent", "ticketOpenTitle", "ticketOpenColor", "ticketOpenDescription", "ticketOpenFooter", "ticketOpenImage", "ticketOpenThumbnail", "claimRoles", "closeRoles", "reopenRoles", "deleteRoles"].forEach(id => {
       document.getElementById(id).addEventListener("input", () => {
         if (id.endsWith("Roles")) enforceRoleLimit(document.getElementById(id));
         persistCurrentTicketPanel();
@@ -4659,8 +7121,9 @@ INDEX_HTML = r"""<!doctype html>
     });
 
     document.getElementById("refreshTicketRecordsButton").addEventListener("click", () => {
-      state.ticketConfigGuildId = "";
-      loadTicketConfig().then(renderTickets).catch(showError);
+      loadTicketRecordsLive().catch(error => {
+        document.getElementById("ticketLiveStatus").textContent = error.message;
+      });
     });
 
     document.getElementById("newTemplateButton").addEventListener("click", () => {
@@ -4696,8 +7159,15 @@ INDEX_HTML = r"""<!doctype html>
       });
     });
 
-    document.getElementById("backToTicketsButton").addEventListener("click", () => {
-      closeTicketTranscript();
+    document.getElementById("closeLiveTicketButton").addEventListener("click", () => {
+      closeLiveTicket();
+    });
+
+    document.getElementById("ticketLiveForm").addEventListener("submit", event => {
+      event.preventDefault();
+      sendLiveTicketMessage().catch(error => {
+        document.getElementById("ticketLiveMessageStatus").textContent = error.message;
+      });
     });
 
     document.getElementById("createPanelButton").addEventListener("click", () => {
@@ -4726,6 +7196,7 @@ INDEX_HTML = r"""<!doctype html>
       state.ticketPanelsDirty = true;
       localStorage.setItem("dashboardTicketPanelId", clone.id);
       renderTickets();
+      document.getElementById("ticketStatus").textContent = "Panel clonado. Guarda la configuracion y envia este panel a Discord para que tenga numeracion propia.";
     });
 
     document.getElementById("deletePanelButton").addEventListener("click", () => {
@@ -4752,6 +7223,27 @@ INDEX_HTML = r"""<!doctype html>
       renderTickets();
     });
 
+    document.getElementById("addTicketPermissionRoleButton").addEventListener("click", () => {
+      persistCurrentTicketPanel();
+      const panel = currentTicketPanel();
+      if (!panel) return;
+      panel.permissions = panel.permissions || {};
+      const entries = Array.isArray(panel.permissions.ticket_role_permissions)
+        ? panel.permissions.ticket_role_permissions
+        : [];
+      if (entries.length >= 20) {
+        document.getElementById("ticketStatus").textContent = "Puedes configurar maximo 20 roles con permisos de canal.";
+        return;
+      }
+      entries.push({
+        role_id: "",
+        permissions: ["view_channel", "read_message_history"]
+      });
+      panel.permissions.ticket_role_permissions = entries;
+      state.ticketPanelsDirty = true;
+      renderTicketRolePermissions(panel);
+    });
+
     document.getElementById("savePanelButton").addEventListener("click", () => {
       saveTicketPanels().catch(error => {
         document.getElementById("ticketStatus").textContent = error.message;
@@ -4774,6 +7266,35 @@ INDEX_HTML = r"""<!doctype html>
       state.botPermissions = collectBotPermissions();
       saveBotPermissions().catch(error => {
         document.getElementById("permissionsStatus").textContent = error.message;
+      });
+    });
+
+    document.getElementById("saveAlbionRegistrationButton").addEventListener("click", () => {
+      saveAlbionRegistration().catch(error => {
+        document.getElementById("albionRegistrationStatus").textContent = error.message;
+      });
+    });
+
+    ["reportSplitMode", "reportEstimated", "reportItems", "reportSilver", "reportMapCost", "reportRepairCost", "reportAdjustments"].forEach(id => {
+      document.getElementById(id).addEventListener("input", renderReportCalculator);
+      document.getElementById(id).addEventListener("change", renderReportCalculator);
+    });
+
+    document.getElementById("submitReportCalculatorButton").addEventListener("click", () => {
+      submitReportCalculator().catch(error => {
+        document.getElementById("reportCalculatorStatus").textContent = error.message;
+      });
+    });
+
+    document.getElementById("resetReportCalculatorButton").addEventListener("click", resetReportCalculator);
+
+    document.getElementById("refreshAlbionRegistrationButton").addEventListener("click", () => {
+      state.ticketConfigGuildId = "";
+      loadTicketConfig().then(() => {
+        renderAlbionRegistration();
+        document.getElementById("albionRegistrationStatus").textContent = "Registro recargado.";
+      }).catch(error => {
+        document.getElementById("albionRegistrationStatus").textContent = error.message;
       });
     });
 
@@ -4826,6 +7347,18 @@ INDEX_HTML = r"""<!doctype html>
       if (state.userInteracting || state.section !== "economy") return;
       loadData().catch(showError);
     }, 3000);
+
+    setInterval(() => {
+      if (state.section !== "tickets") return;
+      loadTicketRecordsLive().catch(error => {
+        document.getElementById("ticketLiveStatus").textContent = error.message;
+      });
+      if (state.selectedLiveTicketId) {
+        loadLiveTicketMessages().catch(error => {
+          document.getElementById("ticketLiveMessageStatus").textContent = error.message;
+        });
+      }
+    }, 5000);
   </script>
 </body>
 </html>
@@ -4873,6 +7406,75 @@ class DashboardHandler(BaseHTTPRequestHandler):
         allowed_guilds = {guild["id"] for guild in session.get("admin_guilds", [])}
         bot_guild_ids = get_bot_guild_ids()
         return str(guild_id) in allowed_guilds and (bot_guild_ids is None or str(guild_id) in bot_guild_ids)
+
+    def is_guild_admin(self, session, guild_id):
+        return str(guild_id) in {guild["id"] for guild in session.get("admin_guilds", [])}
+
+    def session_member_guild_ids(self, session):
+        return {
+            str(guild.get("id"))
+            for guild in (session.get("guilds") or session.get("admin_guilds", []))
+            if guild.get("id")
+        }
+
+    def session_has_bot_permission(self, session, guild_id, permission):
+        guild_id = str(guild_id or "")
+        if not guild_id:
+            return False
+        bot_guild_ids = get_bot_guild_ids()
+        if bot_guild_ids is not None and guild_id not in bot_guild_ids:
+            return False
+        if self.is_guild_admin(session, guild_id):
+            return True
+        if guild_id not in self.session_member_guild_ids(session):
+            return False
+        role_ids = get_discord_member_role_ids(guild_id, session.get("user", {}).get("id"))
+        return role_ids_have_permission(guild_id, role_ids, permission)
+
+    def can_access_tickets(self, session, guild_id):
+        return self.session_has_bot_permission(session, guild_id, PERMISSION_TICKETS)
+
+    def can_access_guild_or_tickets(self, session, guild_id):
+        return self.can_access_guild(session, guild_id) or self.can_access_tickets(session, guild_id)
+
+    def dashboard_allowed_guilds(self, session):
+        bot_guild_ids = get_bot_guild_ids()
+        allowed = {
+            guild["id"]: guild["name"]
+            for guild in session.get("admin_guilds", [])
+            if bot_guild_ids is None or str(guild["id"]) in bot_guild_ids
+        }
+        user_id = session.get("user", {}).get("id")
+        for guild in session.get("guilds", []):
+            guild_id = str(guild.get("id") or "")
+            if not guild_id or guild_id in allowed:
+                continue
+            if bot_guild_ids is not None and guild_id not in bot_guild_ids:
+                continue
+            role_ids = get_discord_member_role_ids(guild_id, user_id)
+            if role_ids_have_permission(guild_id, role_ids, PERMISSION_TICKETS):
+                allowed[guild_id] = str(guild.get("name") or f"Servidor {guild_id}")
+        return allowed
+
+    def dashboard_access_payload(self, session, guild_id):
+        admin = self.is_guild_admin(session, guild_id)
+        return {
+            "admin": admin,
+            "tickets": self.can_access_tickets(session, guild_id),
+            "permissions": self.session_has_bot_permission(session, guild_id, PERMISSION_PERMISSIONS),
+        }
+
+    def can_access_report_calculator(self, session, guild_id, caller_id):
+        member_guilds = {
+            guild["id"]
+            for guild in (session.get("guilds") or session.get("admin_guilds", []))
+        }
+        bot_guild_ids = get_bot_guild_ids()
+        return (
+            str(session.get("user", {}).get("id") or "") == str(caller_id)
+            and str(guild_id) in member_guilds
+            and (bot_guild_ids is None or str(guild_id) in bot_guild_ids)
+        )
 
     def has_same_origin(self):
         host = self.headers.get("Host", "")
@@ -4965,6 +7567,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
         query = parse_qs(urlparse(self.path).query)
         remember_device = query.get("remember", [""])[0] == "1"
+        next_path = safe_dashboard_next(query.get("next", ["/dashboard"])[0])
         state = secrets.token_urlsafe(24)
         params = urlencode({
             "client_id": DASHBOARD_CLIENT_ID,
@@ -4973,7 +7576,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "scope": "identify guilds",
             "state": state,
         })
-        remember_oauth_state(state, remember_device)
+        remember_oauth_state(state, remember_device, next_path)
         self.send_redirect(
             f"https://discord.com/oauth2/authorize?{params}",
             headers={"Set-Cookie": make_state_cookie(state)},
@@ -5016,13 +7619,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "username": str(user.get("global_name") or user.get("username") or "Discord"),
             },
             admin_guilds,
+            guilds_from_discord(guilds),
             remember_device=state_payload.get("remember_device", False),
         )
         ttl = REMEMBER_SESSION_TTL_SECONDS if state_payload.get("remember_device", False) else SESSION_TTL_SECONDS
         headers = {
             "Set-Cookie": make_cookie_value(encode_session_cookie(session_id), ttl),
         }
-        self.send_redirect("/dashboard", headers=headers)
+        self.send_redirect(
+            safe_dashboard_next(state_payload.get("next_path")),
+            headers=headers,
+        )
 
     def handle_logout(self):
         clear_session_from_request(self)
@@ -5034,16 +7641,27 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
         if parsed.path == "/":
+            query = parse_qs(parsed.query)
+            next_path = safe_dashboard_next(query.get("next", ["/dashboard"])[0])
             if get_session_from_request(self):
-                self.send_redirect("/dashboard")
+                self.send_redirect(next_path)
                 return
 
-            self.send_text(200, LOGIN_HTML, "text/html")
+            login_html = LOGIN_HTML.replace(
+                '<form action="/login" method="get">',
+                (
+                    '<form action="/login" method="get">'
+                    f'<input type="hidden" name="next" value="{html.escape(next_path, quote=True)}">'
+                ),
+            )
+            self.send_text(200, login_html, "text/html")
             return
 
         if parsed.path == "/dashboard":
             if not get_session_from_request(self):
-                self.send_redirect("/")
+                self.send_redirect(
+                    f"/?next={urlencode({'value': self.path})[6:]}"
+                )
                 return
 
             self.send_text(200, INDEX_HTML, "text/html")
@@ -5105,10 +7723,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             query = parse_qs(parsed.query)
             guild_id = query.get("guild_id", [""])[0]
             try:
-                allowed_guilds = {
-                    guild["id"]: guild["name"]
-                    for guild in session.get("admin_guilds", [])
-                }
+                allowed_guilds = self.dashboard_allowed_guilds(session)
                 payload = build_dashboard_data(
                     guild_id,
                     allowed_guilds=allowed_guilds,
@@ -5116,6 +7731,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     viewer=session.get("user", {}),
                 )
                 payload["csrf_token"] = session.get("csrf_token", "")
+                payload["access"] = self.dashboard_access_payload(session, payload.get("selectedGuildId"))
+                if payload.get("selectedGuildId") and not payload["access"].get("admin"):
+                    payload["balances"] = []
+                    payload["operations"] = []
+                    payload["avalonians"] = []
+                    payload["reports"] = []
+                    payload["totals"] = {"players": 0, "items": 0, "silver": 0, "total": 0}
                 self.send_json(200, payload)
             except Exception as exc:
                 self.send_json(500, {"error": str(exc)})
@@ -5128,11 +7750,65 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
             query = parse_qs(parsed.query)
             guild_id = query.get("guild_id", [""])[0]
-            if not guild_id or not self.can_access_guild(session, guild_id):
+            if not guild_id or not self.can_access_tickets(session, guild_id):
                 self.send_json(403, {"error": "No tienes acceso a ese servidor."})
                 return
 
             self.send_json(200, {"panels": get_guild_ticket_panels(guild_id)})
+            return
+
+        if parsed.path == "/api/report-calculator":
+            session = self.get_authenticated_session()
+            if not session:
+                return
+
+            query = parse_qs(parsed.query)
+            guild_id = query.get("guild_id", [""])[0]
+            caller_id = query.get("caller_id", [""])[0]
+            numero_ava = query.get("ava", [""])[0]
+            request_id = query.get("request_id", [""])[0]
+            if request_id:
+                request = ReportDashboardRepository().get(request_id)
+                payload = request.get("payload", {}) if request else {}
+                if (
+                    not request
+                    or not self.can_access_report_calculator(
+                        session,
+                        payload.get("guild_id"),
+                        payload.get("caller_id"),
+                    )
+                ):
+                    self.send_json(404, {"error": "No encontre esa solicitud."})
+                    return
+                self.send_json(200, {"request": request})
+                return
+
+            if not self.can_access_report_calculator(session, guild_id, caller_id):
+                self.send_json(403, {"error": "Solo el caller puede abrir esta calculadora."})
+                return
+
+            state = get_active_avalonian_state(guild_id, caller_id, numero_ava)
+            if not state:
+                self.send_json(404, {"error": "No encontre esta Ava."})
+                return
+            self.send_json(200, {"calculator": serialize_report_calculator_state(state)})
+            return
+
+        if parsed.path == "/api/albion-registration":
+            session = self.get_authenticated_session()
+            if not session:
+                return
+
+            query = parse_qs(parsed.query)
+            guild_id = query.get("guild_id", [""])[0]
+            if not guild_id or not self.can_access_guild_or_tickets(session, guild_id):
+                self.send_json(403, {"error": "No tienes acceso a ese servidor."})
+                return
+
+            try:
+                self.send_json(200, get_albion_registration_payload(guild_id))
+            except Exception as exc:
+                self.send_json(500, {"error": str(exc)})
             return
 
         if parsed.path == "/api/discord-channels":
@@ -5142,7 +7818,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
             query = parse_qs(parsed.query)
             guild_id = query.get("guild_id", [""])[0]
-            if not guild_id or not self.can_access_guild(session, guild_id):
+            if not guild_id or not self.can_access_guild_or_tickets(session, guild_id):
                 self.send_json(403, {"error": "No tienes acceso a ese servidor."})
                 return
 
@@ -5169,7 +7845,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
             query = parse_qs(parsed.query)
             guild_id = query.get("guild_id", [""])[0]
-            if not guild_id or not self.can_access_guild(session, guild_id):
+            if not guild_id or not self.can_access_guild_or_tickets(session, guild_id):
                 self.send_json(403, {"error": "No tienes acceso a ese servidor."})
                 return
 
@@ -5196,7 +7872,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
             query = parse_qs(parsed.query)
             guild_id = query.get("guild_id", [""])[0]
-            if not guild_id or not self.can_access_guild(session, guild_id):
+            if not guild_id or not self.can_access_guild_or_tickets(session, guild_id):
                 self.send_json(403, {"error": "No tienes acceso a ese servidor."})
                 return
 
@@ -5228,7 +7904,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
             query = parse_qs(parsed.query)
             guild_id = query.get("guild_id", [""])[0]
-            if not guild_id or not self.can_access_guild(session, guild_id):
+            if not guild_id or not self.can_access_guild_or_tickets(session, guild_id):
                 self.send_json(403, {"error": "No tienes acceso a ese servidor."})
                 return
 
@@ -5255,7 +7931,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
             query = parse_qs(parsed.query)
             guild_id = query.get("guild_id", [""])[0]
-            if not guild_id or not self.can_access_guild(session, guild_id):
+            if not guild_id or not self.can_access_tickets(session, guild_id):
                 self.send_json(403, {"error": "No tienes acceso a ese servidor."})
                 return
 
@@ -5275,11 +7951,46 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
             query = parse_qs(parsed.query)
             guild_id = query.get("guild_id", [""])[0]
-            if not guild_id or not self.can_access_guild(session, guild_id):
+            if not guild_id or not self.can_access_tickets(session, guild_id):
                 self.send_json(403, {"error": "No tienes acceso a ese servidor."})
                 return
 
-            self.send_json(200, {"records": get_guild_ticket_records(guild_id)})
+            records = get_guild_ticket_records(guild_id)
+            self.send_json(200, {
+                "records": records,
+                "summary": ticket_records_summary(records),
+            })
+            return
+
+        if parsed.path == "/api/ticket-live":
+            session = self.get_authenticated_session()
+            if not session:
+                return
+
+            query = parse_qs(parsed.query)
+            guild_id = query.get("guild_id", [""])[0]
+            channel_id = query.get("channel_id", [""])[0]
+            if not guild_id or not self.can_access_guild(session, guild_id):
+                self.send_json(403, {"error": "No tienes acceso a ese servidor."})
+                return
+            record = get_ticket_record(guild_id, channel_id)
+            if not record:
+                self.send_json(404, {"error": "No encontre ese ticket."})
+                return
+
+            try:
+                messages = discord_json_request(
+                    f"/channels/{channel_id}/messages?limit=50",
+                    token=BOT_TOKEN,
+                    auth_scheme="Bot",
+                )
+                serialized = [serialize_discord_message(message) for message in reversed(messages)]
+                self.send_json(200, {
+                    "messages": serialized,
+                    "updated_at": datetime.now(ARGENTINA_TZ).strftime("%d/%m/%Y | %H:%M:%S"),
+                })
+            except Exception as exc:
+                self.send_json(500, {"error": str(exc)})
             return
 
         if parsed.path == "/api/audit-events":
@@ -5328,7 +8039,52 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         parsed = urlparse(self.path)
-        if parsed.path == "/api/ticket-panels":
+        if parsed.path == "/api/report-calculator":
+            session = self.get_authenticated_session()
+            if not session:
+                return
+            if not self.validate_csrf(session):
+                return
+
+            try:
+                body = self.read_json_body()
+                guild_id = str(body.get("guild_id") or "")
+                caller_id = str(body.get("caller_id") or "")
+                numero_ava = str(body.get("numero_ava") or "")
+                if not self.can_access_report_calculator(session, guild_id, caller_id):
+                    self.send_json(403, {"error": "Solo el caller puede enviar este informe."})
+                    return
+
+                state = get_active_avalonian_state(guild_id, caller_id, numero_ava)
+                if not state:
+                    self.send_json(404, {"error": "No encontre esta Ava."})
+                    return
+                if not state.get("finalized") or state.get("cancelled") or state.get("report_sent"):
+                    self.send_json(400, {"error": "Esta Ava no esta disponible para enviar informe."})
+                    return
+
+                split_mode = str(body.get("split_mode") or "")
+                if split_mode not in {"items", "silver", "items_silver"}:
+                    self.send_json(400, {"error": "Selecciona un modo de reparto valido."})
+                    return
+
+                request = ReportDashboardRepository().create({
+                    "guild_id": guild_id,
+                    "caller_id": caller_id,
+                    "numero_ava": numero_ava,
+                    "estimated": str(body.get("estimated") or "")[:50],
+                    "silver": str(body.get("silver") or "")[:50],
+                    "items": str(body.get("items") or "")[:50],
+                    "costs": str(body.get("costs") or "")[:120],
+                    "adjustments": str(body.get("adjustments") or "")[:500],
+                    "split_mode": split_mode,
+                })
+                self.send_json(202, {"request": request})
+            except Exception as exc:
+                self.send_json(500, {"error": str(exc)})
+            return
+
+        if parsed.path == "/api/albion-registration":
             session = self.get_authenticated_session()
             if not session:
                 return
@@ -5339,6 +8095,30 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 body = self.read_json_body()
                 guild_id = str(body.get("guild_id") or "")
                 if not guild_id or not self.can_access_guild(session, guild_id):
+                    self.send_json(403, {"error": "No tienes acceso a ese servidor."})
+                    return
+
+                self.send_json(
+                    200,
+                    save_albion_registration_config(guild_id, body),
+                )
+            except ValueError as exc:
+                self.send_json(400, {"error": str(exc)})
+            except Exception as exc:
+                self.send_json(500, {"error": str(exc)})
+            return
+
+        if parsed.path == "/api/ticket-panels":
+            session = self.get_authenticated_session()
+            if not session:
+                return
+            if not self.validate_csrf(session):
+                return
+
+            try:
+                body = self.read_json_body()
+                guild_id = str(body.get("guild_id") or "")
+                if not guild_id or not self.can_access_tickets(session, guild_id):
                     self.send_json(403, {"error": "No tienes acceso a ese servidor."})
                     return
 
@@ -5361,7 +8141,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 guild_id = str(body.get("guild_id") or "")
                 channel_id = str(body.get("channel_id") or "")
                 panel = normalize_ticket_panel(body.get("panel", {}))
-                if not guild_id or not self.can_access_guild(session, guild_id):
+                if not guild_id or not self.can_access_tickets(session, guild_id):
                     self.send_json(403, {"error": "No tienes acceso a ese servidor."})
                     return
                 if not channel_id:
@@ -5377,6 +8157,49 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     payload=payload,
                 )
                 self.send_json(200, {"message_id": str(result.get("id", "")), "channel_id": channel_id})
+            except Exception as exc:
+                self.send_json(500, {"error": str(exc)})
+            return
+
+        if parsed.path == "/api/ticket-live-message":
+            session = self.get_authenticated_session()
+            if not session:
+                return
+
+            try:
+                body = self.read_json_body()
+                guild_id = str(body.get("guild_id") or "")
+                channel_id = str(body.get("channel_id") or "")
+                content = str(body.get("content") or "").strip()
+                if not guild_id or not self.can_access_tickets(session, guild_id):
+                    self.send_json(403, {"error": "No tienes acceso a ese servidor."})
+                    return
+                record = get_ticket_record(guild_id, channel_id)
+                if not channel_id or not record:
+                    self.send_json(404, {"error": "No encontre ese ticket."})
+                    return
+                if str(record.get("status") or "open").lower() != "open":
+                    self.send_json(400, {"error": "Solo puedes responder tickets abiertos."})
+                    return
+                if not content:
+                    self.send_json(400, {"error": "El mensaje no puede estar vacio."})
+                    return
+                if len(content) > 1800:
+                    self.send_json(400, {"error": "El mensaje es demasiado largo."})
+                    return
+
+                viewer = session.get("user", {}).get("username") or "Dashboard"
+                result = discord_json_request(
+                    f"/channels/{channel_id}/messages",
+                    token=BOT_TOKEN,
+                    auth_scheme="Bot",
+                    method="POST",
+                    payload={
+                        "content": f"**{viewer} desde dashboard:**\n{content}",
+                        "allowed_mentions": {"parse": []},
+                    },
+                )
+                self.send_json(200, {"message": serialize_discord_message(result)})
             except Exception as exc:
                 self.send_json(500, {"error": str(exc)})
             return
@@ -5455,6 +8278,43 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def do_DELETE(self):
         parsed = urlparse(self.path)
+        if parsed.path == "/api/ticket-record":
+            session = self.get_authenticated_session()
+            if not session:
+                return
+            if not self.validate_csrf(session):
+                return
+
+            try:
+                body = self.read_json_body()
+                guild_id = str(body.get("guild_id") or "")
+                record_id = str(body.get("record_id") or "")
+                if not guild_id or not self.can_access_tickets(session, guild_id):
+                    self.send_json(403, {"error": "No tienes acceso a ese servidor."})
+                    return
+                if not record_id:
+                    self.send_json(400, {"error": "No se indico el ticket."})
+                    return
+                record = get_ticket_record(guild_id, record_id)
+                if not record:
+                    self.send_json(404, {"error": "No encontre ese ticket."})
+                    return
+                if str(record.get("status") or "open").lower() == "open":
+                    self.send_json(400, {"error": "Primero debes cerrar o eliminar el ticket de Discord."})
+                    return
+                if not delete_guild_ticket_record(guild_id, record_id):
+                    self.send_json(404, {"error": "No pude eliminar el registro del ticket."})
+                    return
+
+                records = get_guild_ticket_records(guild_id)
+                self.send_json(200, {
+                    "records": records,
+                    "summary": ticket_records_summary(records),
+                })
+            except Exception as exc:
+                self.send_json(500, {"error": str(exc)})
+            return
+
         if parsed.path == "/api/ping-templates":
             session = self.get_authenticated_session()
             if not session:

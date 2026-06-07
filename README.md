@@ -124,6 +124,21 @@ La pagina se actualiza automaticamente cada 3 segundos y muestra:
 - Registro Balance.
 - Registro Avas.
 - Registro Informes.
+- Analizador de loot para archivos CSV y JSON de StatisticsAnalysisTool.
+
+### Analizador De Loot
+
+La seccion `Loot` del dashboard permite:
+
+- Arrastrar o seleccionar reportes CSV y JSON.
+- Agrupar objetos repetidos por jugador e ID.
+- Sumar cantidades y, en JSON, calcular el valor estimado en silver.
+- Detectar tiers T4 a T8 y filtrar tiers completos.
+- Incluir o excluir objetos individuales del estimado.
+- Agrupar visualmente los objetos por tier.
+- Cambiar el tamano de los iconos y abrir el detalle de cada objeto.
+
+Los reportes se procesan localmente en el navegador y no se guardan en el servidor.
 
 El dashboard usa login de Discord. Para ver un servidor, tu usuario debe estar en ese servidor, tener permiso de administrador y el bot tambien debe estar dentro. Configura en `.env`:
 
@@ -132,13 +147,65 @@ DASHBOARD_CLIENT_ID=ID_DE_TU_APLICACION
 DASHBOARD_CLIENT_SECRET=CLIENT_SECRET_DE_TU_APLICACION
 DASHBOARD_REDIRECT_URI=http://localhost:8000/oauth/callback
 DASHBOARD_SESSION_SECRET=UNA_CLAVE_LARGA_RANDOM
+DASHBOARD_PUBLIC_URL=http://localhost:8000
 ```
 
 En Discord Developer Portal agrega esa misma URL en **OAuth2 > Redirects**.
 
+`DASHBOARD_PUBLIC_URL` debe ser la direccion que pueden abrir los usuarios desde
+Discord. Si el bot se usa fuera de tu PC, configura una URL publica HTTPS que
+apunte al dashboard.
+
 Si marcas `Recordar este dispositivo`, la sesion queda guardada hasta 30 dias en `data/dashboard_sessions.json`. `DASHBOARD_SESSION_SECRET` debe mantenerse igual para que esas sesiones sigan funcionando despues de reiniciar.
 
 En `Balances`, la columna `Usuario` muestra solo el nombre guardado o recuperado del historial, `ID` muestra el ID de Discord y `Fecha` usa formato de Argentina: `dia/mes/año | hora`.
+
+## Registro De Albion
+
+El bot permite vincular una cuenta de Discord con un personaje de **Albion
+Online America**. Toda la interfaz de esta primera version esta en espanol.
+
+Antes de usarlo:
+
+1. Deja `ENABLE_MEMBER_INTENT=1` en `.env`.
+2. Activa `SERVER MEMBERS INTENT` en Discord Developer Portal.
+3. Da al bot los permisos `Gestionar roles`, `Gestionar apodos` y, si usaras
+   expulsiones, `Expulsar miembros`.
+4. Coloca el rol del bot por encima del rol que asignara y de los usuarios que
+   deba administrar.
+
+Configuracion inicial:
+
+```text
+/albion configurar gremio rol al_salir sincronizar_apodo canal_logs
+```
+
+- `gremio`: nombre exacto del gremio en Albion America.
+- `rol`: rol que reciben los personajes registrados.
+- `al_salir`: permite elegir entre quitar el rol o expulsar al usuario del
+  servidor cuando abandona el gremio.
+- `sincronizar_apodo`: cambia el apodo de Discord al nombre del personaje.
+- `canal_logs`: canal opcional para avisos.
+
+Comandos:
+
+```text
+/albion registrar nombre
+/albion perfil usuario
+/albion desvincular
+/albion configuracion
+/albion sincronizar
+/albion registrados
+```
+
+La sincronizacion automatica se ejecuta cada seis horas. Solo aplica sanciones
+despues de dos comprobaciones consecutivas correctas que confirmen que el
+personaje ya no pertenece al gremio configurado. Una caida de la API nunca
+provoca que se quiten roles o se expulse a un usuario.
+
+El registro por nombre confirma que el personaje existe y pertenece al gremio,
+pero por ahora no demuestra de forma fuerte que la persona sea propietaria del
+personaje.
 
 ## Comandos De Balance
 
