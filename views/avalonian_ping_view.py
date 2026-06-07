@@ -113,6 +113,7 @@ class AvalonSignupView(discord.ui.View):
         report_runtime_service=None,
         permission_service=None,
         balance_service=None,
+        fine_service=None,
         persist_callback=None,
         remove_persisted_callback=None,
         caller_id=None,
@@ -159,6 +160,7 @@ class AvalonSignupView(discord.ui.View):
         self.report_runtime_service = report_runtime_service
         self.permission_service = permission_service
         self.balance_service = balance_service
+        self.fine_service = fine_service
         self.persist_callback = persist_callback
         self.remove_persisted_callback = remove_persisted_callback
         self.slots = {slot_key: None for slot_key in self.slot_keys}
@@ -438,6 +440,10 @@ class AvalonSignupView(discord.ui.View):
         return slot_label
 
     def assign_user(self, slot_name, user):
+        block_reason = self.signup_block_reason(user)
+        if block_reason:
+            return False, block_reason
+
         slot_key = self.first_available_slot_key(slot_name)
         if not slot_key:
             if self.non_caller_slot_label_exists(slot_name):
@@ -484,11 +490,32 @@ class AvalonSignupView(discord.ui.View):
     def occupied_count(self):
         return sum(1 for user_id in self.slots.values() if user_id)
 
+    def occupied_user_ids(self):
+        return [int(user_id) for user_id in self.slots.values() if user_id]
+
+    def resolve_slot_display_name(self, slot_name, user_id):
+        if int(user_id or 0) == int(self.caller_id or 0) and self.caller_name:
+            return self.caller_name
+        return slot_name
+
     def is_full(self):
         return self.occupied_count() >= len(self.slot_keys)
 
     def is_caller(self, user_id):
         return user_id == self.caller_id
+
+    def signup_block_reason(self, user):
+        guild_id = int(self.guild_id or 0)
+        if guild_id and self.fine_service and self.fine_service.has_unpaid_fines(guild_id, user.id):
+            return "No puedes anotarte a pings mientras tengas una multa pendiente."
+
+        if self.config_service and hasattr(user, "roles"):
+            fine_config = self.config_service.get_fine_config(guild_id)
+            blocked_role_id = int(fine_config.get("blocked_role_id") or 0)
+            if blocked_role_id and any(role.id == blocked_role_id for role in user.roles):
+                return "No puedes anotarte a pings mientras tengas el rol de multado."
+
+        return ""
 
     def parse_amount(self, value):
         text = (value or "").strip().lower().replace(",", ".")
@@ -560,6 +587,43 @@ class AvalonSignupView(discord.ui.View):
 
         return adjustments
 
+    def normalize_report_fines(self, fines):
+        normalized = []
+        valid_user_ids = set(self.occupied_user_ids())
+        for entry in fines or []:
+            if not isinstance(entry, dict):
+                continue
+            user_id = int(entry.get("user_id") or 0)
+            amount = self.parse_amount(entry.get("amount"))
+            reason = str(entry.get("reason") or "").strip()
+            if not user_id or user_id not in valid_user_ids or amount <= 0 or not reason:
+                continue
+            normalized.append(
+                {
+                    "user_id": user_id,
+                    "user_name": str(entry.get("user_name") or f"Usuario {user_id}"),
+                    "slot": str(entry.get("slot") or self.find_user_slot(user_id) or ""),
+                    "amount": amount,
+                    "reason": reason[:300],
+                    "proof_path": str(entry.get("proof_path") or ""),
+                    "proof_name": str(entry.get("proof_name") or ""),
+                }
+            )
+        return normalized
+
+    def build_report_fines_block(self, fines):
+        if not fines:
+            return ""
+        lines = [
+            "",
+            "## Multas propuestas",
+        ]
+        for fine in fines:
+            lines.append(
+                f"- <@{fine['user_id']}> | {fine['slot'] or 'Sin cupo'} | {self.format_full_amount(fine['amount'])} | {fine['reason']}"
+            )
+        return "\n".join(lines)
+
     def format_amount(self, amount):
         amount = int(amount)
         abs_amount = abs(amount)
@@ -581,6 +645,16 @@ class AvalonSignupView(discord.ui.View):
     def format_full_amount(self, amount):
         return f"{int(amount):,}".replace(",", ".")
 
+    def parse_percentage(self, value):
+        match = re.search(r"\d+(?:[\.,]\d+)?", str(value or ""))
+        if not match:
+            return 0.0
+        return max(0.0, min(float(match.group(0).replace(",", ".")), 100.0))
+
+    def format_percentage(self, value):
+        formatted = f"{float(value or 0):.2f}".rstrip("0").rstrip(".")
+        return formatted or "0"
+
     def parse_percentage_discount(self, note):
         match = re.search(r"-(\d+(?:\.\d+)?)\s*%", note or "", flags=re.IGNORECASE)
         if not match:
@@ -590,10 +664,32 @@ class AvalonSignupView(discord.ui.View):
     def is_pp_note(self, note):
         return "pp" in (note or "").lower()
 
-    def calculate_report_split(self, silver, items, mapa, repa, participant_count, split_mode):
+    def calculate_report_split(
+        self,
+        silver,
+        items,
+        mapa,
+        repa,
+        participant_count,
+        split_mode,
+        caller_percentage=0.0,
+        looter_payment=0,
+        looter_user_id=0,
+        tab_sale_percentage=0.0,
+    ):
         split_mode = split_mode if split_mode in REPORT_SPLIT_LABELS else REPORT_SPLIT_ITEMS
         net_items = max(int(items or 0), 0)
-        net_silver = max(int(silver or 0) - int(mapa or 0) - int(repa or 0), 0)
+        raw_silver = max(int(silver or 0), 0)
+        caller_percentage = self.parse_percentage(caller_percentage) if split_mode == REPORT_SPLIT_BOTH else 0.0
+        looter_payment = max(int(looter_payment or 0), 0) if split_mode == REPORT_SPLIT_BOTH else 0
+        looter_user_id = int(looter_user_id or 0) if split_mode == REPORT_SPLIT_BOTH else 0
+        tab_sale_percentage = self.parse_percentage(tab_sale_percentage) if split_mode == REPORT_SPLIT_BOTH else 0.0
+        caller_amount = int(raw_silver * (caller_percentage / 100.0)) if caller_percentage else 0
+        net_silver = max(raw_silver - caller_amount - looter_payment - int(mapa or 0) - int(repa or 0), 0)
+        tab_sale_active = split_mode == REPORT_SPLIT_BOTH and tab_sale_percentage > 0
+        sold_tab_value = int(net_items * ((100.0 - tab_sale_percentage) / 100.0)) if tab_sale_active else 0
+        effective_mode = split_mode
+        split_participants = max(int(participant_count or 0) - (1 if looter_payment and looter_user_id else 0), 0)
 
         if split_mode == REPORT_SPLIT_ITEMS:
             item_pool = net_items + net_silver
@@ -601,24 +697,64 @@ class AvalonSignupView(discord.ui.View):
         elif split_mode == REPORT_SPLIT_SILVER:
             item_pool = 0
             silver_pool = net_items + net_silver
+        elif tab_sale_active:
+            item_pool = 0
+            silver_pool = net_silver + sold_tab_value
+            effective_mode = REPORT_SPLIT_SILVER
         else:
             item_pool = net_items
             silver_pool = net_silver
 
         return {
-            "mode": split_mode,
-            "label": REPORT_SPLIT_LABELS[split_mode],
+            "mode": effective_mode,
+            "label": REPORT_SPLIT_LABELS[effective_mode],
+            "requested_mode": split_mode,
             "item_pool": item_pool,
             "silver_pool": silver_pool,
-            "item_per_user": item_pool // participant_count if participant_count else 0,
-            "silver_per_user": silver_pool // participant_count if participant_count else 0,
+            "item_per_user": item_pool // split_participants if split_participants else 0,
+            "silver_per_user": silver_pool // split_participants if split_participants else 0,
             "total": item_pool + silver_pool,
+            "net_silver": net_silver,
+            "caller_percentage": caller_percentage,
+            "caller_amount": caller_amount,
+            "looter_payment": looter_payment,
+            "looter_user_id": looter_user_id,
+            "tab_sale_percentage": tab_sale_percentage,
+            "tab_sale_active": tab_sale_active,
+            "sold_tab_value": sold_tab_value,
+            "split_participants": split_participants,
         }
 
     def build_report_distribution(self, split, adjustments):
         distribution = []
         for index, _, slot_name, user_id in self.iter_slots():
             if not user_id:
+                continue
+
+            if split.get("looter_payment") and int(split.get("looter_user_id", 0) or 0) == int(user_id):
+                distribution.append(
+                    {
+                        "index": index,
+                        "slot": slot_name,
+                        "user_id": user_id,
+                        "note": "Looter",
+                        "category": "silver",
+                        "amount": int(split["looter_payment"]),
+                        "is_pp": False,
+                    }
+                )
+                if int(split.get("caller_amount", 0) or 0) and self.is_caller(user_id):
+                    distribution.append(
+                        {
+                            "index": index,
+                            "slot": slot_name,
+                            "user_id": user_id,
+                            "note": "Caller",
+                            "category": "silver",
+                            "amount": int(split["caller_amount"]),
+                            "is_pp": False,
+                        }
+                    )
                 continue
 
             note = adjustments.get(slot_name, "")
@@ -646,26 +782,55 @@ class AvalonSignupView(discord.ui.View):
                     }
                 )
 
+            if int(split.get("caller_amount", 0) or 0) and self.is_caller(user_id):
+                distribution.append(
+                    {
+                        "index": index,
+                        "slot": slot_name,
+                        "user_id": user_id,
+                        "note": "Caller",
+                        "category": "silver",
+                        "amount": int(split["caller_amount"]),
+                        "is_pp": False,
+                    }
+                )
+
         return distribution
 
-    def evaluate_pp_distribution(self, silver, mapa, repa, distribution):
+    def build_player_report_suffix(self, slot_name, user_id, adjustments, split):
+        parts = []
+        note = adjustments.get(slot_name, "")
+        if note and not (
+            split.get("looter_payment")
+            and int(split.get("looter_user_id", 0) or 0) == int(user_id)
+            and note.strip().lower() == "looter"
+        ):
+            parts.append(note)
+
+        if split.get("looter_payment") and int(split.get("looter_user_id", 0) or 0) == int(user_id):
+            parts.append(f"+{self.format_full_amount(split['looter_payment'])}")
+
+        if int(split.get("caller_amount", 0) or 0) and self.is_caller(user_id):
+            parts.append(f"+ {self.format_full_amount(split['caller_amount'])}")
+
+        return f" {' '.join(parts)}" if parts else ""
+
+    def evaluate_pp_distribution(self, split, distribution):
         pp_entries = [
             entry
             for entry in distribution
             if entry.get("is_pp") and entry["category"] == "silver"
         ]
-        available_silver = max(silver - mapa - repa, 0)
+        if split["mode"] == REPORT_SPLIT_ITEMS:
+            available_silver = int(split.get("net_silver", 0) or 0)
+        else:
+            available_silver = int(split.get("silver_pool", 0) or 0)
         pp_required = sum(entry["amount"] for entry in pp_entries)
         difference = available_silver - pp_required
         return pp_entries, available_silver, pp_required, difference
 
-    def build_pp_evaluation_block(self, silver, mapa, repa, distribution):
-        pp_entries, available_silver, pp_required, difference = self.evaluate_pp_distribution(
-            silver,
-            mapa,
-            repa,
-            distribution,
-        )
+    def build_pp_evaluation_block(self, split, distribution):
+        pp_entries, available_silver, pp_required, difference = self.evaluate_pp_distribution(split, distribution)
         if not pp_entries:
             return ""
 
@@ -716,8 +881,7 @@ class AvalonSignupView(discord.ui.View):
 
         for index, _, slot_name, user_id in self.iter_slots():
             value = f"<@{user_id}>" if user_id else ""
-            note = adjustments.get(slot_name, "")
-            suffix = f" {note}" if note else ""
+            suffix = self.build_player_report_suffix(slot_name, user_id, adjustments, split)
             lines.append(f"> {index}.{slot_name}: {value}{suffix}")
 
         return "\n".join(lines)
@@ -788,6 +952,11 @@ class AvalonSignupView(discord.ui.View):
         items_text,
         costs_text,
         adjustments_text,
+        fine_entries=None,
+        caller_percentage_text="",
+        looter_payment_text="",
+        looter_user_id="",
+        tab_sale_percentage_text="",
         split_mode=REPORT_SPLIT_ITEMS,
     ):
         if not self.is_caller(interaction.user.id):
@@ -811,7 +980,12 @@ class AvalonSignupView(discord.ui.View):
                 silver_text=silver_text,
                 items_text=items_text,
                 costs_text=costs_text,
+                caller_percentage_text=caller_percentage_text,
+                looter_payment_text=looter_payment_text,
+                looter_user_id=looter_user_id,
+                tab_sale_percentage_text=tab_sale_percentage_text,
                 adjustments_text=adjustments_text,
+                fine_entries=fine_entries,
                 split_mode=split_mode,
             )
         except ValueError as exc:
@@ -831,6 +1005,11 @@ class AvalonSignupView(discord.ui.View):
         items_text,
         costs_text,
         adjustments_text,
+        fine_entries=None,
+        caller_percentage_text="",
+        looter_payment_text="",
+        looter_user_id="",
+        tab_sale_percentage_text="",
         split_mode=REPORT_SPLIT_ITEMS,
     ):
         if not self.is_caller(caller.id):
@@ -860,8 +1039,18 @@ class AvalonSignupView(discord.ui.View):
         silver = self.parse_amount(silver_text)
         items = self.parse_amount(items_text)
         mapa, repa = self.parse_costs(costs_text)
+        caller_percentage = self.parse_percentage(caller_percentage_text)
+        looter_payment = self.parse_amount(looter_payment_text)
+        looter_user_id = int(looter_user_id or 0)
+        tab_sale_percentage = self.parse_percentage(tab_sale_percentage_text)
         adjustments = self.parse_adjustments(adjustments_text)
+        fines = self.normalize_report_fines(fine_entries)
         participant_count = self.occupied_count()
+        if looter_payment:
+            if not looter_user_id:
+                raise ValueError("Selecciona quien fue el looter para aplicar ese pago.")
+            if looter_user_id not in self.occupied_user_ids():
+                raise ValueError("El looter seleccionado no forma parte de esta party.")
         split = self.calculate_report_split(
             silver,
             items,
@@ -869,6 +1058,10 @@ class AvalonSignupView(discord.ui.View):
             repa,
             participant_count,
             split_mode,
+            caller_percentage,
+            looter_payment,
+            looter_user_id,
+            tab_sale_percentage,
         )
         content = self.build_report_content(
             estimated,
@@ -880,12 +1073,7 @@ class AvalonSignupView(discord.ui.View):
             split,
         )
         distribution = self.build_report_distribution(split, adjustments)
-        _, available_silver, pp_required, pp_difference = self.evaluate_pp_distribution(
-            silver,
-            mapa,
-            repa,
-            distribution,
-        )
+        _, available_silver, pp_required, pp_difference = self.evaluate_pp_distribution(split, distribution)
         if pp_difference < 0:
             raise ValueError(
                 "El informe no es valido: el silver disponible no alcanza para cubrir los PP indicados."
@@ -894,7 +1082,8 @@ class AvalonSignupView(discord.ui.View):
         evaluation_content = (
             "## Informe en evaluacion\n\n"
             f"{content}"
-            f"{self.build_pp_evaluation_block(silver, mapa, repa, distribution)}"
+            f"{self.build_report_fines_block(fines)}"
+            f"{self.build_pp_evaluation_block(split, distribution)}"
         )
 
         report_data = {
@@ -913,6 +1102,7 @@ class AvalonSignupView(discord.ui.View):
             "distribution": distribution,
             "available_silver": available_silver,
             "pp_required": pp_required,
+            "fines": fines,
         }
         review_view = ReportReviewView(
             report_data=report_data,
@@ -920,6 +1110,7 @@ class AvalonSignupView(discord.ui.View):
             report_service=self.report_service,
             permission_service=self.permission_service,
             balance_service=self.balance_service,
+            fine_service=self.fine_service,
             source_view=self,
             runtime_service=getattr(self, "report_runtime_service", None),
             guild_id=guild.id,
@@ -1185,6 +1376,11 @@ class AvalonSignupView(discord.ui.View):
                     "Este ping ya fue finalizado y no admite nuevas inscripciones.",
                     ephemeral=True,
                 )
+                return
+
+            block_reason = self.signup_block_reason(interaction.user)
+            if block_reason:
+                await interaction.response.send_message(block_reason, ephemeral=True)
                 return
 
             current_slot_key = self.find_user_slot_key(interaction.user.id)

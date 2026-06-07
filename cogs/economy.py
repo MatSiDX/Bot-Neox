@@ -11,6 +11,7 @@ from services.avalonian_service import AvalonianService
 from services.active_avalonian_service import ActiveAvalonianService
 from services.balance_service import BalanceService
 from services.config_service import CONFIG_REPORT_APPROVED_CHANNEL, CONFIG_REPORT_REVIEW_CHANNEL, ConfigService
+from services.fine_service import FineService
 from services.ping_template_service import MAX_TEMPLATES_PER_GUILD, PingTemplateService
 from services.permission_service import (
     PERMISSION_ECONOMY,
@@ -149,6 +150,7 @@ class EconomyCog(commands.Cog):
         self.permission_service = PermissionService()
         self.report_service = ReportService()
         self.report_runtime_service = ReportRuntimeService()
+        self.fine_service = FineService()
         self.report_dashboard_repository = ReportDashboardRepository()
         self.active_avalonian_views = {}
         self.restore_task = None
@@ -326,6 +328,7 @@ class EconomyCog(commands.Cog):
             report_runtime_service=self.report_runtime_service,
             permission_service=self.permission_service,
             balance_service=self.service,
+            fine_service=self.fine_service,
             persist_callback=self.persist_active_view_state,
             remove_persisted_callback=self.remove_active_view_state,
         )
@@ -554,7 +557,12 @@ class EconomyCog(commands.Cog):
                         silver_text=payload.get("silver", ""),
                         items_text=payload.get("items", ""),
                         costs_text=payload.get("costs", ""),
+                        caller_percentage_text=payload.get("caller_percentage", ""),
+                        looter_payment_text=payload.get("looter_payment", ""),
+                        looter_user_id=payload.get("looter_user_id", ""),
+                        tab_sale_percentage_text=payload.get("tab_sale_percentage", ""),
                         adjustments_text=payload.get("adjustments", ""),
+                        fine_entries=payload.get("fines", []),
                         split_mode=payload.get("split_mode", "items"),
                     )
                 except Exception as exc:
@@ -609,6 +617,7 @@ class EconomyCog(commands.Cog):
                 report_runtime_service=self.report_runtime_service,
                 permission_service=self.permission_service,
                 balance_service=self.service,
+                fine_service=self.fine_service,
                 persist_callback=self.persist_active_view_state,
                 remove_persisted_callback=self.remove_active_view_state,
             )
@@ -636,6 +645,7 @@ class EconomyCog(commands.Cog):
 
     async def restore_report_runtime_views(self):
         from views.report_review_view import ApprovedReportBalanceView, ReportReviewView
+        from views.fine_ticket_view import FineTicketView
 
         for state in self.report_runtime_service.get_reviews():
             guild_id = int(state.get("guild_id", 0))
@@ -656,6 +666,8 @@ class EconomyCog(commands.Cog):
                 report_service=self.report_service,
                 permission_service=self.permission_service,
                 balance_service=self.service,
+                fine_service=self.fine_service,
+                register_fine_ticket_view=self.register_fine_ticket_view,
                 source_view_resolver=self.resolve_active_avalonian_view,
                 runtime_service=self.report_runtime_service,
                 guild_id=guild_id,
@@ -697,6 +709,15 @@ class EconomyCog(commands.Cog):
                 thread_id=thread_id,
             )
             self.bot.add_view(view, message_id=message_id)
+
+        for fine in self.fine_service.open_fines():
+            message_id = int(fine.get("ticket_message_id", 0) or 0)
+            if not message_id:
+                continue
+            self.bot.add_view(FineTicketView(fine_id=fine["id"], fine_service=self.fine_service), message_id=message_id)
+
+    def register_fine_ticket_view(self, view, message_id):
+        self.bot.add_view(view, message_id=message_id)
 
     async def avalonian_number_autocomplete(self, interaction, current):
         choices = []

@@ -97,6 +97,34 @@ def init_database():
                 PRIMARY KEY (guild_id, discord_user_id),
                 UNIQUE (guild_id, player_id)
             );
+
+            CREATE TABLE IF NOT EXISTS economy_fines (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id TEXT NOT NULL,
+                guild_name TEXT,
+                report_ava TEXT NOT NULL DEFAULT '',
+                fined_user_id TEXT NOT NULL,
+                fined_user_name TEXT NOT NULL DEFAULT '',
+                amount INTEGER NOT NULL DEFAULT 0,
+                reason TEXT NOT NULL DEFAULT '',
+                proof_path TEXT NOT NULL DEFAULT '',
+                proof_name TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'open',
+                blocked_role_id TEXT NOT NULL DEFAULT '',
+                resolver_role_id TEXT NOT NULL DEFAULT '',
+                ticket_channel_id TEXT NOT NULL DEFAULT '',
+                ticket_message_id TEXT NOT NULL DEFAULT '',
+                announcement_channel_id TEXT NOT NULL DEFAULT '',
+                announcement_message_id TEXT NOT NULL DEFAULT '',
+                created_by_id TEXT NOT NULL DEFAULT '',
+                created_by_name TEXT NOT NULL DEFAULT '',
+                paid_by_id TEXT NOT NULL DEFAULT '',
+                paid_by_name TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                paid_at TEXT NOT NULL DEFAULT '',
+                closed_at TEXT NOT NULL DEFAULT ''
+            );
             """
         )
         _ensure_guild_name_column(connection)
@@ -118,6 +146,12 @@ def init_database():
 
             CREATE INDEX IF NOT EXISTS idx_albion_registrations_player
                 ON albion_registrations (player_id);
+
+            CREATE INDEX IF NOT EXISTS idx_economy_fines_guild_status
+                ON economy_fines (guild_id, status, id DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_economy_fines_user_status
+                ON economy_fines (guild_id, fined_user_id, status);
             """
         )
 

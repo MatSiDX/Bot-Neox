@@ -23,14 +23,20 @@ class ConfigRepository:
         data = self.load()
         return data.get(str(guild_id), {})
 
-    def set_channel(self, guild_id, channel_type, channel_id):
+    def set_value(self, guild_id, key, value):
         gid = str(guild_id)
 
         def mutate(data):
             if gid not in data:
                 data[gid] = {}
 
-            data[gid][channel_type] = str(channel_id)
+            if value in (None, ""):
+                data[gid].pop(str(key), None)
+            else:
+                data[gid][str(key)] = str(value)
             return data
 
         mutate_json(CONFIG_FILE, {}, mutate)
+
+    def set_channel(self, guild_id, channel_type, channel_id):
+        self.set_value(guild_id, channel_type, channel_id)

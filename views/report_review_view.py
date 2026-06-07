@@ -195,6 +195,8 @@ class ReportReviewView(discord.ui.View):
         report_service,
         permission_service,
         balance_service,
+        fine_service=None,
+        register_fine_ticket_view=None,
         source_view=None,
         source_view_resolver=None,
         runtime_service=None,
@@ -207,6 +209,8 @@ class ReportReviewView(discord.ui.View):
         self.report_service = report_service
         self.permission_service = permission_service
         self.balance_service = balance_service
+        self.fine_service = fine_service
+        self.register_fine_ticket_view = register_fine_ticket_view
         self.source_view = source_view
         self.source_view_resolver = source_view_resolver
         self.runtime_service = runtime_service
@@ -298,6 +302,75 @@ class ReportReviewView(discord.ui.View):
         except discord.HTTPException:
             return None
 
+    async def apply_fines(self, interaction):
+        fines = self.report_data.get("fines", [])
+        if not fines:
+            return []
+        if self.fine_service is None:
+            raise ValueError("El sistema de multas no esta disponible.")
+
+        created_lines = []
+        guild = interaction.guild
+        for fine in fines:
+            member = guild.get_member(int(fine.get("user_id", 0) or 0))
+            if member is None:
+                try:
+                    member = await guild.fetch_member(int(fine.get("user_id", 0) or 0))
+                except discord.HTTPException as exc:
+                    raise ValueError(f"No encontre al usuario multado {fine.get('user_name') or fine.get('user_id')}.") from exc
+
+            blocked_role = await self.fine_service.ensure_blocked_role(guild, member)
+            created = self.fine_service.create_fine_record(
+                {
+                    "guild_id": guild.id,
+                    "guild_name": guild.name,
+                    "report_ava": self.report_data.get("ava", ""),
+                    "fined_user_id": member.id,
+                    "fined_user_name": member.display_name,
+                    "amount": int(fine.get("amount") or 0),
+                    "reason": fine.get("reason", ""),
+                    "proof_path": fine.get("proof_path", ""),
+                    "proof_name": fine.get("proof_name", ""),
+                    "blocked_role_id": blocked_role.id,
+                    "resolver_role_id": self.fine_service.config_service.get_fine_config(guild.id).get("resolver_role_id", 0),
+                    "created_by_id": interaction.user.id,
+                    "created_by_name": interaction.user.display_name,
+                    "status": "open",
+                }
+            )
+            ticket_channel = await self.fine_service.create_fine_ticket(guild, member, created)
+            from views.fine_ticket_view import FineTicketView
+
+            fine_view = FineTicketView(fine_id=created["id"], fine_service=self.fine_service)
+            ticket_message = await ticket_channel.send(
+                (
+                    f"**Multa pendiente**\n"
+                    f"Usuario: {member.mention}\n"
+                    f"Monto: {self.format_full_amount(created['amount'])}\n"
+                    f"Motivo: {created['reason']}\n\n"
+                    "Solo el rol autorizado puede marcar esta multa como pagada."
+                ),
+                view=fine_view,
+            )
+            if self.register_fine_ticket_view is not None:
+                self.register_fine_ticket_view(fine_view, ticket_message.id)
+            announcement_channel, announcement_message = await self.fine_service.send_fine_announcement(
+                guild,
+                created,
+                ticket_channel,
+            )
+            self.fine_service.update_channels(
+                created["id"],
+                ticket_channel_id=ticket_channel.id,
+                ticket_message_id=ticket_message.id,
+                announcement_channel_id=announcement_channel.id,
+                announcement_message_id=announcement_message.id,
+            )
+            created_lines.append(
+                f"- {member.mention}: {self.format_full_amount(created['amount'])} ({created['reason']})"
+            )
+        return created_lines
+
     @discord.ui.button(
         label="Aceptar",
         style=discord.ButtonStyle.success,
@@ -314,6 +387,12 @@ class ReportReviewView(discord.ui.View):
                 "No hay canal de informes aprobados configurado.",
                 ephemeral=True,
             )
+            return
+
+        try:
+            fine_lines = await self.apply_fines(interaction)
+        except ValueError as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True)
             return
 
         approved_message = await channel.send(self.report_data["content"])
@@ -335,6 +414,8 @@ class ReportReviewView(discord.ui.View):
 
         if thread:
             await thread.send("Informe aprobado. Elige en el mensaje aprobado si se agregara balance.")
+            if fine_lines:
+                await thread.send("**Multas generadas**\n" + "\n".join(fine_lines))
 
         self.log_decision(interaction, "Aceptado")
         await self.disable_after_review(interaction, f"Aceptado por {interaction.user.mention}")
