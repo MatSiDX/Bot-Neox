@@ -13,15 +13,32 @@ class PermissionService:
     def __init__(self):
         self.repo = PermissionRepository()
 
+    @staticmethod
+    def is_administrator(member):
+        guild_permissions = getattr(member, "guild_permissions", None)
+        if bool(getattr(guild_permissions, "administrator", False)):
+            return True
+
+        guild = getattr(member, "guild", None)
+        if guild is not None and getattr(guild, "owner_id", None) == getattr(member, "id", None):
+            return True
+
+        for role in getattr(member, "roles", []) or []:
+            role_permissions = getattr(role, "permissions", None)
+            if bool(getattr(role_permissions, "administrator", False)):
+                return True
+
+        return False
+
     def get_role_permissions(self, guild_id):
         return self.repo.get_permissions(guild_id)
 
     def has_permission(self, guild_id, member, permission):
-        if member.guild_permissions.administrator:
+        if self.is_administrator(member):
             return True
 
         role_permissions = self.get_role_permissions(guild_id)
-        for role in member.roles:
+        for role in getattr(member, "roles", []) or []:
             permissions = role_permissions.get(str(role.id), [])
             if PERMISSION_GLOBAL in permissions or permission in permissions:
                 return True

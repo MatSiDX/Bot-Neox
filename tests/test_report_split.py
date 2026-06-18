@@ -267,6 +267,38 @@ class ReportSplitTests(unittest.TestCase):
         self.assertIn("> 1.MainTank: <@111> + 2.000.000", content)
         self.assertIn("> 10.Looter scout: <@999> Looter +5.000.000", content)
 
+    def test_report_content_allows_empty_slots_with_looter_payment(self):
+        self.view.title = "Ava 1"
+        self.view.caller_id = 111
+        self.view.iter_slots = lambda: [
+            (1, "MainTank", "MainTank", 111),
+            (2, "Heal", "Heal", None),
+            (3, "Looter scout", "Looter scout", 999),
+        ]
+        split = self.view.calculate_report_split(
+            silver=3_000_000,
+            items=900_000,
+            mapa=0,
+            repa=0,
+            participant_count=2,
+            split_mode=REPORT_SPLIT_BOTH,
+            looter_payment=1_000_000,
+            looter_user_id=999,
+        )
+
+        content = self.view.build_report_content(
+            estimated="4m",
+            silver=3_000_000,
+            items=900_000,
+            mapa=0,
+            repa=0,
+            adjustments={},
+            split=split,
+        )
+
+        self.assertIn("> 2.Heal: ", content)
+        self.assertIn("> 3.Looter scout: <@999> Looter +1.000.000", content)
+
 
 if __name__ == "__main__":
     unittest.main()

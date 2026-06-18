@@ -798,6 +798,9 @@ class AvalonSignupView(discord.ui.View):
         return distribution
 
     def build_player_report_suffix(self, slot_name, user_id, adjustments, split):
+        if not user_id:
+            return ""
+
         parts = []
         note = adjustments.get(slot_name, "")
         if note and not (
@@ -808,6 +811,7 @@ class AvalonSignupView(discord.ui.View):
             parts.append(note)
 
         if split.get("looter_payment") and int(split.get("looter_user_id", 0) or 0) == int(user_id):
+            parts.append("Looter")
             parts.append(f"+{self.format_full_amount(split['looter_payment'])}")
 
         if int(split.get("caller_amount", 0) or 0) and self.is_caller(user_id):
