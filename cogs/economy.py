@@ -168,7 +168,7 @@ class EconomyCog(commands.Cog):
 
     def can_manage_permissions(self, interaction):
         return (
-            interaction.user.guild_permissions.administrator
+            self.permission_service.is_administrator(interaction.user)
             or self.permission_service.can_manage_permissions(interaction.guild.id, interaction.user)
         )
 
@@ -1412,7 +1412,7 @@ class EconomyCog(commands.Cog):
         tipo: app_commands.Choice[str],
         canal: discord.TextChannel,
     ):
-        if not interaction.user.guild_permissions.administrator:
+        if not self.permission_service.is_administrator(interaction.user):
             await interaction.response.send_message(
                 "Solo un administrador puede configurar canales del bot.",
                 ephemeral=True,

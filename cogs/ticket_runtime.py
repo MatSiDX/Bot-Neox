@@ -15,6 +15,7 @@ from utils.json_store import (
     read_json as read_json_file,
     write_json as write_json_file,
 )
+from services.permission_service import PermissionService
 
 TICKET_PANELS_FILE = os.path.join(DATA_DIR, "ticket_panels.json")
 TICKET_RECORDS_FILE = os.path.join(DATA_DIR, "ticket_records.json")
@@ -138,6 +139,7 @@ async def serialize_embed(embed, folder, message_id, index):
 class TicketRuntimeCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        self.permission_service = PermissionService()
 
     def load_panels(self, guild_id):
         data = read_json(TICKET_PANELS_FILE, {})
@@ -260,30 +262,45 @@ class TicketRuntimeCog(commands.Cog):
         return data, None
 
     def role_ids(self, panel, permission_key):
+        if not isinstance(panel, dict):
+            return set()
+
         permissions = panel.get("permissions", {}) if isinstance(panel.get("permissions"), dict) else {}
         values = permissions.get(permission_key, [])
         if isinstance(values, str):
             values = [item.strip() for item in values.split(",") if item.strip()]
         return {int(value) for value in values if str(value).isdigit()}
 
-    def member_has_any_role(self, member, role_ids):
-        if member.guild_permissions.administrator:
+    def can_manage_ticket_action(self, guild_id, member):
+        if PermissionService.is_administrator(member):
             return True
-        return any(role.id in role_ids for role in member.roles)
 
-    def can_claim(self, member, panel):
-        return self.member_has_any_role(member, self.role_ids(panel, "claim_roles"))
+        permission_service = getattr(self, "permission_service", None)
+        return bool(guild_id and permission_service and permission_service.can_manage_tickets(guild_id, member))
 
-    def can_close(self, member, panel, record):
-        return self.member_has_any_role(member, self.role_ids(panel, "close_roles"))
+    def member_has_any_role(self, member, role_ids, guild_id=None):
+        guild_id = guild_id or getattr(getattr(member, "guild", None), "id", None)
+        if self.can_manage_ticket_action(guild_id, member):
+            return True
 
-    def can_delete(self, member, panel):
-        return self.member_has_any_role(member, self.role_ids(panel, "delete_roles"))
+        return any(role.id in role_ids for role in getattr(member, "roles", []) or [])
 
-    def can_reopen(self, member, panel):
-        return self.member_has_any_role(member, self.role_ids(panel, "reopen_roles"))
+    def can_claim(self, member, panel, guild_id=None):
+        return self.member_has_any_role(member, self.role_ids(panel, "claim_roles"), guild_id)
+
+    def can_close(self, member, panel, record, guild_id=None):
+        return self.member_has_any_role(member, self.role_ids(panel, "close_roles"), guild_id)
+
+    def can_delete(self, member, panel, guild_id=None):
+        return self.member_has_any_role(member, self.role_ids(panel, "delete_roles"), guild_id)
+
+    def can_reopen(self, member, panel, guild_id=None):
+        return self.member_has_any_role(member, self.role_ids(panel, "reopen_roles"), guild_id)
 
     def ticket_role_permissions(self, panel):
+        if not isinstance(panel, dict):
+            return {}
+
         permissions = panel.get("permissions", {}) if isinstance(panel.get("permissions"), dict) else {}
         entries = permissions.get("ticket_role_permissions")
         result = {}
@@ -481,7 +498,7 @@ class TicketRuntimeCog(commands.Cog):
             return
 
         panel = self.find_panel(interaction.guild.id, record.get("panel_id"))
-        if not panel or not self.can_claim(interaction.user, panel):
+        if not self.can_claim(interaction.user, panel, interaction.guild.id):
             await interaction.response.send_message("No tienes permiso para reclamar este ticket.", ephemeral=True)
             return
 
@@ -504,7 +521,11 @@ class TicketRuntimeCog(commands.Cog):
     async def close_ticket_prompt(self, interaction, channel_id):
         data, record = self.get_record(interaction.guild.id, channel_id)
         panel = self.find_panel(interaction.guild.id, record.get("panel_id")) if record else None
-        if not record or not panel or not self.can_close(interaction.user, panel, record):
+        if not record:
+            await interaction.response.send_message("No encontre este ticket.", ephemeral=True)
+            return
+
+        if not self.can_close(interaction.user, panel, record, interaction.guild.id):
             await interaction.response.send_message("No tienes permiso para cerrar este ticket.", ephemeral=True)
             return
 
@@ -517,7 +538,7 @@ class TicketRuntimeCog(commands.Cog):
             return
 
         panel = self.find_panel(interaction.guild.id, record.get("panel_id"))
-        if not panel or not self.can_close(interaction.user, panel, record):
+        if not self.can_close(interaction.user, panel, record, interaction.guild.id):
             await interaction.response.send_message("No tienes permiso para cerrar este ticket.", ephemeral=True)
             return
 
@@ -588,7 +609,7 @@ class TicketRuntimeCog(commands.Cog):
             return
 
         panel = self.find_panel(interaction.guild.id, record.get("panel_id"))
-        if not panel or not self.can_reopen(interaction.user, panel):
+        if not self.can_reopen(interaction.user, panel, interaction.guild.id):
             await interaction.response.send_message("No tienes permiso para reabrir este ticket.", ephemeral=True)
             return
 
@@ -653,7 +674,10 @@ class TicketRuntimeCog(commands.Cog):
             return
 
         panel = self.find_panel(interaction.guild.id, record.get("panel_id"))
-        can_transcript = panel and (self.can_close(interaction.user, panel, record) or self.can_delete(interaction.user, panel))
+        can_transcript = (
+            self.can_close(interaction.user, panel, record, interaction.guild.id)
+            or self.can_delete(interaction.user, panel, interaction.guild.id)
+        )
         if not record or not can_transcript:
             await interaction.response.send_message("No tienes permiso para transcribir este ticket.", ephemeral=True)
             return
@@ -717,8 +741,16 @@ class TicketRuntimeCog(commands.Cog):
     async def delete_ticket(self, interaction, channel_id):
         data, record = self.get_record(interaction.guild.id, channel_id)
         panel = self.find_panel(interaction.guild.id, record.get("panel_id")) if record else None
-        if not record or not panel or not self.can_delete(interaction.user, panel):
+        if not record:
+            await interaction.response.send_message("No encontre este ticket.", ephemeral=True)
+            return
+
+        if not self.can_delete(interaction.user, panel, interaction.guild.id):
             await interaction.response.send_message("No tienes permiso para eliminar este ticket.", ephemeral=True)
+            return
+
+        if record.get("status") not in {"closed", "deleted"}:
+            await interaction.response.send_message("Primero cierra el ticket antes de eliminarlo.", ephemeral=True)
             return
 
         record["status"] = "deleted"
@@ -730,7 +762,11 @@ class TicketRuntimeCog(commands.Cog):
     async def transcript_and_delete_ticket(self, interaction, channel_id):
         data, record = self.get_record(interaction.guild.id, channel_id)
         panel = self.find_panel(interaction.guild.id, record.get("panel_id")) if record else None
-        if not record or not panel or not self.can_delete(interaction.user, panel):
+        if not record:
+            await interaction.response.send_message("No encontre este ticket.", ephemeral=True)
+            return
+
+        if not self.can_delete(interaction.user, panel, interaction.guild.id):
             await interaction.response.send_message("No tienes permiso para transcribir y eliminar este ticket.", ephemeral=True)
             return
 
@@ -776,6 +812,51 @@ class TicketRuntimeCog(commands.Cog):
 
         await self.transcript_ticket(interaction, interaction.channel_id)
 
+    @app_commands.command(
+        name="reabrir-ticket",
+        description="Reabre el ticket cerrado del canal actual.",
+    )
+    @app_commands.guild_only()
+    async def reopen_ticket_command(self, interaction: discord.Interaction):
+        if not interaction.channel_id:
+            await interaction.response.send_message(
+                "Este comando solo funciona dentro de un canal de ticket.",
+                ephemeral=True,
+            )
+            return
+
+        await self.reopen_ticket(interaction, interaction.channel_id)
+
+    @app_commands.command(
+        name="eliminar-ticket",
+        description="Elimina el ticket del canal actual.",
+    )
+    @app_commands.guild_only()
+    async def delete_ticket_command(self, interaction: discord.Interaction):
+        if not interaction.channel_id:
+            await interaction.response.send_message(
+                "Este comando solo funciona dentro de un canal de ticket.",
+                ephemeral=True,
+            )
+            return
+
+        await self.delete_ticket(interaction, interaction.channel_id)
+
+    @app_commands.command(
+        name="eliminar-y-transcribir-ticket",
+        description="Guarda la transcripcion y elimina el ticket del canal actual.",
+    )
+    @app_commands.guild_only()
+    async def transcript_delete_ticket_command(self, interaction: discord.Interaction):
+        if not interaction.channel_id:
+            await interaction.response.send_message(
+                "Este comando solo funciona dentro de un canal de ticket.",
+                ephemeral=True,
+            )
+            return
+
+        await self.transcript_and_delete_ticket(interaction, interaction.channel_id)
+
     @commands.Cog.listener()
     async def on_interaction(self, interaction):
         if interaction.type != discord.InteractionType.component or not interaction.data:
@@ -817,12 +898,12 @@ class TicketRuntimeCog(commands.Cog):
             await self.reopen_ticket(interaction, custom_id.split(":", 1)[1])
             return
 
-        if custom_id.startswith("ticket_runtime_transcript:"):
-            await self.transcript_ticket(interaction, custom_id.split(":", 1)[1])
-            return
-
         if custom_id.startswith("ticket_runtime_transcript_delete:"):
             await self.transcript_and_delete_ticket(interaction, custom_id.split(":", 1)[1])
+            return
+
+        if custom_id.startswith("ticket_runtime_transcript:"):
+            await self.transcript_ticket(interaction, custom_id.split(":", 1)[1])
             return
 
         if custom_id.startswith("ticket_runtime_delete:"):
