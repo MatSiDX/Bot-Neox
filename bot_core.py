@@ -1,7 +1,7 @@
 import discord
 from discord.ext import commands
 
-from config.settings import ENABLE_MEMBER_INTENT, ENABLE_VOICE_INTENT
+from config.settings import BOT_SETTINGS
 
 
 class ProjectBot(commands.Bot):
@@ -15,9 +15,11 @@ class ProjectBot(commands.Bot):
         await self.tree.sync()
 
 
-def build_bot(*, cogs, command_prefix="%", enable_message_content=True):
+def build_bot(*, cogs, command_prefix="%", enable_message_content=None):
     intents = discord.Intents.default()
+    if enable_message_content is None:
+        enable_message_content = BOT_SETTINGS.enable_message_content_intent
     intents.message_content = enable_message_content
-    intents.members = ENABLE_MEMBER_INTENT
-    intents.voice_states = ENABLE_VOICE_INTENT
+    intents.members = BOT_SETTINGS.enable_member_intent
+    intents.voice_states = BOT_SETTINGS.enable_voice_intent
     return ProjectBot(command_prefix=command_prefix, intents=intents, cogs=cogs)

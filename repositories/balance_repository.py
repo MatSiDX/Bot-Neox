@@ -1,8 +1,15 @@
 import json
 import os
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DATA_DIR = os.path.join(BASE_DIR, "data")
+from config.settings import DATA_DIR
+from repositories.pagination import (
+    DEFAULT_PAGE,
+    DEFAULT_PAGE_SIZE,
+    normalize_page,
+    normalize_page_size,
+    page_metadata,
+)
+
 DATA_FILE = os.path.join(DATA_DIR, "balances.json")
 
 
@@ -250,3 +257,142 @@ class BalanceRepository:
             ).fetchall()
 
         return [(int(row["user_id"]), int(row["total"] or 0)) for row in rows]
+
+    def get_dashboard_summary(self, guild_id):
+        from repositories.database import get_connection
+
+        with get_connection() as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    COUNT(*) AS players,
+                    COALESCE(SUM(items), 0) AS items,
+                    COALESCE(SUM(silver), 0) AS silver
+                FROM economy_balances
+                WHERE guild_id = ?
+                """,
+                (str(guild_id),),
+            ).fetchone()
+
+        players = int(row["players"] or 0) if row else 0
+        items = int(row["items"] or 0) if row else 0
+        silver = int(row["silver"] or 0) if row else 0
+        return {
+            "players": players,
+            "items": items,
+            "silver": silver,
+            "total": items + silver,
+        }
+
+    def list_balances_page(self, guild_id, *, page=DEFAULT_PAGE, page_size=DEFAULT_PAGE_SIZE, search=""):
+        from repositories.database import get_connection
+
+        page = normalize_page(page)
+        page_size = normalize_page_size(page_size)
+        query = str(search or "").strip()
+        like_query = f"%{query.lower()}%" if query else ""
+        search_clause = ""
+        params = [str(guild_id)]
+        search_params = []
+        if like_query:
+            search_clause = """
+                AND (
+                    LOWER(user_id) LIKE ?
+                    OR LOWER(
+                        COALESCE(
+                            NULLIF(user_name, ''),
+                            (
+                                SELECT NULLIF(player, '')
+                                FROM economy_operations
+                                WHERE guild_id = economy_balances.guild_id
+                                  AND player_id = economy_balances.user_id
+                                  AND NULLIF(player, '') IS NOT NULL
+                                  AND player != 'Usuario ' || economy_balances.user_id
+                                ORDER BY id DESC
+                                LIMIT 1
+                            ),
+                            (
+                                SELECT NULLIF(operator, '')
+                                FROM economy_operations
+                                WHERE guild_id = economy_balances.guild_id
+                                  AND operator_id = economy_balances.user_id
+                                  AND NULLIF(operator, '') IS NOT NULL
+                                  AND operator != 'Usuario ' || economy_balances.user_id
+                                ORDER BY id DESC
+                                LIMIT 1
+                            ),
+                            ''
+                        )
+                    ) LIKE ?
+                )
+            """
+            search_params = [like_query, like_query]
+
+        count_query = f"""
+            SELECT COUNT(*) AS total_items
+            FROM economy_balances
+            WHERE guild_id = ?
+            {search_clause}
+        """
+
+        with get_connection() as connection:
+            total_items = int(
+                connection.execute(count_query, params + search_params).fetchone()["total_items"] or 0
+            )
+            meta = page_metadata(page, page_size, total_items)
+            offset = (meta["page"] - 1) * meta["page_size"] if meta["total_pages"] else 0
+            rows = connection.execute(
+                f"""
+                SELECT
+                    user_id,
+                    COALESCE(
+                        NULLIF(user_name, ''),
+                        (
+                            SELECT NULLIF(player, '')
+                            FROM economy_operations
+                            WHERE guild_id = economy_balances.guild_id
+                              AND player_id = economy_balances.user_id
+                              AND NULLIF(player, '') IS NOT NULL
+                              AND player != 'Usuario ' || economy_balances.user_id
+                            ORDER BY id DESC
+                            LIMIT 1
+                        ),
+                        (
+                            SELECT NULLIF(operator, '')
+                            FROM economy_operations
+                            WHERE guild_id = economy_balances.guild_id
+                              AND operator_id = economy_balances.user_id
+                              AND NULLIF(operator, '') IS NOT NULL
+                              AND operator != 'Usuario ' || economy_balances.user_id
+                            ORDER BY id DESC
+                            LIMIT 1
+                        ),
+                        ''
+                    ) AS user_name,
+                    items,
+                    silver,
+                    items + silver AS total,
+                    updated_at
+                FROM economy_balances
+                WHERE guild_id = ?
+                {search_clause}
+                ORDER BY total DESC, user_name COLLATE NOCASE, user_id
+                LIMIT ? OFFSET ?
+                """,
+                params + search_params + [meta["page_size"], offset],
+            ).fetchall()
+
+        items = []
+        start_rank = offset + 1
+        for index, row in enumerate(rows, start=start_rank):
+            items.append({
+                "rank": index,
+                "user_id": str(row["user_id"] or ""),
+                "user_name": str(row["user_name"] or ""),
+                "items": int(row["items"] or 0),
+                "silver": int(row["silver"] or 0),
+                "total": int(row["total"] or 0),
+                "updated_at": str(row["updated_at"] or ""),
+            })
+        meta["items"] = items
+        return meta

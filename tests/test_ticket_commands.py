@@ -2,7 +2,10 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
-from cogs.ticket_runtime import TicketRuntimeCog
+try:
+    from cogs.ticket_runtime import TicketRuntimeCog
+except ModuleNotFoundError:
+    TicketRuntimeCog = None
 
 
 class TicketCommandTests(unittest.IsolatedAsyncioTestCase):

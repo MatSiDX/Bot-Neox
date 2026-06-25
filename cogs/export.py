@@ -20,7 +20,7 @@ class ExportCog(commands.Cog):
         self.report_service = ReportService()
 
     def has_role(self, interaction):
-        return self.permission_service.can_manage_balance(interaction.guild.id, interaction.user)
+        return self.permission_service.can_export_economy(interaction.guild.id, interaction.user)
 
     async def resolve_member_name(self, guild, user_id):
         member = guild.get_member(user_id)

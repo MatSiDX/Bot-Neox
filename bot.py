@@ -1,7 +1,7 @@
 import asyncio
 
 from bot_core import build_bot
-from config.settings import ECONOMY_COGS, ECONOMY_TOKEN
+from config.settings import ECONOMY_COGS, require_bot_token
 from utils.console_logger import log_event
 
 
@@ -14,11 +14,10 @@ async def on_ready():
 
 
 async def main():
-    if not ECONOMY_TOKEN:
-        raise RuntimeError("Falta configurar ECONOMY_TOKEN o TOKEN en el archivo .env")
+    token = require_bot_token()
 
     async with bot:
-        await bot.start(ECONOMY_TOKEN)
+        await bot.start(token)
 
 
 if __name__ == "__main__":

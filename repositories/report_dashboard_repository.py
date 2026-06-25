@@ -1,55 +1,67 @@
-import os
-import secrets
-from datetime import datetime
-
-from repositories.balance_repository import DATA_DIR
-from utils.json_store import mutate_json, read_json
+from services.dashboard_action_service import DashboardActionService
 
 
-REPORT_DASHBOARD_FILE = os.path.join(DATA_DIR, "report_dashboard_requests.json")
+REPORT_DASHBOARD_ACTION_TYPE = "publish_report"
 
 
 class ReportDashboardRepository:
-    def load(self):
-        data = read_json(REPORT_DASHBOARD_FILE, {})
-        return data if isinstance(data, dict) else {}
+    def __init__(self):
+        self.service = DashboardActionService()
 
-    def create(self, payload):
-        request_id = secrets.token_urlsafe(12)
-        request = {
-            "id": request_id,
-            "status": "pending",
-            "payload": payload,
-            "created_at": datetime.now().isoformat(),
-            "updated_at": datetime.now().isoformat(),
-            "error": "",
-        }
-
-        def mutate(data):
-            data[request_id] = request
-            return data
-
-        mutate_json(REPORT_DASHBOARD_FILE, {}, mutate)
-        return request
+    def create(self, payload, *, requested_by=""):
+        return self.service.create_request(
+            guild_id=payload.get("guild_id"),
+            action_type=REPORT_DASHBOARD_ACTION_TYPE,
+            payload=payload,
+            requested_by=requested_by or payload.get("caller_id") or "",
+            max_retries=3,
+        )
 
     def get(self, request_id):
-        request = self.load().get(str(request_id))
-        return dict(request) if isinstance(request, dict) else None
+        request = self.service.get_request(request_id)
+        return self._to_legacy_shape(request)
 
     def pending(self):
-        return [
-            dict(request)
-            for request in self.load().values()
-            if isinstance(request, dict) and request.get("status") == "pending"
-        ]
+        requests = self.service.list_requests(
+            statuses=["pending", "retry"],
+            action_types=[REPORT_DASHBOARD_ACTION_TYPE],
+            limit=100,
+        )
+        return [self._to_legacy_shape(request) for request in requests]
 
     def mark(self, request_id, status, error=""):
-        def mutate(data):
-            request = data.get(str(request_id))
-            if isinstance(request, dict):
-                request["status"] = str(status)
-                request["error"] = str(error or "")[:500]
-                request["updated_at"] = datetime.now().isoformat()
-            return data
+        normalized = str(status or "").strip().lower()
+        if normalized == "completed":
+            return self._to_legacy_shape(self.service.complete_request(request_id))
+        if normalized in {"error", "failed"}:
+            return self._to_legacy_shape(
+                self.service.fail_request(
+                    request_id,
+                    error=error,
+                    retryable=False,
+                )
+            )
+        return self.get(request_id)
 
-        mutate_json(REPORT_DASHBOARD_FILE, {}, mutate)
+    def _to_legacy_shape(self, request):
+        if not request:
+            return None
+
+        status = str(request.get("status") or "pending")
+        if status == "failed":
+            status = "error"
+
+        return {
+            "id": request.get("id", ""),
+            "status": status,
+            "payload": request.get("payload") or {},
+            "result": request.get("result"),
+            "created_at": request.get("created_at", ""),
+            "updated_at": request.get("updated_at", ""),
+            "processed_at": request.get("processed_at", ""),
+            "error": request.get("error", ""),
+            "retry_count": request.get("retry_count", 0),
+            "max_retries": request.get("max_retries", 0),
+            "correlation_id": request.get("correlation_id", ""),
+            "action_type": request.get("action_type", REPORT_DASHBOARD_ACTION_TYPE),
+        }
