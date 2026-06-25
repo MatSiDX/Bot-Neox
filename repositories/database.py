@@ -1,15 +1,13 @@
-import os
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DATA_DIR = os.path.join(BASE_DIR, "data")
-DATABASE_FILE = os.path.join(DATA_DIR, "bot.sqlite3")
+from config.settings import DATA_DIR, DATABASE_FILE
+import os
 
 
 def utc_now_iso():
-    return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 @contextmanager
@@ -125,6 +123,44 @@ def init_database():
                 paid_at TEXT NOT NULL DEFAULT '',
                 closed_at TEXT NOT NULL DEFAULT ''
             );
+
+            CREATE TABLE IF NOT EXISTS dashboard_action_requests (
+                id TEXT PRIMARY KEY,
+                guild_id TEXT NOT NULL,
+                action_type TEXT NOT NULL,
+                payload_json TEXT NOT NULL DEFAULT '{}',
+                status TEXT NOT NULL DEFAULT 'pending',
+                requested_by TEXT NOT NULL DEFAULT '',
+                result_json TEXT NOT NULL DEFAULT '',
+                error TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                processed_at TEXT NOT NULL DEFAULT '',
+                retry_count INTEGER NOT NULL DEFAULT 0,
+                max_retries INTEGER NOT NULL DEFAULT 3,
+                next_retry_at TEXT NOT NULL DEFAULT '',
+                locked_by TEXT NOT NULL DEFAULT '',
+                locked_at TEXT NOT NULL DEFAULT '',
+                idempotency_key TEXT,
+                correlation_id TEXT NOT NULL DEFAULT ''
+            );
+
+            CREATE TABLE IF NOT EXISTS guild_config (
+                guild_id TEXT NOT NULL,
+                key TEXT NOT NULL,
+                value TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (guild_id, key)
+            );
+
+            CREATE TABLE IF NOT EXISTS role_permissions (
+                guild_id TEXT NOT NULL,
+                role_id TEXT NOT NULL,
+                permission TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (guild_id, role_id, permission)
+            );
             """
         )
         _ensure_guild_name_column(connection)
@@ -135,8 +171,14 @@ def init_database():
             CREATE INDEX IF NOT EXISTS idx_economy_balances_guild_total
                 ON economy_balances (guild_id, items, silver);
 
+            CREATE INDEX IF NOT EXISTS idx_economy_balances_guild_user_name
+                ON economy_balances (guild_id, user_name COLLATE NOCASE);
+
             CREATE INDEX IF NOT EXISTS idx_economy_operations_guild_id
                 ON economy_operations (guild_id, id);
+
+            CREATE INDEX IF NOT EXISTS idx_economy_operations_guild_created_at
+                ON economy_operations (guild_id, created_at DESC, id DESC);
 
             CREATE INDEX IF NOT EXISTS idx_economy_operations_player
                 ON economy_operations (guild_id, player_id);
@@ -144,14 +186,42 @@ def init_database():
             CREATE INDEX IF NOT EXISTS idx_albion_registrations_guild_status
                 ON albion_registrations (guild_id, status);
 
+            CREATE INDEX IF NOT EXISTS idx_albion_registrations_guild_player_name
+                ON albion_registrations (guild_id, player_name COLLATE NOCASE);
+
             CREATE INDEX IF NOT EXISTS idx_albion_registrations_player
                 ON albion_registrations (player_id);
 
             CREATE INDEX IF NOT EXISTS idx_economy_fines_guild_status
                 ON economy_fines (guild_id, status, id DESC);
 
+            CREATE INDEX IF NOT EXISTS idx_economy_fines_guild_created_at
+                ON economy_fines (guild_id, created_at DESC, id DESC);
+
             CREATE INDEX IF NOT EXISTS idx_economy_fines_user_status
                 ON economy_fines (guild_id, fined_user_id, status);
+
+            CREATE INDEX IF NOT EXISTS idx_dashboard_action_requests_status
+                ON dashboard_action_requests (status, next_retry_at, created_at);
+
+            CREATE INDEX IF NOT EXISTS idx_dashboard_action_requests_action_status
+                ON dashboard_action_requests (action_type, status, next_retry_at, created_at);
+
+            CREATE INDEX IF NOT EXISTS idx_dashboard_action_requests_guild_created_at
+                ON dashboard_action_requests (guild_id, created_at DESC);
+
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_dashboard_action_requests_idempotency
+                ON dashboard_action_requests (idempotency_key)
+                WHERE idempotency_key IS NOT NULL;
+
+            CREATE INDEX IF NOT EXISTS idx_guild_config_guild_id
+                ON guild_config (guild_id, key);
+
+            CREATE INDEX IF NOT EXISTS idx_role_permissions_guild_role
+                ON role_permissions (guild_id, role_id);
+
+            CREATE INDEX IF NOT EXISTS idx_role_permissions_guild_permission
+                ON role_permissions (guild_id, permission);
             """
         )
 

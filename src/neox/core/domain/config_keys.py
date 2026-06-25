@@ -1,0 +1,6 @@
+CONFIG_REPORT_REVIEW_CHANNEL = "report_review_channel"
+CONFIG_REPORT_APPROVED_CHANNEL = "report_approved_channel"
+CONFIG_FINE_CHANNEL = "fine_channel"
+CONFIG_FINE_ROLE = "fine_role"
+CONFIG_FINE_RESOLVER_ROLE = "fine_resolver_role"
+CONFIG_FINE_TICKET_CATEGORY = "fine_ticket_category"

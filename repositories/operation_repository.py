@@ -2,6 +2,13 @@ import json
 import os
 
 from repositories.balance_repository import DATA_DIR
+from repositories.pagination import (
+    DEFAULT_PAGE,
+    DEFAULT_PAGE_SIZE,
+    normalize_page,
+    normalize_page_size,
+    page_metadata,
+)
 
 OPERATIONS_FILE = os.path.join(DATA_DIR, "operations.json")
 
@@ -175,3 +182,107 @@ class OperationRepository:
             "date": row["date"],
             "time": row["time"],
         }
+
+    def list_operations_page(
+        self,
+        guild_id,
+        *,
+        page=DEFAULT_PAGE,
+        page_size=DEFAULT_PAGE_SIZE,
+        search="",
+        operation_type="",
+        date_from="",
+        date_to="",
+    ):
+        from repositories.database import get_connection
+
+        page = normalize_page(page)
+        page_size = normalize_page_size(page_size)
+        query = str(search or "").strip().lower()
+        operation_type = str(operation_type or "").strip().lower()
+        date_from = str(date_from or "").strip()
+        date_to = str(date_to or "").strip()
+
+        clauses = ["guild_id = ?"]
+        params = [str(guild_id)]
+        if query:
+            like_query = f"%{query}%"
+            clauses.append(
+                """
+                (
+                    LOWER(action) LIKE ?
+                    OR LOWER(operator) LIKE ?
+                    OR LOWER(operator_id) LIKE ?
+                    OR LOWER(player) LIKE ?
+                    OR LOWER(player_id) LIKE ?
+                    OR LOWER(type) LIKE ?
+                    OR LOWER(category) LIKE ?
+                )
+                """
+            )
+            params.extend([like_query] * 7)
+        if operation_type:
+            clauses.append("LOWER(type) = ?")
+            params.append(operation_type)
+        if date_from:
+            clauses.append("date(created_at) >= date(?)")
+            params.append(date_from)
+        if date_to:
+            clauses.append("date(created_at) <= date(?)")
+            params.append(date_to)
+
+        where_clause = " AND ".join(clauses)
+        with get_connection() as connection:
+            total_items = int(
+                connection.execute(
+                    f"SELECT COUNT(*) AS total_items FROM economy_operations WHERE {where_clause}",
+                    params,
+                ).fetchone()["total_items"] or 0
+            )
+            meta = page_metadata(page, page_size, total_items)
+            offset = (meta["page"] - 1) * meta["page_size"] if meta["total_pages"] else 0
+            rows = connection.execute(
+                f"""
+                SELECT
+                    id,
+                    action,
+                    operator,
+                    operator_id,
+                    player,
+                    player_id,
+                    type,
+                    category,
+                    amount,
+                    previous_balance,
+                    new_balance,
+                    date,
+                    time,
+                    created_at
+                FROM economy_operations
+                WHERE {where_clause}
+                ORDER BY id DESC
+                LIMIT ? OFFSET ?
+                """,
+                params + [meta["page_size"], offset],
+            ).fetchall()
+
+        meta["items"] = [
+            {
+                "id": int(row["id"] or 0),
+                "action": str(row["action"] or ""),
+                "operator": str(row["operator"] or ""),
+                "operator_id": str(row["operator_id"] or ""),
+                "player": str(row["player"] or ""),
+                "player_id": str(row["player_id"] or ""),
+                "type": str(row["type"] or ""),
+                "category": str(row["category"] or ""),
+                "amount": int(row["amount"] or 0),
+                "previous_balance": row["previous_balance"],
+                "new_balance": row["new_balance"],
+                "date": str(row["date"] or ""),
+                "time": str(row["time"] or ""),
+                "created_at": str(row["created_at"] or ""),
+            }
+            for row in rows
+        ]
+        return meta

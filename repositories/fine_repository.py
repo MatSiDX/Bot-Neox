@@ -1,4 +1,11 @@
 from repositories.database import get_connection, utc_now_iso
+from repositories.pagination import (
+    DEFAULT_PAGE,
+    DEFAULT_PAGE_SIZE,
+    normalize_page,
+    normalize_page_size,
+    page_metadata,
+)
 
 
 class FineRepository:
@@ -141,3 +148,74 @@ class FineRepository:
                 ),
             )
         return self.get(fine_id)
+
+    def list_by_guild_page(
+        self,
+        guild_id,
+        *,
+        page=DEFAULT_PAGE,
+        page_size=DEFAULT_PAGE_SIZE,
+        search="",
+        status="",
+        record_type="",
+        date_from="",
+        date_to="",
+    ):
+        page = normalize_page(page)
+        page_size = normalize_page_size(page_size)
+        query = str(search or "").strip().lower()
+        status = str(status or "").strip().lower()
+        record_type = str(record_type or "").strip().lower()
+
+        clauses = ["guild_id = ?"]
+        params = [str(guild_id)]
+        if query:
+            like_query = f"%{query}%"
+            clauses.append(
+                """
+                (
+                    LOWER(report_ava) LIKE ?
+                    OR LOWER(fined_user_id) LIKE ?
+                    OR LOWER(fined_user_name) LIKE ?
+                    OR LOWER(reason) LIKE ?
+                    OR LOWER(created_by_name) LIKE ?
+                    OR LOWER(paid_by_name) LIKE ?
+                )
+                """
+            )
+            params.extend([like_query] * 6)
+        if status:
+            clauses.append("LOWER(status) = ?")
+            params.append(status)
+        if record_type:
+            clauses.append("LOWER(status) = ?")
+            params.append(record_type)
+        if date_from:
+            clauses.append("date(created_at) >= date(?)")
+            params.append(date_from)
+        if date_to:
+            clauses.append("date(created_at) <= date(?)")
+            params.append(date_to)
+
+        where_clause = " AND ".join(clauses)
+        with get_connection() as connection:
+            total_items = int(
+                connection.execute(
+                    f"SELECT COUNT(*) AS total_items FROM economy_fines WHERE {where_clause}",
+                    params,
+                ).fetchone()["total_items"] or 0
+            )
+            meta = page_metadata(page, page_size, total_items)
+            offset = (meta["page"] - 1) * meta["page_size"] if meta["total_pages"] else 0
+            rows = connection.execute(
+                f"""
+                SELECT *
+                FROM economy_fines
+                WHERE {where_clause}
+                ORDER BY id DESC
+                LIMIT ? OFFSET ?
+                """,
+                params + [meta["page_size"], offset],
+            ).fetchall()
+        meta["items"] = [dict(row) for row in rows]
+        return meta

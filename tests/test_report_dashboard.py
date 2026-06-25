@@ -1,10 +1,14 @@
 import unittest
 
-import discord
+try:
+    import discord
+    from views.avalonian_ping_view import AvalonSignupView
+except ModuleNotFoundError:
+    discord = None
+    AvalonSignupView = None
 
-from views.avalonian_ping_view import AvalonSignupView
 
-
+@unittest.skipUnless(discord is not None and AvalonSignupView is not None, "discord.py no esta instalado en este entorno")
 class ReportDashboardTests(unittest.TestCase):
     def test_finalized_report_button_links_to_dashboard(self):
         view = AvalonSignupView(

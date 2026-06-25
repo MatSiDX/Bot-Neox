@@ -11,9 +11,12 @@ from services.avalonian_service import AvalonianService
 from services.active_avalonian_service import ActiveAvalonianService
 from services.balance_service import BalanceService
 from services.config_service import CONFIG_REPORT_APPROVED_CHANNEL, CONFIG_REPORT_REVIEW_CHANNEL, ConfigService
+from services.dashboard_action_service import DashboardActionService
 from services.fine_service import FineService
 from services.ping_template_service import MAX_TEMPLATES_PER_GUILD, PingTemplateService
 from services.permission_service import (
+    BOT_PERMISSION_DEFINITIONS,
+    BOT_PERMISSION_LABELS,
     PERMISSION_ECONOMY,
     PERMISSION_GLOBAL,
     PERMISSION_PERMISSIONS,
@@ -24,7 +27,7 @@ from services.permission_service import (
 )
 from services.report_service import ReportService
 from services.report_runtime_service import ReportRuntimeService
-from repositories.report_dashboard_repository import ReportDashboardRepository
+from repositories.report_dashboard_repository import REPORT_DASHBOARD_ACTION_TYPE
 from utils.formatters import format_number
 from views.avalonian_ping_view import AvalonSignupView
 from views.top_view import TopView
@@ -37,22 +40,11 @@ CATEGORY_CHOICES = [
 ]
 
 PERMISSION_CHOICES = [
-    app_commands.Choice(name="Balance", value=PERMISSION_ECONOMY),
-    app_commands.Choice(name="Ping", value=PERMISSION_PING),
-    app_commands.Choice(name="Plantillas", value=PERMISSION_TEMPLATES),
-    app_commands.Choice(name="Informes", value=PERMISSION_REPORTS),
-    app_commands.Choice(name="Permisos", value=PERMISSION_PERMISSIONS),
-    app_commands.Choice(name="Global", value=PERMISSION_GLOBAL),
+    app_commands.Choice(name=label, value=key)
+    for key, label, _ in BOT_PERMISSION_DEFINITIONS
 ]
 
-PERMISSION_LABELS = {
-    PERMISSION_ECONOMY: "Balance",
-    PERMISSION_PING: "Ping",
-    PERMISSION_TEMPLATES: "Plantillas",
-    PERMISSION_REPORTS: "Informes",
-    PERMISSION_PERMISSIONS: "Permisos",
-    PERMISSION_GLOBAL: "Global",
-}
+PERMISSION_LABELS = dict(BOT_PERMISSION_LABELS)
 
 CONFIG_CHANNEL_CHOICES = [
     app_commands.Choice(name="Evaluacion Informes", value=CONFIG_REPORT_REVIEW_CHANNEL),
@@ -151,10 +143,10 @@ class EconomyCog(commands.Cog):
         self.report_service = ReportService()
         self.report_runtime_service = ReportRuntimeService()
         self.fine_service = FineService()
-        self.report_dashboard_repository = ReportDashboardRepository()
+        self.dashboard_action_service = DashboardActionService()
         self.active_avalonian_views = {}
         self.restore_task = None
-        self.report_dashboard_task = None
+        self.dashboard_action_task = None
         self.restored_active_views = False
 
     def has_economy_permission(self, interaction):
@@ -499,82 +491,100 @@ class EconomyCog(commands.Cog):
     async def cog_load(self):
         if self.restore_task is None:
             self.restore_task = self.bot.loop.create_task(self.restore_active_avalonian_views())
-        if self.report_dashboard_task is None:
-            self.report_dashboard_task = self.bot.loop.create_task(
-                self.process_dashboard_report_requests()
+        if self.dashboard_action_task is None:
+            self.dashboard_action_task = self.bot.loop.create_task(
+                self.process_dashboard_action_requests()
             )
 
     def cog_unload(self):
         if self.restore_task and not self.restore_task.done():
             self.restore_task.cancel()
-        if self.report_dashboard_task and not self.report_dashboard_task.done():
-            self.report_dashboard_task.cancel()
+        if self.dashboard_action_task and not self.dashboard_action_task.done():
+            self.dashboard_action_task.cancel()
 
-    async def process_dashboard_report_requests(self):
+    def should_retry_dashboard_action(self, exc):
+        if isinstance(exc, discord.HTTPException):
+            return exc.status == 429 or exc.status >= 500
+        return isinstance(exc, (asyncio.TimeoutError, TimeoutError))
+
+    async def process_dashboard_action_requests(self):
         await self.bot.wait_until_ready()
+        worker_id = f"economy-report-worker:{self.bot.user.id if self.bot.user else 'bot'}"
         while not self.bot.is_closed():
             if not self.restored_active_views:
                 await asyncio.sleep(1)
                 continue
-            for request in self.report_dashboard_repository.pending():
-                request_id = request.get("id")
-                payload = request.get("payload") or {}
-                key = (
-                    int(payload.get("guild_id", 0) or 0),
-                    int(payload.get("caller_id", 0) or 0),
-                    int(payload.get("numero_ava", 0) or 0),
+            request = self.dashboard_action_service.claim_next_request(
+                worker_id,
+                action_types=[REPORT_DASHBOARD_ACTION_TYPE],
+            )
+            if not request:
+                await asyncio.sleep(2)
+                continue
+
+            request_id = request.get("id")
+            payload = request.get("payload") or {}
+            key = (
+                int(payload.get("guild_id", 0) or 0),
+                int(payload.get("caller_id", 0) or 0),
+                int(payload.get("numero_ava", 0) or 0),
+            )
+            view = self.active_avalonian_views.get(key)
+            if not view:
+                self.dashboard_action_service.fail_request(
+                    request_id,
+                    error="No encontre la Ava activa.",
+                    result={"reason": "missing_active_ava"},
+                    retryable=False,
                 )
-                view = self.active_avalonian_views.get(key)
-                if not view:
-                    self.report_dashboard_repository.mark(
-                        request_id,
-                        "error",
-                        "No encontre la Ava activa.",
-                    )
-                    continue
+                continue
 
-                guild = self.bot.get_guild(key[0])
-                caller = guild.get_member(key[1]) if guild else None
-                if guild and caller is None:
-                    try:
-                        caller = await guild.fetch_member(key[1])
-                    except discord.HTTPException:
-                        caller = None
-                if not guild or not caller:
-                    self.report_dashboard_repository.mark(
-                        request_id,
-                        "error",
-                        "No encontre al caller dentro del servidor.",
-                    )
-                    continue
-
+            guild = self.bot.get_guild(key[0])
+            caller = guild.get_member(key[1]) if guild else None
+            if guild and caller is None:
                 try:
-                    await view.publish_report(
-                        guild=guild,
-                        caller=caller,
-                        client=self.bot,
-                        estimated=payload.get("estimated", ""),
-                        silver_text=payload.get("silver", ""),
-                        items_text=payload.get("items", ""),
-                        costs_text=payload.get("costs", ""),
-                        caller_percentage_text=payload.get("caller_percentage", ""),
-                        looter_payment_text=payload.get("looter_payment", ""),
-                        looter_user_id=payload.get("looter_user_id", ""),
-                        tab_sale_percentage_text=payload.get("tab_sale_percentage", ""),
-                        adjustments_text=payload.get("adjustments", ""),
-                        fine_entries=payload.get("fines", []),
-                        split_mode=payload.get("split_mode", "items"),
-                    )
-                except Exception as exc:
-                    self.report_dashboard_repository.mark(
-                        request_id,
-                        "error",
-                        str(exc),
-                    )
-                else:
-                    self.report_dashboard_repository.mark(request_id, "completed")
+                    caller = await guild.fetch_member(key[1])
+                except discord.HTTPException:
+                    caller = None
+            if not guild or not caller:
+                self.dashboard_action_service.fail_request(
+                    request_id,
+                    error="No encontre al caller dentro del servidor.",
+                    result={"reason": "missing_caller"},
+                    retryable=False,
+                )
+                continue
 
-            await asyncio.sleep(2)
+            try:
+                await view.publish_report(
+                    guild=guild,
+                    caller=caller,
+                    client=self.bot,
+                    estimated=payload.get("estimated", ""),
+                    silver_text=payload.get("silver", ""),
+                    items_text=payload.get("items", ""),
+                    costs_text=payload.get("costs", ""),
+                    caller_percentage_text=payload.get("caller_percentage", ""),
+                    looter_payment_text=payload.get("looter_payment", ""),
+                    looter_user_id=payload.get("looter_user_id", ""),
+                    tab_sale_percentage_text=payload.get("tab_sale_percentage", ""),
+                    adjustments_text=payload.get("adjustments", ""),
+                    fine_entries=payload.get("fines", []),
+                    split_mode=payload.get("split_mode", "items"),
+                )
+            except Exception as exc:
+                self.dashboard_action_service.fail_request(
+                    request_id,
+                    error=str(exc),
+                    result={"exception_type": type(exc).__name__},
+                    retryable=self.should_retry_dashboard_action(exc),
+                    retry_delay_seconds=30,
+                )
+            else:
+                self.dashboard_action_service.complete_request(
+                    request_id,
+                    result={"published": True},
+                )
 
     async def restore_active_avalonian_views(self):
         await self.bot.wait_until_ready()

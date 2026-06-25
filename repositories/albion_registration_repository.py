@@ -1,4 +1,11 @@
 from repositories.database import get_connection, init_database, utc_now_iso
+from repositories.pagination import (
+    DEFAULT_PAGE,
+    DEFAULT_PAGE_SIZE,
+    normalize_page,
+    normalize_page_size,
+    page_metadata,
+)
 
 
 class AlbionRegistrationRepository:
@@ -256,3 +263,67 @@ class AlbionRegistrationRepository:
                 (str(guild_id), str(discord_user_id)),
             )
         return cursor.rowcount > 0
+
+    def list_registrations_page(
+        self,
+        guild_id,
+        *,
+        page=DEFAULT_PAGE,
+        page_size=DEFAULT_PAGE_SIZE,
+        search="",
+        status="",
+        date_from="",
+        date_to="",
+    ):
+        page = normalize_page(page)
+        page_size = normalize_page_size(page_size)
+        query = str(search or "").strip().lower()
+        status = str(status or "").strip().lower()
+        clauses = ["guild_id = ?"]
+        params = [str(guild_id)]
+        if query:
+            like_query = f"%{query}%"
+            clauses.append(
+                """
+                (
+                    LOWER(discord_user_id) LIKE ?
+                    OR LOWER(discord_user_name) LIKE ?
+                    OR LOWER(player_name) LIKE ?
+                    OR LOWER(albion_guild_name) LIKE ?
+                )
+                """
+            )
+            params.extend([like_query] * 4)
+        if status:
+            clauses.append("LOWER(status) = ?")
+            params.append(status)
+        if date_from:
+            clauses.append("date(COALESCE(last_checked_at, created_at)) >= date(?)")
+            params.append(date_from)
+        if date_to:
+            clauses.append("date(COALESCE(last_checked_at, created_at)) <= date(?)")
+            params.append(date_to)
+
+        where_clause = " AND ".join(clauses)
+        with get_connection() as connection:
+            total_items = int(
+                connection.execute(
+                    f"SELECT COUNT(*) AS total_items FROM albion_registrations WHERE {where_clause}",
+                    params,
+                ).fetchone()["total_items"] or 0
+            )
+            meta = page_metadata(page, page_size, total_items)
+            offset = (meta["page"] - 1) * meta["page_size"] if meta["total_pages"] else 0
+            rows = connection.execute(
+                f"""
+                SELECT *
+                FROM albion_registrations
+                WHERE {where_clause}
+                ORDER BY player_name COLLATE NOCASE, discord_user_id
+                LIMIT ? OFFSET ?
+                """,
+                params + [meta["page_size"], offset],
+            ).fetchall()
+
+        meta["items"] = [dict(row) for row in rows]
+        return meta

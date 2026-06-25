@@ -1,0 +1,1027 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AvalonBot</title>
+  <link rel="stylesheet" href="/static/css/dashboard.css">
+</head>
+<body>
+  <!-- Dashboard header -->
+  <header class="dashboard-header" role="banner">
+    <div class="bar">
+      <div class="top-brand">
+        <img class="brand-logo" src="/assets/AvalonBot.png" alt="AvalonBot">
+        <div>
+          <strong>AvalonBot</strong>
+          <span>Panel de administracion</span>
+        </div>
+      </div>
+      <div class="controls">
+        <select id="guildSelect" aria-label="Servidor"></select>
+        <input id="searchInput" type="search" placeholder="Buscar" aria-label="Buscar">
+      </div>
+      <div class="session">
+        <span id="userLabel">No conectado</span>
+        <button id="themeToggle" class="theme-button" type="button" aria-label="Cambiar tema" title="Cambiar tema"></button>
+        <button id="logoutButton" type="button" hidden>Salir</button>
+      </div>
+    </div>
+  </header>
+
+  <!-- Dashboard shell -->
+  <main id="mainContent">
+    <div id="appShell" class="app-shell">
+      <!-- Sidebar navigation -->
+      <aside id="dashboardSidebar" class="sections" aria-label="Modulos del dashboard">
+        <div class="sidebar-head">
+          <div id="sidebarHeading" class="sidebar-heading">
+            <strong>Centro de control</strong>
+            <span>Modulos de AvalonBot</span>
+          </div>
+          <button
+            id="sidebarToggle"
+            class="menu-button"
+            type="button"
+            aria-label="Minimizar secciones"
+            aria-controls="sidebarSections"
+            aria-expanded="true"
+          >
+            <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="m15 18-6-6 6-6"></path>
+            </svg>
+          </button>
+        </div>
+        <div id="sidebarSectionsLabel" class="section-label">Secciones</div>
+        <nav id="sidebarSections" class="section-list" aria-labelledby="sidebarSectionsLabel">
+          <button class="section-button active" type="button" data-section="economy" title="Economia" aria-controls="economySection">
+            <span class="section-icon">
+              <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="9"></circle>
+                <path d="M16 8h-6a2 2 0 0 0 0 4h4a2 2 0 0 1 0 4H8"></path>
+                <path d="M12 6v12"></path>
+              </svg>
+            </span>
+            <span class="section-copy"><span class="section-text">Economia</span><span class="section-hint">Balances y registros</span></span>
+          </button>
+          <button class="section-button" type="button" data-section="templates" title="Plantillas" aria-controls="templatesSection">
+            <span class="section-icon">
+              <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"></path>
+                <path d="M14 2v6h6"></path>
+                <path d="M8 13h8"></path>
+                <path d="M8 17h5"></path>
+              </svg>
+            </span>
+            <span class="section-copy"><span class="section-text">Plantillas</span><span class="section-hint">Pings y contenido</span></span>
+          </button>
+          <button class="section-button" type="button" data-section="loot" title="Analizador de loot" aria-controls="lootSection">
+            <span class="section-icon">
+              <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M4 9h16l-1 11H5L4 9Z"></path>
+                <path d="M8 9V7a4 4 0 0 1 8 0v2"></path>
+                <path d="M9 13h6"></path>
+              </svg>
+            </span>
+            <span class="section-copy"><span class="section-text">Loot</span><span class="section-hint">Analisis de reportes</span></span>
+          </button>
+          <button class="section-button" type="button" data-section="report-calculator" title="Calculadora de reparto" aria-controls="reportCalculatorSection">
+            <span class="section-icon">
+              <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="4" y="2" width="16" height="20" rx="2"></rect>
+                <path d="M8 6h8"></path>
+                <path d="M8 10h2"></path><path d="M14 10h2"></path>
+                <path d="M8 14h2"></path><path d="M14 14h2"></path>
+                <path d="M8 18h2"></path><path d="M14 18h2"></path>
+              </svg>
+            </span>
+            <span class="section-copy"><span class="section-text">Calculadora</span><span class="section-hint">Reparto de informes</span></span>
+          </button>
+          <button class="section-button" type="button" data-section="tickets" title="Tickets" aria-controls="ticketsSection">
+            <span class="section-icon">
+              <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M2 9a3 3 0 0 0 0 6v4a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-4a3 3 0 0 0 0-6V5a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2Z"></path>
+                <path d="M13 5v2"></path>
+                <path d="M13 17v2"></path>
+                <path d="M13 11v2"></path>
+              </svg>
+            </span>
+            <span class="section-copy"><span class="section-text">Tickets</span><span class="section-hint">Paneles y soporte</span></span>
+          </button>
+          <button class="section-button" type="button" data-section="registration" title="Registro Albion" aria-controls="registrationSection">
+            <span class="section-icon">
+              <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
+                <circle cx="8.5" cy="7" r="4"></circle>
+                <path d="m17 11 2 2 4-4"></path>
+              </svg>
+            </span>
+            <span class="section-copy"><span class="section-text">Registro Albion</span><span class="section-hint">Miembros y gremio</span></span>
+          </button>
+          <button class="section-button" type="button" data-section="welcome" title="Bienvenidas" aria-controls="welcomeSection">
+            <span class="section-icon">
+              <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"></path>
+                <circle cx="9" cy="7" r="4"></circle>
+                <path d="M19 8v6"></path>
+                <path d="M22 11h-6"></path>
+              </svg>
+            </span>
+            <span class="section-copy"><span class="section-text">Bienvenidas</span><span class="section-hint">Ingreso de miembros</span></span>
+          </button>
+          <button class="section-button" type="button" data-section="audit" title="Auditoria" aria-controls="auditSection">
+            <span class="section-icon">
+              <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"></path>
+                <path d="M12 8v4"></path>
+                <path d="M12 16h.01"></path>
+              </svg>
+            </span>
+            <span class="section-copy"><span class="section-text">Auditoria</span><span class="section-hint">Eventos del servidor</span></span>
+          </button>
+          <button class="section-button" type="button" data-section="permissions" title="Permisos" aria-controls="permissionsSection">
+            <span class="section-icon">
+              <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="8" cy="15" r="3"></circle>
+                <path d="m10.5 12.5 7-7a2.1 2.1 0 0 1 3 3l-7 7"></path>
+                <path d="m18 8 2 2"></path>
+              </svg>
+            </span>
+            <span class="section-copy"><span class="section-text">Permisos</span><span class="section-hint">Accesos por rol</span></span>
+          </button>
+        </nav>
+      </aside>
+
+      <!-- Modulo: Economia -->
+      <section id="economySection" aria-labelledby="economySectionTitle" role="region">
+        <div class="economy-panel">
+          <div class="module-header">
+            <p id="economySectionTitle">Balances, registros de balance, Avas e informes.</p>
+            <div class="ticket-actions">
+              <button id="exportEconomyButton" class="action-button" type="button">Exportar economia</button>
+              <div id="status" class="status" role="status" aria-live="polite">Cargando...</div>
+            </div>
+          </div>
+
+          <nav class="tabs" aria-label="Opciones de Economia">
+            <button class="tab active" type="button" data-tab="balances">Balances</button>
+            <button class="tab" type="button" data-tab="operations">Registro Balance</button>
+            <button class="tab" type="button" data-tab="avalonians">Registro Avas</button>
+            <button class="tab" type="button" data-tab="reports">Registro Informes</button>
+            <button class="tab" type="button" data-tab="fines">Registro Multas</button>
+          </nav>
+
+          <section class="metrics" aria-label="Totales">
+            <div class="metric"><span>Jugadores</span><strong id="playersTotal">0</strong></div>
+            <div class="metric"><span>Items</span><strong id="itemsTotal">0</strong></div>
+            <div class="metric"><span>Silver</span><strong id="silverTotal">0</strong></div>
+            <div class="metric"><span>Total</span><strong id="overallTotal">0</strong></div>
+          </section>
+
+          <section class="records-toolbar economy-toolbar" aria-label="Filtros de economia">
+            <div class="ticket-actions">
+              <select id="economyStatusFilter" aria-label="Estado del registro" hidden>
+                <option value="">Todos los estados</option>
+                <option value="open">Abierto</option>
+                <option value="paid">Pagado</option>
+                <option value="closed">Cerrado</option>
+                <option value="deleted">Eliminado</option>
+                <option value="accepted">Aceptado</option>
+                <option value="rejected">Rechazado</option>
+              </select>
+              <select id="economyTypeFilter" aria-label="Tipo del registro" hidden>
+                <option value="">Todos los tipos</option>
+                <option value="add">Add</option>
+                <option value="remove">Remove</option>
+                <option value="items">Items</option>
+                <option value="silver">Silver</option>
+                <option value="signup">Signup</option>
+                <option value="leave">Leave</option>
+              </select>
+              <input id="economyDateFrom" type="date" aria-label="Desde" hidden>
+              <input id="economyDateTo" type="date" aria-label="Hasta" hidden>
+              <select id="economyPageSize" aria-label="Tamano de pagina">
+                <option value="10">10 por pagina</option>
+                <option value="25" selected>25 por pagina</option>
+                <option value="50">50 por pagina</option>
+                <option value="100">100 por pagina</option>
+              </select>
+            </div>
+            <div class="ticket-actions">
+              <button id="economyPrevPageButton" class="action-button" type="button">Anterior</button>
+              <span id="economyPageInfo" class="muted">0 registros.</span>
+              <button id="economyNextPageButton" class="action-button" type="button">Siguiente</button>
+            </div>
+          </section>
+
+          <section class="table-wrap">
+            <table>
+              <thead id="tableHead"></thead>
+              <tbody id="tableBody"></tbody>
+            </table>
+            <div id="emptyState" class="empty" hidden>No hay datos para mostrar.</div>
+          </section>
+        </div>
+      </section>
+
+      <!-- Modulo: Plantillas -->
+      <section id="templatesSection" class="module-panel" aria-labelledby="templatesSectionTitle" role="region" hidden>
+        <div class="ticket-dashboard">
+          <div class="ticket-toolbar">
+            <div>
+              <h2 id="templatesSectionTitle">Plantillas</h2>
+              <p>Gestiona las plantillas de ping que tambien usa el comando /plantilla.</p>
+            </div>
+            <div class="ticket-actions">
+              <button id="exportTemplatesButton" class="action-button" type="button">Exportar plantillas</button>
+              <button id="newTemplateButton" class="action-button primary" type="button">+ Nueva plantilla</button>
+              <button id="saveTemplateButton" class="action-button primary" type="button">Guardar plantilla</button>
+              <button id="deleteTemplateButton" class="action-button danger" type="button">Eliminar plantilla</button>
+            </div>
+          </div>
+
+          <section class="ticket-summary" aria-label="Resumen de plantillas">
+            <div class="ticket-stat"><span>Guardadas</span><strong id="templateSavedTotal">0</strong></div>
+            <div class="ticket-stat"><span>Limite</span><strong id="templateLimitTotal">5</strong></div>
+            <div class="ticket-stat"><span>Disponibles</span><strong id="templateAvailableTotal">0</strong></div>
+          </section>
+
+          <section class="template-builder" aria-label="Editor de plantillas">
+            <aside aria-label="Listado de plantillas">
+              <div class="section-label">Plantillas disponibles</div>
+              <div id="templateList" class="panel-list"></div>
+            </aside>
+
+            <div class="template-editor">
+              <div class="form-grid">
+                <div class="field">
+                  <label for="templateKey">Clave</label>
+                  <input id="templateKey" type="text" placeholder="postulacion-ava">
+                  <input id="templateOriginalKey" type="hidden">
+                </div>
+                <div class="field">
+                  <label for="templateName">Nombre visible</label>
+                  <input id="templateName" type="text" placeholder="Postulacion Avalonianas">
+                </div>
+                <div class="field">
+                  <label for="templateTitle">Titulo base</label>
+                  <input id="templateTitle" type="text" placeholder="Ava {numero}">
+                </div>
+                <div class="field">
+                  <label for="templateMention">Mencion</label>
+                  <input id="templateMention" type="text" placeholder="||@everyone||">
+                </div>
+                <div class="field">
+                  <label for="templateJoinCommand">Comando join</label>
+                  <input id="templateJoinCommand" type="text" placeholder="/join {caller}">
+                </div>
+                <div class="field">
+                  <label for="templateCallerSlot">Slot caller</label>
+                  <input id="templateCallerSlot" type="text" placeholder="MainTank">
+                </div>
+                <div class="field full">
+                  <label for="templateRoles">Botones / cupos, uno por linea</label>
+                  <textarea id="templateRoles" placeholder="MainTank&#10;OffTank&#10;Heal&#10;DPS"></textarea>
+                </div>
+                <div class="field full">
+                  <label for="templateContent">Mensaje que se publica en Discord</label>
+                  <textarea id="templateContent" placeholder="# {title} {mention}&#10;&#10;{join_command}&#10;&#10;{slots}&#10;&#10;Cupos: {occupied}/{total}{status}"></textarea>
+                </div>
+                <div class="field">
+                  <label for="templateSlotFormat">Formato de cupo</label>
+                  <input id="templateSlotFormat" type="text" placeholder="> **{index}.{slot}:** {user}">
+                </div>
+                <div class="field">
+                  <label for="templateLootLink">Loot link</label>
+                  <input id="templateLootLink" type="text" placeholder="https://...">
+                </div>
+                <label class="check-row">
+                  <input id="templateReportEnabled" type="checkbox">
+                  <span>Permitir informes al finalizar</span>
+                </label>
+              </div>
+
+              <div class="preview-box">
+                <strong>Vista previa</strong>
+                <div id="templatePreview" class="discord-preview"></div>
+              </div>
+              <div class="preview-box">
+                <strong>Placeholders disponibles</strong>
+                <div class="placeholder-list">{title} {numero} {template} {mention} {caller} {join_command} {slots} {loot_link} {occupied} {total} {status}</div>
+              </div>
+              <div id="templateStatus" class="status" role="status" aria-live="polite"></div>
+            </div>
+          </section>
+        </div>
+      </section>
+      <!-- Modulo: Tickets -->
+      <section id="ticketsSection" class="module-panel" aria-labelledby="ticketsSectionTitle" role="region" hidden>
+        <div id="ticketDashboardMain" class="ticket-dashboard">
+          <div class="ticket-toolbar">
+            <div>
+              <h2 id="ticketsSectionTitle">Tickets</h2>
+              <p>Configura paneles, mensajes, opciones, emojis, permisos y publicacion en Discord.</p>
+            </div>
+            <div class="ticket-actions">
+              <button id="exportTicketsButton" class="action-button" type="button">Exportar tickets</button>
+              <button id="createPanelButton" class="action-button primary" type="button">
+                <span aria-hidden="true">+</span>
+                Crear panel
+              </button>
+              <button id="clonePanelButton" class="action-button warning" type="button">
+                <span aria-hidden="true">*</span>
+                Clonar panel
+              </button>
+              <button id="deletePanelButton" class="action-button danger" type="button">
+                <span aria-hidden="true">x</span>
+                Eliminar panel
+              </button>
+            </div>
+          </div>
+
+          <section class="ticket-summary" aria-label="Resumen de tickets">
+            <div class="ticket-stat"><span>Paneles</span><strong id="ticketPanelTotal">0</strong></div>
+            <div class="ticket-stat"><span>Abiertos</span><strong id="ticketOpenTotal">0</strong></div>
+            <div class="ticket-stat"><span>Cerrados hoy</span><strong id="ticketClosedTodayTotal">0</strong></div>
+          </section>
+
+          <section class="editor-section" aria-label="Configuracion de multas">
+            <div class="editor-section-header">
+              <div>
+                <strong>Configuracion de multas</strong>
+                <span>Define el canal, rol de bloqueo, rol que resuelve multas y categoria para tickets de multa.</span>
+              </div>
+              <button id="saveFineConfigButton" class="action-button primary" type="button">Guardar multas</button>
+            </div>
+            <div class="form-grid">
+              <div class="field">
+                <label for="fineChannel">Canal de multas</label>
+                <select id="fineChannel"></select>
+              </div>
+              <div class="field">
+                <label for="fineBlockedRole">Rol multado</label>
+                <select id="fineBlockedRole"></select>
+              </div>
+              <div class="field">
+                <label for="fineResolverRole">Rol que resuelve</label>
+                <select id="fineResolverRole"></select>
+              </div>
+              <div class="field">
+                <label for="fineTicketCategory">Categoria ticket multa</label>
+                <select id="fineTicketCategory"></select>
+              </div>
+            </div>
+            <div id="fineConfigStatus" class="status" role="status" aria-live="polite"></div>
+          </section>
+
+          <section class="ticket-builder" aria-label="Constructor de tickets">
+            <aside aria-label="Listado de paneles de tickets">
+              <div class="section-label">Paneles creados</div>
+              <div id="ticketPanelList" class="panel-list"></div>
+            </aside>
+
+            <div id="ticketEmptyEditor" class="ticket-empty-editor">
+              <strong>Selecciona o crea un panel</strong>
+              <p>Cuando crees un panel, apareceran aca todas sus opciones configurables.</p>
+            </div>
+
+            <div id="ticketEditor" class="ticket-editor" hidden>
+              <nav class="editor-tabs" aria-label="Opciones del panel de ticket">
+                <button class="editor-tab active" type="button" data-editor-section="identity">Identidad</button>
+                <button class="editor-tab" type="button" data-editor-section="send">Enviar a</button>
+                <button class="editor-tab" type="button" data-editor-section="message">Mensaje Discord</button>
+                <button class="editor-tab" type="button" data-editor-section="ticketMessage">Mensaje ticket</button>
+                <button class="editor-tab" type="button" data-editor-section="options">Emojis/opciones</button>
+                <button class="editor-tab" type="button" data-editor-section="permissions">Permisos</button>
+                <button class="editor-tab" type="button" data-editor-section="preview">Vista/envio</button>
+              </nav>
+
+              <div class="editor-section" data-editor-panel="identity">
+                <div class="editor-section-header">
+                  <div>
+                    <strong>Identidad del panel</strong>
+                    <span>Nombre interno y formato que vera Discord.</span>
+                  </div>
+                </div>
+                <div class="form-grid">
+                  <div class="field">
+                    <label for="ticketName">Nombre</label>
+                    <input id="ticketName" type="text" placeholder="Postulacion Avalonianas">
+                  </div>
+                  <div class="field">
+                    <label for="ticketMode">Modo en Discord</label>
+                    <select id="ticketMode">
+                      <option value="buttons">Botones / emojis</option>
+                      <option value="select">Lista desplegable</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+
+              <div class="editor-section" data-editor-panel="send" hidden>
+                <div class="editor-section-header">
+                  <div>
+                    <strong>Enviar a</strong>
+                    <span>Elegis el canal donde se publicara el panel cuando decidas enviarlo.</span>
+                  </div>
+                </div>
+                <div class="form-grid">
+                  <div class="field">
+                    <label for="ticketChannel">Canal destino</label>
+                    <select id="ticketChannel">
+                      <option value="">Seleccionar canal</option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label for="ticketOpenCategory">Categoria donde se abren</label>
+                    <select id="ticketOpenCategory">
+                      <option value="">Seleccionar categoria</option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label for="ticketColor">Color del embed</label>
+                    <input id="ticketColor" type="text" placeholder="#22c55e">
+                  </div>
+                </div>
+              </div>
+
+              <div class="editor-section" data-editor-panel="message" hidden>
+                <div class="module-header">
+                  <p>Mensaje de Discord</p>
+                </div>
+                <div class="form-grid">
+                  <div class="field full">
+                    <label for="ticketContent">Texto del mensaje</label>
+                    <textarea id="ticketContent" placeholder="Texto opcional arriba del embed."></textarea>
+                  </div>
+                  <div class="field">
+                    <label for="ticketTitle">Titulo del embed</label>
+                    <input id="ticketTitle" type="text" placeholder="Postulacion Avalonianas">
+                  </div>
+                  <div class="field">
+                    <label for="ticketFooter">Footer</label>
+                    <input id="ticketFooter" type="text" placeholder="AvalonBot Tickets">
+                  </div>
+                  <div class="field full">
+                    <label for="ticketDescription">Descripcion del embed</label>
+                    <textarea id="ticketDescription" placeholder="Escribe el mensaje completo que vera la gente en Discord."></textarea>
+                  </div>
+                  <div class="field full">
+                    <label for="ticketImage">Imagen URL</label>
+                    <input id="ticketImage" type="text" placeholder="https://...">
+                  </div>
+                </div>
+              </div>
+
+              <div class="editor-section" data-editor-panel="ticketMessage" hidden>
+                <div class="editor-section-header">
+                  <div>
+                    <strong>Mensaje inicial del ticket</strong>
+                    <span>Todo es opcional. El bot no agregara ningun texto que no hayas configurado.</span>
+                  </div>
+                </div>
+                <div class="form-grid">
+                  <div class="field full">
+                    <label for="ticketOpenContent">Mensaje arriba del embed</label>
+                    <textarea id="ticketOpenContent" placeholder="Ejemplo: Bienvenido {mention}, completa el formulario."></textarea>
+                  </div>
+                  <div class="field">
+                    <label for="ticketOpenTitle">Titulo del embed</label>
+                    <input id="ticketOpenTitle" type="text" placeholder="Opcional">
+                  </div>
+                  <div class="field">
+                    <label for="ticketOpenColor">Color del embed</label>
+                    <input id="ticketOpenColor" type="text" placeholder="#38bdf8 (opcional)">
+                  </div>
+                  <div class="field full">
+                    <label for="ticketOpenDescription">Contenido del embed</label>
+                    <textarea id="ticketOpenDescription" placeholder="Puedes escribir instrucciones, listas y menciones."></textarea>
+                  </div>
+                  <div class="field full">
+                    <label for="ticketOpenFooter">Footer del embed</label>
+                    <input id="ticketOpenFooter" type="text" placeholder="Opcional">
+                  </div>
+                  <div class="field">
+                    <label for="ticketOpenImage">Imagen grande URL</label>
+                    <input id="ticketOpenImage" type="url" placeholder="https://...">
+                  </div>
+                  <div class="field">
+                    <label for="ticketOpenThumbnail">Miniatura URL</label>
+                    <input id="ticketOpenThumbnail" type="url" placeholder="https://...">
+                  </div>
+                </div>
+                <div class="preview-box">
+                  <strong>Variables disponibles</strong>
+                  <div class="placeholder-list">{mention} {user} {username} {display_name} {user_id} {ticket_number} {ticket_name} {panel_name} {option}</div>
+                </div>
+                <div class="preview-box">
+                  <strong>Vista ticket</strong>
+                  <div id="ticketOpenPreview"></div>
+                </div>
+              </div>
+
+              <div class="editor-section" data-editor-panel="options" hidden>
+                <div class="editor-section-header">
+                  <div>
+                    <strong>Opciones y emojis</strong>
+                    <span>Configura una opcion, varias opciones o una lista desplegable.</span>
+                  </div>
+                  <button id="addTicketOptionButton" class="action-button" type="button">+ Agregar opcion</button>
+                </div>
+                <div id="ticketOptions" class="option-list"></div>
+              </div>
+
+              <div class="editor-section" data-editor-panel="permissions" hidden>
+                <div class="editor-section-header">
+                  <div>
+                    <strong>Administrar permisos</strong>
+                    <span>Define quienes pueden reclamar, cerrar, reabrir o borrar tickets.</span>
+                  </div>
+                </div>
+                <div class="form-grid">
+                  <div class="field full">
+                    <div class="editor-section-header">
+                      <div>
+                        <strong>Permisos en ticket por rol</strong>
+                        <span>Elige un rol y marca los permisos que tendra dentro del canal privado.</span>
+                      </div>
+                      <button id="addTicketPermissionRoleButton" class="action-button" type="button">+ Agregar rol</button>
+                    </div>
+                    <div id="ticketRolePermissionsList" class="ticket-permission-list"></div>
+                  </div>
+                  <div class="field">
+                    <label for="claimRolesButton">Roles que reclaman, maximo 3</label>
+                    <input id="claimRoles" type="hidden">
+                    <div id="claimRolesPicker" class="role-picker" data-role-picker="claimRoles"></div>
+                  </div>
+                  <div class="field">
+                    <label for="closeRolesButton">Roles que cierran, maximo 3</label>
+                    <input id="closeRoles" type="hidden">
+                    <div id="closeRolesPicker" class="role-picker" data-role-picker="closeRoles"></div>
+                  </div>
+                  <div class="field">
+                    <label for="reopenRolesButton">Roles que reabren, maximo 3</label>
+                    <input id="reopenRoles" type="hidden">
+                    <div id="reopenRolesPicker" class="role-picker" data-role-picker="reopenRoles"></div>
+                  </div>
+                  <div class="field">
+                    <label for="deleteRolesButton">Roles que borran, maximo 3</label>
+                    <input id="deleteRoles" type="hidden">
+                    <div id="deleteRolesPicker" class="role-picker" data-role-picker="deleteRoles"></div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="editor-section" data-editor-panel="preview" hidden>
+                <div class="editor-section-header">
+                  <div>
+                    <strong>Vista previa y envio</strong>
+                    <span>Guardar solo almacena cambios; enviar publica el panel en Discord.</span>
+                  </div>
+                </div>
+                <div class="preview-box">
+                  <strong>Vista previa del panel</strong>
+                  <div id="ticketPreview"></div>
+                </div>
+                <div class="publish-row">
+                  <button id="savePanelButton" class="action-button primary" type="button">Guardar configuracion</button>
+                  <button id="publishPanelButton" class="action-button warning" type="button">Enviar a canal</button>
+                  <div id="ticketStatus" class="status" role="status" aria-live="polite"></div>
+                </div>
+              </div>
+
+            </div>
+
+            <div id="ticketLiveViewer" class="ticket-live-viewer" hidden>
+              <div class="editor-section-header">
+                <div>
+                  <strong id="ticketLiveTitle">Ticket en vivo</strong>
+                  <span id="ticketLiveSubtitle">Mensajes del canal en Discord.</span>
+                </div>
+                <button id="closeLiveTicketButton" class="action-button" type="button">Cerrar vista</button>
+              </div>
+              <div id="ticketLiveMessages" class="live-chat-box"></div>
+              <form id="ticketLiveForm" class="live-chat-form" aria-label="Enviar mensaje al ticket en vivo">
+                <textarea id="ticketLiveMessageInput" placeholder="Escribe un mensaje para enviarlo al ticket..."></textarea>
+                <button id="sendLiveTicketMessageButton" class="action-button primary" type="submit">Enviar</button>
+              </form>
+              <div id="ticketLiveMessageStatus" class="status" role="status" aria-live="polite"></div>
+            </div>
+          </section>
+
+          <section class="ticket-records-panel" aria-label="Tickets y transcripciones">
+            <div class="records-toolbar">
+              <div>
+                <div class="section-label">Tickets y transcripciones</div>
+                <div id="ticketLiveStatus" class="muted live-status">En vivo: esperando datos.</div>
+                <div id="ticketRecordsCount" class="muted live-status">0 tickets visibles.</div>
+              </div>
+              <div class="ticket-actions">
+                <input id="ticketRecordSearch" type="search" placeholder="Buscar ticket, usuario o panel">
+                <select id="ticketRecordStatusFilter" aria-label="Estado del ticket">
+                  <option value="">Todos los estados</option>
+                  <option value="open">Abierto</option>
+                  <option value="closed">Cerrado</option>
+                  <option value="deleted">Eliminado</option>
+                </select>
+                <select id="ticketRecordPageSize" aria-label="Tamano de pagina de tickets">
+                  <option value="10" selected>10 por pagina</option>
+                  <option value="25">25 por pagina</option>
+                  <option value="50">50 por pagina</option>
+                </select>
+                <button id="ticketRecordsPrevPageButton" class="action-button" type="button">Anterior</button>
+                <span id="ticketRecordsPageInfo" class="muted">0 tickets.</span>
+                <button id="ticketRecordsNextPageButton" class="action-button" type="button">Siguiente</button>
+                <button id="refreshTicketRecordsButton" class="action-button" type="button">Actualizar</button>
+              </div>
+            </div>
+            <div id="ticketRecordsList" class="ticket-list"></div>
+          </section>
+        </div>
+      </section>
+
+      <!-- Modulo: Calculadora de reparto -->
+      <section id="reportCalculatorSection" class="module-panel" aria-labelledby="reportCalculatorSectionTitle" role="region" hidden>
+        <div class="ticket-dashboard report-calculator-shell">
+          <div class="ticket-toolbar report-calculator-toolbar">
+            <div class="report-calculator-heading">
+              <div class="section-label">Modulo de reparto</div>
+              <h2 id="reportCalculatorSectionTitle">Calculadora de reparto</h2>
+              <p id="reportCalculatorSubtitle">Carga una Ava desde el boton Enviar informe de Discord.</p>
+            </div>
+            <div class="field report-calculator-picker">
+              <label for="reportCalculatorSelect">Pings activos</label>
+              <select id="reportCalculatorSelect">
+                <option value="">Selecciona una Ava</option>
+              </select>
+            </div>
+          </div>
+
+          <section class="ticket-summary report-calculator-summary">
+            <div class="ticket-stat"><span>Integrantes</span><strong id="reportCalculatorParticipantsTotal">0</strong></div>
+            <div class="ticket-stat"><span>Reparten</span><strong id="reportSplitParticipantsTotal">0</strong></div>
+            <div id="reportItemsPerUserStat" class="ticket-stat"><span>Items C/U</span><strong id="reportItemsPerUser">0</strong></div>
+            <div id="reportSilverPerUserStat" class="ticket-stat"><span>Silver C/U</span><strong id="reportSilverPerUser">0</strong></div>
+            <div class="ticket-stat"><span>Total neto</span><strong id="reportNetTotal">0</strong></div>
+          </section>
+
+          <section class="editor-section report-calculator-participants">
+            <div class="editor-section-header">
+              <div>
+                <strong>Integrantes del reparto</strong>
+                <span>Estos jugadores vienen cargados desde la Ava seleccionada.</span>
+              </div>
+            </div>
+            <div id="reportParticipantsList" class="report-participant-list"></div>
+          </section>
+
+          <div class="report-calculator-workspace">
+            <div class="template-editor report-calculator-form">
+              <div class="editor-section-header">
+                <div>
+                  <strong>Datos del informe</strong>
+                  <span>Incluye todas las opciones del antiguo modal de Discord.</span>
+                </div>
+              </div>
+              <div class="form-grid">
+                <div class="field full">
+                  <label for="reportSplitMode">Modo de reparto</label>
+                  <select id="reportSplitMode">
+                    <option value="items">Solo items</option>
+                    <option value="silver">Solo silver</option>
+                    <option value="items_silver">Items + silver</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label for="reportEstimated">Estimado</label>
+                  <input id="reportEstimated" type="text" placeholder="Ej: 12.5m">
+                </div>
+                <div id="reportItemsField" class="field">
+                  <label for="reportItems">Valor de items</label>
+                  <input id="reportItems" type="text" placeholder="Ej: 10m">
+                </div>
+                <div id="reportSilverField" class="field">
+                  <label for="reportSilver">Silver / bolsas</label>
+                  <input id="reportSilver" type="text" placeholder="Ej: 2.5m">
+                </div>
+                <div id="reportMapCostField" class="field">
+                  <label for="reportMapCost">Costo del mapa</label>
+                  <input id="reportMapCost" type="text" placeholder="Ej: 1m">
+                </div>
+                <div id="reportRepairCostField" class="field">
+                  <label for="reportRepairCost">Reparaciones</label>
+                  <input id="reportRepairCost" type="text" placeholder="Ej: 500k">
+                </div>
+                <div id="reportCallerPercentField" class="field" hidden>
+                  <label for="reportCallerPercent">Porcentaje caller</label>
+                  <input id="reportCallerPercent" type="text" placeholder="Ej: 10%">
+                </div>
+                <div id="reportLooterPaymentField" class="field" hidden>
+                  <label for="reportLooterPayment">Pago looter</label>
+                  <input id="reportLooterPayment" type="text" placeholder="Ej: 1m">
+                </div>
+                <div id="reportLooterUserField" class="field" hidden>
+                  <label for="reportLooterUser">Quien fue el looter</label>
+                  <select id="reportLooterUser">
+                    <option value="">Selecciona un integrante</option>
+                  </select>
+                </div>
+                <div id="reportTabSaleField" class="field" hidden>
+                  <label for="reportTabSalePercent">Venta de tab</label>
+                  <input id="reportTabSalePercent" type="text" placeholder="Ej: 15%">
+                </div>
+                <div class="field full">
+                  <div class="editor-section report-fines-section">
+                    <div class="editor-section-header">
+                      <div>
+                        <strong>Multas</strong>
+                        <span>Asigna monto, motivo y prueba para los jugadores multados.</span>
+                      </div>
+                      <button id="addReportFineButton" class="action-button" type="button">+ Agregar multa</button>
+                    </div>
+                    <div id="reportFinesList" class="option-list"></div>
+                  </div>
+                </div>
+              </div>
+              <div class="publish-row report-calculator-actions">
+                <button id="resetReportCalculatorButton" class="action-button" type="button">Reiniciar calculadora</button>
+                <button id="submitReportCalculatorButton" class="action-button primary" type="button">Enviar informe a evaluacion</button>
+                <div id="reportCalculatorStatus" class="status" role="status" aria-live="polite"></div>
+              </div>
+            </div>
+
+            <aside class="report-calculator-aside" aria-label="Resumen del reparto">
+              <div class="preview-box report-calculator-breakdown">
+                <div class="report-calculator-panel-head">
+                  <strong>Balance del reparto</strong>
+                  <span>Resumen neto antes de enviar el informe a evaluacion.</span>
+                </div>
+                <div id="reportCalculatorBreakdown" class="report-breakdown-list"></div>
+              </div>
+            </aside>
+          </div>
+        </div>
+      </section>
+
+      <!-- Modulo: Registro Albion -->
+      <section id="registrationSection" class="module-panel" aria-labelledby="registrationSectionTitle" role="region" hidden>
+        <div class="ticket-dashboard">
+          <div class="ticket-toolbar">
+            <div>
+              <h2 id="registrationSectionTitle">Registro de Albion</h2>
+              <p>Configura el registro por personaje para la region America y controla que pasa cuando alguien abandona el gremio.</p>
+            </div>
+            <div class="ticket-actions">
+              <button id="refreshAlbionRegistrationButton" class="action-button" type="button">Recargar</button>
+              <button id="saveAlbionRegistrationButton" class="action-button primary" type="button">Guardar configuracion</button>
+            </div>
+          </div>
+
+          <section class="ticket-summary" aria-label="Resumen de registro">
+            <div class="ticket-stat"><span>Region</span><strong>America</strong></div>
+            <div class="ticket-stat"><span>Registrados</span><strong id="albionRegistrationTotal">0</strong></div>
+            <div class="ticket-stat"><span>Activos</span><strong id="albionRegistrationActiveTotal">0</strong></div>
+          </section>
+
+          <div class="editor-section">
+            <div class="editor-section-header">
+              <div>
+                <strong>Configuracion del gremio</strong>
+                <span>El nombre se valida contra la API oficial de Albion Online antes de guardar.</span>
+              </div>
+            </div>
+            <div class="form-grid">
+              <div class="field">
+                <label for="albionGuildName">Nombre exacto del gremio</label>
+                <input id="albionGuildName" type="text" placeholder="Nombre del gremio">
+              </div>
+              <div class="field">
+                <label for="albionRole">Rol para miembros registrados</label>
+                <select id="albionRole"><option value="">Seleccionar rol</option></select>
+              </div>
+              <div class="field">
+                <label for="albionLeaveAction">Si abandona el gremio</label>
+                <select id="albionLeaveAction">
+                  <option value="remove_roles">Quitar los roles</option>
+                  <option value="kick">Expulsar del Discord</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="albionLogChannel">Canal de registros</label>
+                <select id="albionLogChannel"><option value="">Sin canal de registros</option></select>
+              </div>
+              <label class="check-row">
+                <input id="albionSyncNickname" type="checkbox">
+                <span>Cambiar el apodo de Discord al nombre del personaje de Albion</span>
+              </label>
+            </div>
+            <div id="albionRegistrationStatus" class="status" role="status" aria-live="polite"></div>
+          </div>
+
+          <div class="editor-section">
+            <div class="editor-section-header">
+              <div>
+                <strong>Personas registradas</strong>
+                <span>Los usuarios se registran con el comando /albion registrar.</span>
+              </div>
+            </div>
+            <div class="records-toolbar compact" aria-label="Filtros de registro de Albion">
+              <div class="ticket-actions">
+                <input id="albionRegistrationSearch" type="search" placeholder="Buscar usuario, personaje o gremio">
+                <select id="albionRegistrationStatusFilter" aria-label="Estado del registro de Albion">
+                  <option value="">Todos los estados</option>
+                  <option value="active">Activo</option>
+                  <option value="left_guild">Fuera del gremio</option>
+                  <option value="kicked">Expulsado</option>
+                </select>
+                <select id="albionRegistrationPageSize" aria-label="Tamano de pagina de registros Albion">
+                  <option value="10">10 por pagina</option>
+                  <option value="15" selected>15 por pagina</option>
+                  <option value="25">25 por pagina</option>
+                </select>
+              </div>
+              <div class="ticket-actions">
+                <button id="albionRegistrationPrevPageButton" class="action-button" type="button">Anterior</button>
+                <span id="albionRegistrationPageInfo" class="muted">0 registros.</span>
+                <button id="albionRegistrationNextPageButton" class="action-button" type="button">Siguiente</button>
+              </div>
+            </div>
+            <section class="table-wrap">
+              <table>
+                <thead>
+                  <tr><th>Discord</th><th>Personaje</th><th>Gremio</th><th>Estado</th><th>Ultima revision</th></tr>
+                </thead>
+                <tbody id="albionRegistrationsBody"></tbody>
+              </table>
+              <div id="albionRegistrationsEmpty" class="empty">Todavia no hay personas registradas.</div>
+            </section>
+          </div>
+        </div>
+      </section>
+      
+      <!-- Modulo: Bienvenidas -->
+      <section id="welcomeSection" class="module-panel" aria-label="Bienvenidas" role="region" hidden></section>
+
+      <!-- Modulo: Analizador de loot -->
+      <section id="lootSection" class="module-panel" aria-labelledby="lootSectionTitle" role="region" hidden>
+        <div class="loot-dashboard">
+          <div class="ticket-toolbar">
+            <div>
+              <h2 id="lootSectionTitle">Analizador de loot</h2>
+              <p>Importa reportes de StatisticsAnalysisTool y consolida el botin por jugador.</p>
+            </div>
+            <div class="ticket-actions">
+              <button id="lootReplaceButton" class="action-button primary" type="button" hidden>Cargar otro archivo</button>
+              <button id="lootClearButton" class="action-button danger" type="button" hidden>Limpiar</button>
+            </div>
+          </div>
+
+          <label id="lootDropzone" class="loot-dropzone">
+            <input id="lootFileInput" type="file" accept=".csv,.json">
+            <span class="loot-dropzone-icon" aria-hidden="true">+</span>
+            <strong>Arrastra un CSV o JSON</strong>
+            <span>Tambien puedes hacer clic para seleccionar el reporte. El archivo se procesa localmente.</span>
+          </label>
+
+          <div id="lootError" class="loot-error" hidden></div>
+
+          <div id="lootResults" hidden>
+            <div class="loot-file-summary">
+              <div>
+                <strong id="lootFileName">Reporte</strong>
+                <span id="lootFileMeta"></span>
+              </div>
+              <div class="loot-player-total">
+                <span id="lootGrandTotal"></span>
+              </div>
+            </div>
+
+            <section class="loot-controls" aria-label="Opciones de loot">
+              <div class="loot-control-card">
+                <strong>Filtro por tier</strong>
+                <div id="lootTierButtons" class="loot-tier-buttons"></div>
+                <span class="muted">Morado: visible. Rojo: oculto. Amarillo: visible parcialmente.</span>
+              </div>
+              <div class="loot-control-card">
+                <strong>Tamano de iconos</strong>
+                <div class="loot-range">
+                  <input id="lootIconSize" type="range" min="48" max="96" value="60">
+                  <span id="lootIconSizeLabel">60px</span>
+                </div>
+              </div>
+              <div class="loot-control-card">
+                <strong>Agrupacion</strong>
+                <div class="loot-switch-row">
+                  <span>Separar objetos por tier</span>
+                  <button id="lootGroupToggle" class="loot-switch" type="button" aria-pressed="false">No</button>
+                </div>
+              </div>
+            </section>
+
+            <div id="lootPlayers" class="loot-players"></div>
+          </div>
+        </div>
+      </section>
+      <!-- Modulo: Auditoria -->
+      <section id="auditSection" class="module-panel" aria-labelledby="auditSectionTitle" role="region" hidden>
+        <div class="audit-dashboard">
+          <div class="ticket-toolbar">
+            <div>
+              <h2 id="auditSectionTitle">Auditoria</h2>
+              <p>Configura un canal distinto para cada tipo de registro del servidor.</p>
+            </div>
+            <div class="ticket-actions">
+              <button id="saveAuditConfigButton" class="action-button primary" type="button">Guardar auditoria</button>
+            </div>
+          </div>
+
+          <section class="ticket-summary" aria-label="Resumen de auditoria">
+            <div class="ticket-stat"><span>Categorias</span><strong id="auditCategoryTotal">0</strong></div>
+            <div class="ticket-stat"><span>Configuradas</span><strong id="auditConfiguredTotal">0</strong></div>
+            <div class="ticket-stat"><span>Sin canal</span><strong id="auditMissingTotal">0</strong></div>
+          </section>
+
+          <section id="auditConfigGrid" class="audit-grid" aria-label="Canales de auditoria"></section>
+          <div class="editor-section">
+            <div class="editor-section-header">
+              <div>
+                <strong>Eventos recientes</strong>
+                <span>Se guardan en el dashboard aunque no haya canal de Discord configurado.</span>
+              </div>
+            </div>
+            <div class="records-toolbar compact" aria-label="Filtros de auditoria">
+              <div class="ticket-actions">
+                <input id="auditSearch" type="search" placeholder="Buscar evento o descripcion">
+                <select id="auditTypeFilter" aria-label="Categoria de auditoria">
+                  <option value="">Todas las categorias</option>
+                </select>
+                <select id="auditPageSize" aria-label="Tamano de pagina de auditoria">
+                  <option value="8">8 por pagina</option>
+                  <option value="12" selected>12 por pagina</option>
+                  <option value="24">24 por pagina</option>
+                </select>
+              </div>
+              <div class="ticket-actions">
+                <button id="auditPrevPageButton" class="action-button" type="button">Anterior</button>
+                <span id="auditPageInfo" class="muted">0 eventos.</span>
+                <button id="auditNextPageButton" class="action-button" type="button">Siguiente</button>
+              </div>
+            </div>
+            <div id="auditEventsList" class="audit-event-sections"></div>
+          </div>
+          <div id="auditStatus" class="status" role="status" aria-live="polite"></div>
+        </div>
+      </section>
+
+      <!-- Modulo: Permisos -->
+      <section id="permissionsSection" class="module-panel" aria-labelledby="permissionsSectionTitle" role="region" hidden>
+        <div class="module-header">
+          <div>
+            <h2 id="permissionsSectionTitle">Permisos</h2>
+            <p>Configura que roles pueden usar cada parte del bot. Los comandos de Discord siguen funcionando y usan esta misma configuracion.</p>
+          </div>
+          <div class="ticket-actions">
+            <button id="refreshPermissionsButton" class="action-button" type="button">Recargar</button>
+            <button id="savePermissionsButton" class="action-button primary" type="button">Guardar permisos</button>
+          </div>
+        </div>
+        <section class="ticket-summary" aria-label="Resumen de permisos">
+          <div class="ticket-stat"><span>Roles con permisos</span><strong id="permissionRoleTotal">0</strong></div>
+          <div class="ticket-stat"><span>Permisos activos</span><strong id="permissionActiveTotal">0</strong></div>
+          <div class="ticket-stat"><span>Roles disponibles</span><strong id="permissionAvailableTotal">0</strong></div>
+        </section>
+        <div class="editor-section">
+          <div class="editor-section-header">
+            <div>
+              <strong>Permisos por rol</strong>
+              <span>Activa permisos especificos o marca Global para darle acceso completo a ese rol.</span>
+            </div>
+          </div>
+          <div class="records-toolbar compact">
+            <input id="permissionRoleSearch" type="search" placeholder="Buscar rol por nombre o ID">
+          </div>
+          <div id="permissionsGrid" class="permissions-grid"></div>
+        </div>
+        <div id="permissionsStatus" class="status" role="status" aria-live="polite"></div>
+      </section>
+    </div>
+  </main>
+
+  <!-- Modal: detalle de loot -->
+  <div id="lootModal" class="loot-modal" role="dialog" aria-modal="true" aria-labelledby="lootModalTitle" hidden>
+    <div id="lootModalPanel" class="loot-modal-panel"></div>
+  </div>
+
+  <!-- Scripts del dashboard -->
+  <script src="/static/js/router.js"></script>
+  <script src="/static/js/pages/economy.js"></script>
+  <script src="/static/js/pages/pings.js"></script>
+  <script src="/static/js/pages/fines.js"></script>
+  <script src="/static/js/pages/tickets.js"></script>
+  <script src="/static/js/pages/audit.js"></script>
+  <script src="/static/js/pages/permissions.js"></script>
+  <script src="/static/js/pages/albion.js"></script>
+  <script src="/static/js/pages/report-calculator.js"></script>
+  <script src="/static/js/dashboard.js"></script>
+</body>
+</html>
