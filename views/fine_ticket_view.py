@@ -1,5 +1,7 @@
 import discord
 
+from services.permission_service import PermissionService
+
 
 class FineTicketView(discord.ui.View):
     def __init__(self, *, fine_id, fine_service):
@@ -14,7 +16,7 @@ class FineTicketView(discord.ui.View):
             await interaction.response.send_message("Esta multa ya no esta pendiente.", ephemeral=True)
             return False
 
-        if interaction.user.guild_permissions.administrator:
+        if PermissionService.is_administrator(interaction.user):
             return True
 
         resolver_role_id = int(fine.get("resolver_role_id") or 0)
