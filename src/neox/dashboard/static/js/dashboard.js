@@ -2157,7 +2157,7 @@
       let silverPool = 0;
       if (mode === "items") itemPool = items;
       else if (mode === "silver") silverPool = netSilver;
-      else if (tabSalePercent > 0) silverPool = netSilver + soldTabValue;
+      else if (tabSalePercent > 0) silverPool = Math.max(netSilver - callerPayment, 0) + soldTabValue;
       else {
         itemPool = items;
         silverPool = netSilver;

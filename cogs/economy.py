@@ -490,9 +490,9 @@ class EconomyCog(commands.Cog):
 
     async def cog_load(self):
         if self.restore_task is None:
-            self.restore_task = self.bot.loop.create_task(self.restore_active_avalonian_views())
+            self.restore_task = asyncio.create_task(self.restore_active_avalonian_views())
         if self.dashboard_action_task is None:
-            self.dashboard_action_task = self.bot.loop.create_task(
+            self.dashboard_action_task = asyncio.create_task(
                 self.process_dashboard_action_requests()
             )
 
