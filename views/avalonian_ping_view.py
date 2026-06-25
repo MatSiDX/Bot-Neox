@@ -699,7 +699,7 @@ class AvalonSignupView(discord.ui.View):
             silver_pool = net_items + net_silver
         elif tab_sale_active:
             item_pool = 0
-            silver_pool = net_silver + sold_tab_value
+            silver_pool = max(net_silver - caller_amount, 0) + sold_tab_value
             effective_mode = REPORT_SPLIT_SILVER
         else:
             item_pool = net_items
@@ -803,14 +803,16 @@ class AvalonSignupView(discord.ui.View):
 
         parts = []
         note = adjustments.get(slot_name, "")
-        if note and not (
+        is_looter = (
             split.get("looter_payment")
             and int(split.get("looter_user_id", 0) or 0) == int(user_id)
-            and note.strip().lower() == "looter"
+        )
+        if note and not (
+            is_looter and note.strip().lower() == "looter"
         ):
             parts.append(note)
 
-        if split.get("looter_payment") and int(split.get("looter_user_id", 0) or 0) == int(user_id):
+        if is_looter:
             parts.append("Looter")
             parts.append(f"+{self.format_full_amount(split['looter_payment'])}")
 
