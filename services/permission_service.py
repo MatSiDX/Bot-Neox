@@ -135,10 +135,32 @@ class PermissionService:
             permissions = role_permissions.get(str(role.id), [])
             if PERMISSION_GLOBAL in permissions or permission in permissions:
                 return True
-            role_ids = [getattr(role, "id", role) for role in getattr(member, "roles", [])]
+        return False
 
+    def has_module_access(
+        self,
+        guild_id,
+        module_key,
+        *,
+        member=None,
+        role_ids=None,
+        is_admin=False,
+        required_permissions=None,
+    ):
         effective_permissions = tuple(required_permissions or self.get_required_permissions(module_key))
-        return self.has_any_permission(guild_id, role_ids or [], effective_permissions)
+        if not effective_permissions:
+            return False
+
+        if member is not None and self.is_administrator(member):
+            return True
+        if is_admin:
+            return True
+
+        resolved_role_ids = role_ids
+        if resolved_role_ids is None and member is not None:
+            resolved_role_ids = [getattr(role, "id", role) for role in getattr(member, "roles", []) or []]
+
+        return self.has_any_permission(guild_id, resolved_role_ids or [], effective_permissions)
 
     def has_any_dashboard_access(self, guild_id, *, member=None, role_ids=None, is_admin=False):
         for module_key in DASHBOARD_GUILD_MODULES:
