@@ -18,6 +18,7 @@
         q: state.ticketRecordSearch || ""
       });
       if (state.ticketRecordFilters.status) recordParams.set("status", state.ticketRecordFilters.status);
+      if (state.ticketRecordFilters.record_type) recordParams.set("type", state.ticketRecordFilters.record_type);
       if (state.ticketRecordFilters.date_from) recordParams.set("date_from", state.ticketRecordFilters.date_from);
       if (state.ticketRecordFilters.date_to) recordParams.set("date_to", state.ticketRecordFilters.date_to);
       const [panelsResponse, recordsResponse] = await Promise.all([
@@ -34,10 +35,6 @@
         ctx.applyPagePayload(state.ticketRecordFilters, payload);
         state.ticketRecords = payload.records || [];
         state.ticketRecordsSummary = payload.summary || {};
-      }
-
-      if (pages.fines?.load) {
-        await pages.fines.load(ctx, { force });
       }
 
       state.ticketConfigGuildId = state.guildId;

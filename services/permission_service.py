@@ -39,6 +39,7 @@ MODULE_EXPORT_TEMPLATES = "export_templates"
 MODULE_EXPORT_TICKETS = "export_tickets"
 MODULE_CONFIGURATION = "configuration"
 MODULE_PERMISSIONS = "permissions"
+MODULE_ADMIN_PANEL = "admin_panel"
 MODULE_PING = "ping"
 MODULE_REPORTS = "reports"
 
@@ -57,6 +58,7 @@ MODULE_PERMISSION_RULES = {
     MODULE_EXPORT_TICKETS: (PERMISSION_TICKETS,),
     MODULE_CONFIGURATION: (PERMISSION_PERMISSIONS,),
     MODULE_PERMISSIONS: (PERMISSION_PERMISSIONS,),
+    MODULE_ADMIN_PANEL: (PERMISSION_PERMISSIONS,),
     MODULE_PING: (PERMISSION_PING,),
     MODULE_REPORTS: (PERMISSION_REPORTS,),
 }
@@ -65,8 +67,10 @@ DASHBOARD_SECTION_MODULES = {
     "economy": MODULE_ECONOMY,
     "templates": MODULE_TEMPLATES,
     "tickets": MODULE_TICKETS,
+    "fines": MODULE_FINES,
     "audit": MODULE_AUDIT,
     "permissions": MODULE_PERMISSIONS,
+    "admin-panel": MODULE_ADMIN_PANEL,
     "registration": MODULE_ALBION_REGISTRATION,
 }
 
@@ -78,6 +82,7 @@ DASHBOARD_GUILD_MODULES = (
     MODULE_TEMPLATES,
     MODULE_ALBION_REGISTRATION,
     MODULE_PERMISSIONS,
+    MODULE_ADMIN_PANEL,
 )
 
 
@@ -203,6 +208,9 @@ class PermissionService:
 
     def can_manage_configuration(self, guild_id, member):
         return self.has_module_access(guild_id, MODULE_CONFIGURATION, member=member)
+
+    def can_access_admin_panel(self, guild_id, member):
+        return self.has_module_access(guild_id, MODULE_ADMIN_PANEL, member=member)
 
     def can_export_economy(self, guild_id, member):
         return self.has_module_access(guild_id, MODULE_EXPORT_ECONOMY, member=member)

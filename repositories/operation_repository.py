@@ -35,7 +35,7 @@ class OperationRepository:
             rows = connection.execute(
                 """
                 SELECT guild_id, guild_name, action, operator, operator_id, player, player_id,
-                       type, category, amount, previous_balance, new_balance, date, time
+                       type, category, amount, previous_balance, new_balance, reason, player_status, date, time
                 FROM economy_operations
                 ORDER BY guild_id, id
                 """
@@ -68,7 +68,7 @@ class OperationRepository:
             rows = connection.execute(
                 """
                 SELECT guild_id, guild_name, action, operator, operator_id, player, player_id,
-                       type, category, amount, previous_balance, new_balance, date, time
+                       type, category, amount, previous_balance, new_balance, reason, player_status, date, time
                 FROM economy_operations
                 WHERE guild_id = ?
                 ORDER BY id
@@ -128,9 +128,9 @@ class OperationRepository:
                 """
                 INSERT INTO economy_operations (
                     guild_id, guild_name, action, operator, operator_id, player, player_id,
-                    type, category, amount, previous_balance, new_balance, date, time, created_at
+                    type, category, amount, previous_balance, new_balance, reason, player_status, date, time, created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     str(guild_id),
@@ -145,6 +145,8 @@ class OperationRepository:
                     int(operation.get("amount", 0) or 0),
                     operation.get("previous_balance", ""),
                     operation.get("new_balance", ""),
+                    str(operation.get("reason", "")),
+                    str(operation.get("player_status", "")),
                     str(operation.get("date", "")),
                     str(operation.get("time", "")),
                     utc_now_iso(),
@@ -179,6 +181,8 @@ class OperationRepository:
             "amount": row["amount"],
             "previous_balance": row["previous_balance"],
             "new_balance": row["new_balance"],
+            "reason": row["reason"] if "reason" in row.keys() else "",
+            "player_status": row["player_status"] if "player_status" in row.keys() else "",
             "date": row["date"],
             "time": row["time"],
         }
@@ -217,10 +221,12 @@ class OperationRepository:
                     OR LOWER(player_id) LIKE ?
                     OR LOWER(type) LIKE ?
                     OR LOWER(category) LIKE ?
+                    OR LOWER(reason) LIKE ?
+                    OR LOWER(player_status) LIKE ?
                 )
                 """
             )
-            params.extend([like_query] * 7)
+            params.extend([like_query] * 9)
         if operation_type:
             clauses.append("LOWER(type) = ?")
             params.append(operation_type)
@@ -255,6 +261,8 @@ class OperationRepository:
                     amount,
                     previous_balance,
                     new_balance,
+                    reason,
+                    player_status,
                     date,
                     time,
                     created_at
@@ -279,6 +287,8 @@ class OperationRepository:
                 "amount": int(row["amount"] or 0),
                 "previous_balance": row["previous_balance"],
                 "new_balance": row["new_balance"],
+                "reason": str(row["reason"] or ""),
+                "player_status": str(row["player_status"] or ""),
                 "date": str(row["date"] or ""),
                 "time": str(row["time"] or ""),
                 "created_at": str(row["created_at"] or ""),

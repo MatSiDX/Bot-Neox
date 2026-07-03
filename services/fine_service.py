@@ -15,6 +15,9 @@ class FineService:
     def get_guild_fines(self, guild_id):
         return self.repo.list_by_guild(guild_id)
 
+    def get_ticket_records(self, guild_id):
+        return self.repo.list_by_guild(guild_id)
+
     def has_unpaid_fines(self, guild_id, user_id):
         return len(self.repo.list_unpaid_by_user(guild_id, user_id)) > 0
 
@@ -39,6 +42,9 @@ class FineService:
             paid_by_id=paid_by_id,
             paid_by_name=paid_by_name,
         )
+
+    def soft_delete(self, fine_id):
+        return self.repo.soft_delete(fine_id)
 
     def user_still_has_open_fines(self, guild_id, user_id):
         return self.has_unpaid_fines(guild_id, user_id)

@@ -1,3 +1,6 @@
+import hashlib
+import json
+
 from services.dashboard_action_service import DashboardActionService
 
 
@@ -8,13 +11,27 @@ class ReportDashboardRepository:
     def __init__(self):
         self.service = DashboardActionService()
 
-    def create(self, payload, *, requested_by=""):
+    def create(self, payload, *, requested_by="", idempotency_key=None):
+        payload_fingerprint = hashlib.sha256(
+            json.dumps(payload or {}, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        ).hexdigest()[:16]
+        idempotency_key = ":".join(
+            [
+                REPORT_DASHBOARD_ACTION_TYPE,
+                str(payload.get("guild_id") or ""),
+                str(payload.get("caller_id") or ""),
+                str(payload.get("numero_ava") or ""),
+                "send" if payload.get("send_to_channel", True) else "preview",
+                str(idempotency_key or payload_fingerprint),
+            ]
+        )
         return self.service.create_request(
             guild_id=payload.get("guild_id"),
             action_type=REPORT_DASHBOARD_ACTION_TYPE,
             payload=payload,
             requested_by=requested_by or payload.get("caller_id") or "",
             max_retries=3,
+            idempotency_key=idempotency_key,
         )
 
     def get(self, request_id):

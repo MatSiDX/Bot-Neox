@@ -10,6 +10,7 @@ def admin_guilds_from_discord(guilds, administrator_permission):
             admin_guilds.append({
                 "id": str(guild.get("id")),
                 "name": str(guild.get("name") or f"Servidor {guild.get('id')}"),
+                "icon": str(guild.get("icon") or ""),
             })
     return admin_guilds
 
@@ -19,6 +20,7 @@ def guilds_from_discord(guilds):
         {
             "id": str(guild.get("id")),
             "name": str(guild.get("name") or f"Servidor {guild.get('id')}"),
+            "icon": str(guild.get("icon") or ""),
         }
         for guild in guilds
         if guild.get("id")

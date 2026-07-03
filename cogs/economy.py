@@ -14,6 +14,7 @@ from services.config_service import CONFIG_REPORT_APPROVED_CHANNEL, CONFIG_REPOR
 from services.dashboard_action_service import DashboardActionService
 from services.fine_service import FineService
 from services.ping_template_service import MAX_TEMPLATES_PER_GUILD, PingTemplateService
+from services.server_template_service import SERVER_TEMPLATE_ACTION_APPLY, SERVER_TEMPLATE_ACTION_TYPES, ServerTemplateService
 from services.permission_service import (
     BOT_PERMISSION_DEFINITIONS,
     BOT_PERMISSION_LABELS,
@@ -27,8 +28,11 @@ from services.permission_service import (
 )
 from services.report_service import ReportService
 from services.report_runtime_service import ReportRuntimeService
+from repositories.bot_message_audit_repository import BotMessageAuditRepository
 from repositories.report_dashboard_repository import REPORT_DASHBOARD_ACTION_TYPE
+from utils.console_logger import log_event, log_exception
 from utils.formatters import format_number
+from utils.interaction_safety import SafeModal
 from views.avalonian_ping_view import AvalonSignupView
 from views.top_view import TopView
 
@@ -51,8 +55,18 @@ CONFIG_CHANNEL_CHOICES = [
     app_commands.Choice(name="Informes Aprobados", value=CONFIG_REPORT_APPROVED_CHANNEL),
 ]
 
+BOT_MESSAGE_ACTION_SEND = "bot_message_send"
+BOT_MESSAGE_ACTION_EDIT = "bot_message_edit"
+BOT_MESSAGE_ACTION_DELETE = "bot_message_delete"
+BOT_MESSAGE_ACTION_TYPES = (
+    BOT_MESSAGE_ACTION_SEND,
+    BOT_MESSAGE_ACTION_EDIT,
+    BOT_MESSAGE_ACTION_DELETE,
+)
+BOT_MESSAGE_MAX_LENGTH = 2000
 
-class PingTemplateModal(discord.ui.Modal):
+
+class PingTemplateModal(SafeModal):
     def __init__(self, cog, template, *, fill_for_testing=False):
         modal_title = f"Ping: {template.get('name', 'Plantilla')}"[:45]
         super().__init__(title=modal_title)
@@ -95,7 +109,7 @@ class PingTemplateModal(discord.ui.Modal):
         )
 
 
-class PingTemplateCreateModal(discord.ui.Modal):
+class PingTemplateCreateModal(SafeModal):
     def __init__(self, cog, template_key, template_name):
         super().__init__(title="Agregar plantilla")
         self.cog = cog
@@ -323,6 +337,8 @@ class EconomyCog(commands.Cog):
             fine_service=self.fine_service,
             persist_callback=self.persist_active_view_state,
             remove_persisted_callback=self.remove_active_view_state,
+            deactivate_persisted_callback=self.deactivate_active_view_state,
+            close_callback=self.unregister_active_avalonian_view,
         )
 
         if fill_for_testing:
@@ -458,6 +474,30 @@ class EconomyCog(commands.Cog):
         user = data.get(str(guild_id), {}).get(str(user_id), {})
         return user.get("name")
 
+    async def historical_user_autocomplete(self, interaction, current):
+        users = self.service.search_existing_users(interaction.guild, current, limit=25)
+        choices = []
+        for user in users:
+            name = user.get("user_name") or f"Usuario {user.get('user_id')}"
+            suffix = f" | {user.get('internal_id')}" if user.get("internal_id") else ""
+            label = f"{name} ({user.get('user_id')}){suffix}"[:100]
+            choices.append(app_commands.Choice(name=label, value=str(user.get("user_id"))))
+        return choices
+
+    async def resolve_member_status(self, guild, user_id):
+        member = None
+        try:
+            member = guild.get_member(int(user_id)) if guild else None
+        except (TypeError, ValueError):
+            member = None
+        if member:
+            return member, "En servidor"
+        try:
+            member = await guild.fetch_member(int(user_id))
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException, TypeError, ValueError):
+            return None, "Fuera del servidor"
+        return member, "En servidor"
+
     def get_avalonian_key(self, interaction, user_id, numero_ava):
         return (interaction.guild.id, user_id, numero_ava)
 
@@ -469,15 +509,45 @@ class EconomyCog(commands.Cog):
             return None
         return view
 
+    def get_manageable_avalonian_views(self, interaction, numero_ava=None):
+        is_ping_manager = self.has_ping_permission(interaction)
+        views = []
+        for (guild_id, caller_id, view_numero_ava), view in self.active_avalonian_views.items():
+            if guild_id != interaction.guild.id:
+                continue
+            if numero_ava is not None and view_numero_ava != numero_ava:
+                continue
+            if view.cancelled or view.finalized:
+                continue
+            if caller_id == interaction.user.id or is_ping_manager:
+                views.append((caller_id, view_numero_ava, view))
+        return sorted(views, key=lambda item: (item[1], item[0]))
+
+    def resolve_manageable_avalonian_view(self, interaction, numero_ava, caller=None):
+        caller_id = getattr(caller, "id", None)
+        if caller_id is not None:
+            view = self.active_avalonian_views.get((interaction.guild.id, caller_id, numero_ava))
+            if view and not view.cancelled and not view.finalized:
+                if caller_id == interaction.user.id or self.has_ping_permission(interaction):
+                    return view, None
+            return None, f"No encontre un ping activo de Ava {numero_ava} para ese caller en este servidor."
+
+        matches = self.get_manageable_avalonian_views(interaction, numero_ava)
+        if not matches:
+            return None, f"No tienes un ping activo para administrar Ava {numero_ava} en este servidor."
+        if len(matches) > 1:
+            callers = ", ".join(f"<@{caller_id}>" for caller_id, _, _ in matches[:10])
+            return None, f"Hay mas de un ping activo para Ava {numero_ava}. Indica el caller. Callers: {callers}"
+        return matches[0][2], None
+
     def is_matching_avalonian_view(self, view, numero_ava):
         return view is not None and view.numero_ava == numero_ava and not view.finalized and not view.cancelled
 
     def get_accessible_avalonian_views(self, interaction):
         views = []
-        for (guild_id, caller_id, numero_ava), view in self.active_avalonian_views.items():
-            if guild_id == interaction.guild.id and caller_id == interaction.user.id and not view.finalized and not view.cancelled:
-                views.append((numero_ava, view))
-        return sorted(views, key=lambda item: item[0])
+        for caller_id, numero_ava, view in self.get_manageable_avalonian_views(interaction):
+            views.append((caller_id, numero_ava, view))
+        return sorted(views, key=lambda item: (item[1], item[0]))
 
     def persist_active_view_state(self, state):
         self.active_avalonian_service.save_state(state)
@@ -485,15 +555,27 @@ class EconomyCog(commands.Cog):
     def remove_active_view_state(self, guild_id, caller_id, numero_ava):
         self.active_avalonian_service.remove_state(guild_id, caller_id, numero_ava)
 
+    def deactivate_active_view_state(self, guild_id, caller_id, numero_ava, status):
+        self.active_avalonian_service.deactivate_state(guild_id, caller_id, numero_ava, status)
+
+    def unregister_active_avalonian_view(self, guild_id, caller_id, numero_ava):
+        self.active_avalonian_views.pop((guild_id, caller_id, numero_ava), None)
+
     def resolve_active_avalonian_view(self, *, guild_id, caller_id, numero_ava):
         return self.active_avalonian_views.get((guild_id, caller_id, numero_ava))
 
     async def cog_load(self):
         if self.restore_task is None:
             self.restore_task = asyncio.create_task(self.restore_active_avalonian_views())
+            self.restore_task.add_done_callback(
+                lambda task: self.log_task_result(task, "restore_active_avalonian_views")
+            )
         if self.dashboard_action_task is None:
             self.dashboard_action_task = asyncio.create_task(
                 self.process_dashboard_action_requests()
+            )
+            self.dashboard_action_task.add_done_callback(
+                lambda task: self.log_task_result(task, "process_dashboard_action_requests")
             )
 
     def cog_unload(self):
@@ -507,22 +589,43 @@ class EconomyCog(commands.Cog):
             return exc.status == 429 or exc.status >= 500
         return isinstance(exc, (asyncio.TimeoutError, TimeoutError))
 
+    def log_task_result(self, task, task_name):
+        if task.cancelled():
+            log_event(f"Tarea cancelada: {task_name}")
+            return
+
+        exc = task.exception()
+        if exc:
+            log_exception(f"Tarea finalizo con error: {task_name}", exc)
+
     async def process_dashboard_action_requests(self):
         await self.bot.wait_until_ready()
         worker_id = f"economy-report-worker:{self.bot.user.id if self.bot.user else 'bot'}"
         while not self.bot.is_closed():
-            if not self.restored_active_views:
-                await asyncio.sleep(1)
-                continue
-            request = self.dashboard_action_service.claim_next_request(
-                worker_id,
-                action_types=[REPORT_DASHBOARD_ACTION_TYPE],
-            )
-            if not request:
-                await asyncio.sleep(2)
+            try:
+                if not self.restored_active_views:
+                    await asyncio.sleep(1)
+                    continue
+                request = self.dashboard_action_service.claim_next_request(
+                    worker_id,
+                    action_types=[REPORT_DASHBOARD_ACTION_TYPE, *SERVER_TEMPLATE_ACTION_TYPES, *BOT_MESSAGE_ACTION_TYPES],
+                )
+                if not request:
+                    await asyncio.sleep(2)
+                    continue
+            except Exception as exc:
+                log_exception("Error leyendo acciones pendientes del dashboard", exc)
+                await asyncio.sleep(5)
                 continue
 
             request_id = request.get("id")
+            if request.get("action_type") in BOT_MESSAGE_ACTION_TYPES:
+                await self.process_bot_message_dashboard_action(request)
+                continue
+            if request.get("action_type") in SERVER_TEMPLATE_ACTION_TYPES:
+                await self.process_server_template_dashboard_action(request)
+                continue
+
             payload = request.get("payload") or {}
             key = (
                 int(payload.get("guild_id", 0) or 0),
@@ -556,6 +659,11 @@ class EconomyCog(commands.Cog):
                 continue
 
             try:
+                send_to_channel = payload.get("send_to_channel", True)
+                if isinstance(send_to_channel, str):
+                    send_to_channel = send_to_channel.strip().lower() not in {"0", "false", "no", "off"}
+                else:
+                    send_to_channel = bool(send_to_channel)
                 await view.publish_report(
                     guild=guild,
                     caller=caller,
@@ -571,8 +679,14 @@ class EconomyCog(commands.Cog):
                     adjustments_text=payload.get("adjustments", ""),
                     fine_entries=payload.get("fines", []),
                     split_mode=payload.get("split_mode", "items"),
+                    send_to_channel=send_to_channel,
+                    split_exclusions=payload.get("split_exclusions", []),
+                    split_modifiers=payload.get("split_modifiers", []),
+                    build_loan_discounts=payload.get("build_loan_discounts", []),
+                    chest_table_id=payload.get("chest_table_id", ""),
                 )
             except Exception as exc:
+                log_exception(f"Error procesando accion dashboard request_id={request_id}", exc)
                 self.dashboard_action_service.fail_request(
                     request_id,
                     error=str(exc),
@@ -583,14 +697,155 @@ class EconomyCog(commands.Cog):
             else:
                 self.dashboard_action_service.complete_request(
                     request_id,
-                    result={"published": True},
+                    result={
+                        "published": send_to_channel,
+                        "sent_to_channel": send_to_channel,
+                    },
                 )
+
+    async def process_server_template_dashboard_action(self, request):
+        request_id = request.get("id")
+        payload = request.get("payload") or {}
+        try:
+            result = await ServerTemplateService().apply_template(self.bot, payload)
+            self.dashboard_action_service.complete_request(request_id, result=result)
+            log_event(
+                "Plantilla de servidor aplicada "
+                f"request_id={request_id} guild={result.get('guild_id')} "
+                f"roles={len(result.get('created', {}).get('roles', []))} "
+                f"categorias={len(result.get('created', {}).get('categories', []))} "
+                f"canales={len(result.get('created', {}).get('channels', []))}"
+            )
+        except Exception as exc:
+            log_exception(f"Error aplicando plantilla de servidor request_id={request_id}", exc)
+            self.dashboard_action_service.fail_request(
+                request_id,
+                error=str(exc),
+                result={"exception_type": type(exc).__name__},
+                retryable=self.should_retry_dashboard_action(exc),
+                retry_delay_seconds=30,
+            )
+
+    async def process_bot_message_dashboard_action(self, request):
+        request_id = request.get("id")
+        action_type = str(request.get("action_type") or "")
+        payload = request.get("payload") or {}
+        audit_id = payload.get("audit_id")
+        audit_repo = BotMessageAuditRepository()
+
+        try:
+            guild_id = int(payload.get("guild_id", 0) or 0)
+            channel_id = int(payload.get("channel_id", 0) or 0)
+            message_id = int(payload.get("message_id", 0) or 0) if payload.get("message_id") else 0
+            content = str(payload.get("content") or "")
+
+            guild = self.bot.get_guild(guild_id)
+            if not guild:
+                raise ValueError("El bot no esta conectado a ese servidor.")
+
+            channel = guild.get_channel(channel_id)
+            if channel is None:
+                channel = await self.bot.fetch_channel(channel_id)
+            if getattr(channel, "guild", None) and channel.guild.id != guild.id:
+                raise ValueError("El canal no pertenece al servidor solicitado.")
+            if not isinstance(channel, (discord.TextChannel, discord.Thread)):
+                raise ValueError("El canal seleccionado no acepta mensajes de texto del bot.")
+
+            bot_member = guild.me or guild.get_member(self.bot.user.id if self.bot.user else 0)
+            if bot_member is None:
+                bot_member = await guild.fetch_member(self.bot.user.id)
+            permissions = channel.permissions_for(bot_member)
+            if not permissions.view_channel:
+                raise ValueError("El bot no puede ver ese canal.")
+            if not permissions.send_messages:
+                raise ValueError("El bot no puede enviar mensajes en ese canal.")
+            if action_type in {BOT_MESSAGE_ACTION_EDIT, BOT_MESSAGE_ACTION_DELETE} and not permissions.read_message_history:
+                raise ValueError("El bot no puede leer el historial de ese canal.")
+            if action_type == BOT_MESSAGE_ACTION_DELETE and not permissions.manage_messages:
+                raise ValueError("El bot necesita Gestionar mensajes para eliminar desde el dashboard.")
+
+            if action_type in {BOT_MESSAGE_ACTION_SEND, BOT_MESSAGE_ACTION_EDIT}:
+                content = content.strip()
+                if not content:
+                    raise ValueError("El mensaje no puede estar vacio.")
+                if len(content) > BOT_MESSAGE_MAX_LENGTH:
+                    raise ValueError(f"El mensaje supera el maximo de {BOT_MESSAGE_MAX_LENGTH} caracteres.")
+
+            if action_type == BOT_MESSAGE_ACTION_SEND:
+                message = await channel.send(content, allowed_mentions=discord.AllowedMentions.none())
+                audit_repo.update_status(audit_id, status="completed", message_id=str(message.id))
+                self.dashboard_action_service.complete_request(
+                    request_id,
+                    result={"message_id": str(message.id), "channel_id": str(channel.id)},
+                )
+                return
+
+            if not message_id:
+                raise ValueError("Debes indicar un ID de mensaje valido.")
+
+            message = await channel.fetch_message(message_id)
+            if not self.bot.user or message.author.id != self.bot.user.id:
+                raise ValueError("Solo se pueden editar o eliminar mensajes enviados por este bot.")
+
+            previous_content = message.content or ""
+            if action_type == BOT_MESSAGE_ACTION_EDIT:
+                edited = await message.edit(content=content, allowed_mentions=discord.AllowedMentions.none())
+                audit_repo.update_status(
+                    audit_id,
+                    status="completed",
+                    message_id=str(edited.id),
+                    previous_content=previous_content,
+                )
+                self.dashboard_action_service.complete_request(
+                    request_id,
+                    result={
+                        "message_id": str(edited.id),
+                        "channel_id": str(channel.id),
+                        "previous_content": previous_content,
+                    },
+                )
+                return
+
+            if action_type == BOT_MESSAGE_ACTION_DELETE:
+                await message.delete()
+                audit_repo.update_status(
+                    audit_id,
+                    status="completed",
+                    message_id=str(message.id),
+                    previous_content=previous_content,
+                )
+                self.dashboard_action_service.complete_request(
+                    request_id,
+                    result={
+                        "message_id": str(message.id),
+                        "channel_id": str(channel.id),
+                        "previous_content": previous_content,
+                    },
+                )
+                return
+
+            raise ValueError("Accion de mensaje no soportada.")
+        except Exception as exc:
+            log_exception(f"Error procesando mensaje del bot desde dashboard request_id={request_id}", exc)
+            audit_repo.update_status(
+                audit_id,
+                status="failed",
+                error=str(exc),
+            )
+            self.dashboard_action_service.fail_request(
+                request_id,
+                error=str(exc),
+                result={"exception_type": type(exc).__name__},
+                retryable=self.should_retry_dashboard_action(exc),
+                retry_delay_seconds=30,
+            )
 
     async def restore_active_avalonian_views(self):
         await self.bot.wait_until_ready()
         if self.restored_active_views:
             return
 
+        restored_avalonian = 0
         self.restored_active_views = True
         for guild in self.bot.guilds:
             self.service.register_guild(guild)
@@ -630,15 +885,24 @@ class EconomyCog(commands.Cog):
                 fine_service=self.fine_service,
                 persist_callback=self.persist_active_view_state,
                 remove_persisted_callback=self.remove_active_view_state,
+                deactivate_persisted_callback=self.deactivate_active_view_state,
+                close_callback=self.unregister_active_avalonian_view,
             )
             view.message = message
             self.bot.add_view(view, message_id=message_id)
             self.active_avalonian_views[(guild_id, caller_id, numero_ava)] = view
+            restored_avalonian += 1
 
             if view.cancelled and (view.delete_task is None or view.delete_task.done()):
                 view.delete_task = asyncio.create_task(view.delete_cancelled_message_later())
+                view.delete_task.add_done_callback(view.log_background_task_result)
 
-        await self.restore_report_runtime_views()
+        restored_runtime = await self.restore_report_runtime_views()
+        log_event(
+            "Views persistentes registradas: "
+            f"avalonian={restored_avalonian}, reportes={restored_runtime['reviews']}, "
+            f"balances={restored_runtime['balances']}, multas={restored_runtime['fines']}"
+        )
 
     async def fetch_runtime_message(self, channel_id, message_id):
         channel = self.bot.get_channel(channel_id)
@@ -657,6 +921,7 @@ class EconomyCog(commands.Cog):
         from views.report_review_view import ApprovedReportBalanceView, ReportReviewView
         from views.fine_ticket_view import FineTicketView
 
+        restored = {"reviews": 0, "balances": 0, "fines": 0}
         for state in self.report_runtime_service.get_reviews():
             guild_id = int(state.get("guild_id", 0))
             channel_id = int(state.get("channel_id", 0))
@@ -685,6 +950,7 @@ class EconomyCog(commands.Cog):
             )
             view.message = message
             self.bot.add_view(view, message_id=message_id)
+            restored["reviews"] += 1
 
         for state in self.report_runtime_service.get_balance_decisions():
             guild_id = int(state.get("guild_id", 0))
@@ -719,12 +985,16 @@ class EconomyCog(commands.Cog):
                 thread_id=thread_id,
             )
             self.bot.add_view(view, message_id=message_id)
+            restored["balances"] += 1
 
         for fine in self.fine_service.open_fines():
             message_id = int(fine.get("ticket_message_id", 0) or 0)
             if not message_id:
                 continue
             self.bot.add_view(FineTicketView(fine_id=fine["id"], fine_service=self.fine_service), message_id=message_id)
+            restored["fines"] += 1
+
+        return restored
 
     def register_fine_ticket_view(self, view, message_id):
         self.bot.add_view(view, message_id=message_id)
@@ -732,7 +1002,7 @@ class EconomyCog(commands.Cog):
     async def avalonian_number_autocomplete(self, interaction, current):
         choices = []
         current_text = str(current or "")
-        for numero_ava, view in self.get_accessible_avalonian_views(interaction):
+        for _, numero_ava, view in self.get_accessible_avalonian_views(interaction):
             if current_text and current_text not in str(numero_ava):
                 continue
 
@@ -832,10 +1102,21 @@ class EconomyCog(commands.Cog):
         return embed
 
     async def modify_balance(self, interaction, member, amount, key, add, command_name):
+        if amount <= 0:
+            await interaction.response.send_message(
+                "Debes indicar una cantidad mayor a 0.",
+                ephemeral=True,
+            )
+            return
+
         previous_items, previous_silver = self.service.get_balance(interaction.guild, member.id)
         previous_balance = previous_items if key == "items" else previous_silver
 
-        self.service.modify(interaction.guild, member.id, amount, key, add)
+        try:
+            self.service.modify(interaction.guild, member.id, amount, key, add)
+        except ValueError as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True)
+            return
 
         current_items, current_silver = self.service.get_balance(interaction.guild, member.id)
         new_balance = current_items if key == "items" else current_silver
@@ -864,6 +1145,65 @@ class EconomyCog(commands.Cog):
         resource_name = "Items" if key == "items" else "Silver"
         await interaction.response.send_message(
             f"{icon} {action} 💰 {format_number(amount)} al saldo de {member.mention}. [{resource_name}]"
+        )
+
+    async def modify_historical_balance(self, interaction, identifier, amount, key, add, reason, command_name):
+        if amount <= 0:
+            await interaction.response.send_message(
+                "Debes indicar una cantidad mayor a 0.",
+                ephemeral=True,
+            )
+            return
+
+        resolved = self.service.resolve_existing_user(interaction.guild, identifier)
+        if not resolved:
+            await interaction.response.send_message(
+                "No encontre ese usuario en la base historica de economia. Usa Discord ID, nombre guardado, display name o identificador interno.",
+                ephemeral=True,
+            )
+            return
+
+        member, player_status = await self.resolve_member_status(interaction.guild, resolved["user_id"])
+        player_name = getattr(member, "display_name", None) or resolved.get("user_name") or f"Usuario {resolved['user_id']}"
+
+        try:
+            previous_balance, new_balance = self.service.modify_existing(
+                interaction.guild,
+                resolved["user_id"],
+                amount,
+                key,
+                add,
+            )
+        except (LookupError, ValueError) as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True)
+            return
+
+        now = datetime.now()
+        self.service.log_operation(
+            interaction.guild,
+            {
+                "action": command_name,
+                "operator": interaction.user.display_name,
+                "operator_id": str(interaction.user.id),
+                "player": player_name,
+                "player_id": str(resolved["user_id"]),
+                "type": "ADD" if add else "REMOVE",
+                "category": "Items" if key == "items" else "Silver",
+                "amount": amount,
+                "previous_balance": previous_balance,
+                "new_balance": new_balance,
+                "reason": str(reason or "").strip(),
+                "player_status": player_status,
+                "date": now.strftime("%d/%m/%Y"),
+                "time": now.strftime("%H:%M"),
+            },
+        )
+
+        action = "Agregado" if add else "Removido"
+        resource_name = "Items" if key == "items" else "Silver"
+        target = member.mention if member else f"**{player_name}** (`{resolved['user_id']}`)"
+        await interaction.response.send_message(
+            f"{action} {format_number(amount)} de {target}. [{resource_name}] Estado: **{player_status}**. Nuevo balance: {format_number(new_balance)}"
         )
 
     def _legacy_build_top_embed(self, guild, chunk, page_index, total_pages, viewer_rank):
@@ -898,14 +1238,6 @@ class EconomyCog(commands.Cog):
 
         previous_items, previous_silver = self.service.get_balance(interaction.guild, member.id)
         previous_balance = previous_items if key == "items" else previous_silver
-
-        if not add and previous_balance < amount:
-            resource_name = "Items" if key == "items" else "Silver"
-            await interaction.response.send_message(
-                f"No puedo quitar {format_number(amount)} de {member.mention} porque su saldo de {resource_name} es {format_number(previous_balance)}.",
-                ephemeral=True,
-            )
-            return
 
         try:
             self.service.modify(interaction.guild, member.id, amount, key, add)
@@ -1180,10 +1512,13 @@ class EconomyCog(commands.Cog):
             return
 
         lines = []
-        for numero_ava, view in pings:
+        for caller_id, numero_ava, view in pings:
             taken = sum(1 for user_id in view.slots.values() if user_id)
             message_link = view.message.jump_url if view.message else "Sin enlace"
-            lines.append(f"**{view.title}** - Cupos ocupados: {taken}/{len(view.slots)} - [Ver ping]({message_link})")
+            lines.append(
+                f"**{view.title}** - Caller: <@{caller_id}> - "
+                f"Cupos ocupados: {taken}/{len(view.slots)} - [Ver ping]({message_link})"
+            )
 
         embed = discord.Embed(
             title="Pings que puedes administrar",
@@ -1191,6 +1526,38 @@ class EconomyCog(commands.Cog):
             color=ACCENT_COLOR,
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="ping-cancel")
+    @app_commands.describe(
+        numero_ava="Numero de Ava que se va a cancelar",
+        caller="Caller del ping, solo necesario si hay mas de uno con el mismo numero",
+    )
+    @app_commands.autocomplete(numero_ava=avalonian_number_autocomplete)
+    async def ping_cancel(
+        self,
+        interaction: discord.Interaction,
+        numero_ava: int,
+        caller: discord.Member = None,
+    ):
+        view, error = self.resolve_manageable_avalonian_view(interaction, numero_ava, caller)
+        if error:
+            await interaction.response.send_message(error, ephemeral=True)
+            return
+
+        if view.report_sent:
+            await interaction.response.send_message(
+                "No puedes cancelar una Ava que ya envio informe.",
+                ephemeral=True,
+            )
+            return
+
+        await view.cancel_ping()
+        self.active_avalonian_views.pop((interaction.guild.id, view.caller_id, view.numero_ava), None)
+        await view.refresh_message()
+        await interaction.response.send_message(
+            f"Ping **{view.title}** cancelado. El mensaje quedo marcado como cancelado y sin botones activos.",
+            ephemeral=True,
+        )
 
     @app_commands.command(name="ping-add")
     @app_commands.describe(
@@ -1207,12 +1574,9 @@ class EconomyCog(commands.Cog):
         member: discord.Member,
         rol: str,
     ):
-        view = self.get_active_avalonian_view(interaction, numero_ava)
-        if not self.is_matching_avalonian_view(view, numero_ava):
-            await interaction.response.send_message(
-                f"No tienes un ping activo para administrar Ava {numero_ava} en este servidor.",
-                ephemeral=True,
-            )
+        view, error = self.resolve_manageable_avalonian_view(interaction, numero_ava)
+        if error:
+            await interaction.response.send_message(error, ephemeral=True)
             return
 
         success, message = view.assign_user(rol, member)
@@ -1230,15 +1594,12 @@ class EconomyCog(commands.Cog):
     )
     @app_commands.autocomplete(numero_ava=avalonian_number_autocomplete)
     async def ping_remove(self, interaction: discord.Interaction, numero_ava: int, member: discord.Member):
-        view = self.get_active_avalonian_view(interaction, numero_ava)
-        if not self.is_matching_avalonian_view(view, numero_ava):
-            await interaction.response.send_message(
-                f"No tienes un ping activo para administrar Ava {numero_ava} en este servidor.",
-                ephemeral=True,
-            )
+        view, error = self.resolve_manageable_avalonian_view(interaction, numero_ava)
+        if error:
+            await interaction.response.send_message(error, ephemeral=True)
             return
 
-        if member.id == interaction.user.id:
+        if member.id == view.caller_id:
             await interaction.response.send_message(
                 "Usted para poder desanotarse del Ava tiene que dejar un encargado u otro caller para que pueda realizarlo. Usa /ping-transfer numero_ava member.",
                 ephemeral=True,
@@ -1260,12 +1621,9 @@ class EconomyCog(commands.Cog):
     )
     @app_commands.autocomplete(numero_ava=avalonian_number_autocomplete)
     async def ping_transfer(self, interaction: discord.Interaction, numero_ava: int, member: discord.Member):
-        view = self.get_active_avalonian_view(interaction, numero_ava)
-        if not self.is_matching_avalonian_view(view, numero_ava):
-            await interaction.response.send_message(
-                f"No tienes un ping activo para administrar Ava {numero_ava} en este servidor.",
-                ephemeral=True,
-            )
+        view, error = self.resolve_manageable_avalonian_view(interaction, numero_ava)
+        if error:
+            await interaction.response.send_message(error, ephemeral=True)
             return
 
         new_key = self.get_avalonian_key(interaction, member.id, numero_ava)
@@ -1284,13 +1642,14 @@ class EconomyCog(commands.Cog):
             title=view.title,
             template=view.template.get("name", ""),
         )
+        old_caller_id = view.caller_id
         success, released_slot = view.transfer_caller(member, join_command)
         if not success:
             await interaction.response.send_message(released_slot, ephemeral=True)
             return
 
-        old_key = self.get_avalonian_key(interaction, interaction.user.id, numero_ava)
-        self.remove_active_view_state(interaction.guild.id, interaction.user.id, numero_ava)
+        old_key = self.get_avalonian_key(interaction, old_caller_id, numero_ava)
+        self.remove_active_view_state(interaction.guild.id, old_caller_id, numero_ava)
         self.active_avalonian_views.pop(old_key, None)
         self.active_avalonian_views[new_key] = view
         view.persist_state()
@@ -1347,6 +1706,40 @@ class EconomyCog(commands.Cog):
             return
 
         await self.modify_balance(interaction, member, amount, categoria.value, False, "/remove")
+
+    @app_commands.command(name="remove-historico")
+    @app_commands.describe(
+        categoria="Categoria a modificar",
+        usuario="Discord ID, nombre guardado, display name o identificador interno",
+        amount="Cantidad a remover",
+        motivo="Motivo administrativo del movimiento",
+    )
+    @app_commands.choices(categoria=CATEGORY_CHOICES)
+    @app_commands.autocomplete(usuario=historical_user_autocomplete)
+    async def remove_historical(
+        self,
+        interaction: discord.Interaction,
+        categoria: app_commands.Choice[str],
+        usuario: str,
+        amount: int,
+        motivo: str = "",
+    ):
+        if not self.has_economy_permission(interaction):
+            await interaction.response.send_message(
+                "No tienes permisos para usar este comando.",
+                ephemeral=True,
+            )
+            return
+
+        await self.modify_historical_balance(
+            interaction,
+            usuario,
+            amount,
+            categoria.value,
+            False,
+            motivo,
+            "/remove-historico",
+        )
 
     @app_commands.command(name="add-permission")
     @app_commands.describe(

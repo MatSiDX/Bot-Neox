@@ -11,5 +11,8 @@ class ActiveAvalonianService:
     def remove_state(self, guild_id, caller_id, numero_ava):
         return self.repo.remove(guild_id, caller_id, numero_ava)
 
+    def deactivate_state(self, guild_id, caller_id, numero_ava, status):
+        return self.repo.deactivate(guild_id, caller_id, numero_ava, status)
+
     def get_all_states(self):
         return self.repo.get_all_states()

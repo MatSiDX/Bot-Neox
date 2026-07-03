@@ -16,13 +16,13 @@ class FineRepository:
                 """
                 INSERT INTO economy_fines (
                     guild_id, guild_name, report_ava, fined_user_id, fined_user_name,
-                    amount, reason, proof_path, proof_name, status,
+                    amount, reason, proof_path, proof_name, status, is_deleted,
                     blocked_role_id, resolver_role_id, ticket_channel_id, ticket_message_id,
                     announcement_channel_id, announcement_message_id,
                     created_by_id, created_by_name, paid_by_id, paid_by_name,
-                    created_at, updated_at, paid_at, closed_at
+                    created_at, updated_at, paid_at, closed_at, deleted_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', '', ?, ?, '', '')
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, '', '', ?, ?, '', '', '')
                 """,
                 (
                     str(payload.get("guild_id") or ""),
@@ -62,6 +62,20 @@ class FineRepository:
             ).fetchone()
         return dict(row) if row is not None else None
 
+    def get_by_ticket_channel(self, guild_id, channel_id):
+        with get_connection() as connection:
+            row = connection.execute(
+                """
+                SELECT *
+                FROM economy_fines
+                WHERE guild_id = ? AND ticket_channel_id = ?
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (str(guild_id), str(channel_id)),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
     def list_by_guild(self, guild_id):
         with get_connection() as connection:
             rows = connection.execute(
@@ -81,7 +95,7 @@ class FineRepository:
                 """
                 SELECT *
                 FROM economy_fines
-                WHERE status = 'open'
+                WHERE status = 'open' AND is_deleted = 0
                 ORDER BY id DESC
                 """
             ).fetchall()
@@ -93,7 +107,7 @@ class FineRepository:
                 """
                 SELECT *
                 FROM economy_fines
-                WHERE guild_id = ? AND fined_user_id = ? AND status = 'open'
+                WHERE guild_id = ? AND fined_user_id = ? AND status = 'open' AND is_deleted = 0
                 ORDER BY id DESC
                 """,
                 (str(guild_id), str(user_id)),
@@ -136,7 +150,7 @@ class FineRepository:
                     paid_at = ?,
                     closed_at = ?,
                     updated_at = ?
-                WHERE id = ?
+                WHERE id = ? AND is_deleted = 0
                 """,
                 (
                     str(paid_by_id or ""),
@@ -146,6 +160,30 @@ class FineRepository:
                     now,
                     int(fine_id or 0),
                 ),
+            )
+        return self.get(fine_id)
+
+    def soft_delete(self, fine_id):
+        fine_id = int(fine_id or 0)
+        current = self.get(fine_id)
+        if current is None:
+            return None
+
+        if int(current.get("is_deleted") or 0):
+            return current
+
+        now = utc_now_iso()
+        with get_connection() as connection:
+            connection.execute(
+                """
+                UPDATE economy_fines
+                SET is_deleted = 1,
+                    deleted_at = ?,
+                    updated_at = ?,
+                    closed_at = CASE WHEN closed_at = '' THEN ? ELSE closed_at END
+                WHERE id = ? AND is_deleted = 0
+                """,
+                (now, now, now, fine_id),
             )
         return self.get(fine_id)
 
@@ -184,7 +222,9 @@ class FineRepository:
                 """
             )
             params.extend([like_query] * 6)
-        if status:
+        if status == "deleted":
+            clauses.append("is_deleted = 1")
+        elif status:
             clauses.append("LOWER(status) = ?")
             params.append(status)
         if record_type:
