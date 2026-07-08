@@ -9,14 +9,21 @@
         total_pages: 0,
         status: "",
         record_type: "",
+        sort: "newest",
         date_from: "",
         date_to: ""
       };
     }
 
+    const savedSection = localStorage.getItem("dashboardSection") || "economy";
+    const initialSection = savedSection === "ticket-records" ? "tickets" : savedSection;
+    if (savedSection === "ticket-records") {
+      localStorage.setItem("dashboardSection", "tickets");
+    }
+
     const state = {
       data: null,
-      section: linkedReportSection ? "report-calculator" : (localStorage.getItem("dashboardSection") || "economy"),
+      section: linkedReportSection ? "report-calculator" : initialSection,
       sidebarCollapsed: localStorage.getItem("dashboardSidebarCollapsed") === "1",
       theme: localStorage.getItem("dashboardTheme") || "light",
       tab: "balances",
@@ -38,9 +45,12 @@
       ticketRecordSearch: "",
       ticketRecordFilters: createPageState(10),
       selectedTicketRecordId: "",
+      selectedTicketTranscriptMessages: [],
+      selectedTicketTranscriptRecord: null,
       selectedLiveTicketId: "",
       ticketLiveMessages: [],
       ticketLiveStatus: "",
+      ticketFocusView: "",
       templateStatusMessage: "",
       auditCategories: [],
       auditConfig: { channels: {} },
@@ -49,13 +59,42 @@
       auditFilters: createPageState(12),
       botPermissions: {},
       botPermissionOptions: [],
+      adminGuilds: [],
+      adminOverview: null,
+      adminMessageChannels: [],
+      adminMessageChannelsCache: {},
+      adminMessageChannelsStatus: "idle",
+      adminMessageChannelsError: "",
+      adminBotMessageRequestId: "",
+      adminServerBackups: [],
+      adminServerBackupsMax: 2,
+      adminServerBackupsStatus: "idle",
+      adminServerBackupsError: "",
+      selectedAdminBackupId: "",
+      selectedAdminBackupDetail: null,
+      adminBackupReplaceMode: false,
+      adminTemplateTargetGuildId: "",
+      adminTemplateUpdateExisting: false,
+      adminTemplateIncludeBotConfig: true,
+      adminTemplateClearTarget: false,
+      adminTemplatePreview: null,
+      adminTemplateRequestId: "",
+      adminTemplateStatus: "",
       albionRegistrationConfig: null,
       albionRegistrations: [],
       albionRegistrationSearch: "",
       albionRegistrationFilters: createPageState(15),
       reportCalculator: null,
       reportCalculatorOptions: [],
+      reportFinalPreviewText: "",
       reportRequestId: "",
+      reportSubmitting: false,
+      chestTables: [],
+      chestTable: null,
+      chestTableStatus: "",
+      chestTableDirty: false,
+      chestTableLoading: false,
+      reportBuildLoanProofReads: new Set(),
       reportContext: linkedReportSection ? {
         guildId: pageParams.get("guild_id") || "",
         callerId: pageParams.get("caller_id") || "",
@@ -68,6 +107,8 @@
         data: null,
         fileName: "",
         format: "",
+        loadToken: 0,
+        pricing: null,
         iconSize: 60,
         groupByTier: false,
         excludedTiers: new Set(),
@@ -93,8 +134,10 @@
       fineConfigGuildId: "",
       auditGuildId: "",
       permissionsGuildId: "",
+      adminPanelGuildId: "",
       albionRegistrationGuildId: "",
       reportCalculatorOptionsGuildId: "",
+      chestTablesGuildId: "",
       ticketPanelsDirty: false,
       userInteracting: false
     };
@@ -109,7 +152,9 @@
         ["items", "Items", "number"],
         ["silver", "Silver", "number"],
         ["total", "Total", "number"],
-        ["updated_at_display", "Fecha"]
+        ["member_status", "Estado"],
+        ["updated_at_display", "Fecha"],
+        ["__actions", "Acciones", "number"]
       ],
       operations: [
         ["action", "Accion"],
@@ -120,6 +165,8 @@
         ["amount", "Cantidad", "number"],
         ["previous_balance", "Anterior", "number"],
         ["new_balance", "Nuevo", "number"],
+        ["reason", "Motivo"],
+        ["player_status", "Estado"],
         ["date", "Fecha"],
         ["time", "Hora"]
       ],
@@ -187,6 +234,7 @@
       ["\uD83D\uDC8E", "\uD83D\uDC8E"],
       ["\uD83D\uDCCB", "\uD83D\uDCCB"],
       ["\uD83C\uDFAE", "\uD83C\uDFAE"],
+      ["\uD83D\uDDA5\uFE0F", "\uD83D\uDDA5\uFE0F"],
       ["\uD83D\uDC51", "\uD83D\uDC51"],
       ["\uD83D\uDEA8", "\uD83D\uDEA8"],
       ["\uD83D\uDCAC", "\uD83D\uDCAC"],
@@ -210,6 +258,35 @@
       ["create_private_threads", "Crear hilos privados"],
       ["send_messages_in_threads", "Enviar en hilos"],
       ["use_application_commands", "Usar comandos"]
+    ];
+    const defaultTicketOwnerPermissions = [
+      "view_channel",
+      "send_messages",
+      "read_message_history",
+      "attach_files",
+      "embed_links"
+    ];
+    const ownerPermissionGroups = [
+      {
+        title: "Acceso basico",
+        description: "Lo minimo para que el usuario pueda entrar y seguir la conversacion.",
+        keys: ["view_channel", "read_message_history", "send_messages"]
+      },
+      {
+        title: "Contenido",
+        description: "Permisos utiles para pruebas, imagenes, enlaces y reacciones.",
+        keys: ["attach_files", "embed_links", "add_reactions", "use_external_emojis", "use_external_stickers"]
+      },
+      {
+        title: "Avanzado",
+        description: "Opciones sensibles que normalmente conviene dejar solo al staff.",
+        keys: ["mention_everyone", "create_public_threads", "create_private_threads", "send_messages_in_threads", "use_application_commands"]
+      },
+      {
+        title: "Gestion",
+        description: "Permisos administrativos del canal y sus hilos.",
+        keys: ["manage_messages", "manage_channels", "manage_threads"]
+      }
     ];
 
     function newTicketPanel(name = "Nuevo panel") {
@@ -238,11 +315,21 @@
             id: crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-option`,
             label: "Abrir ticket",
             emoji: "",
-            description: "Crear un ticket privado"
+            description: "Crear un ticket privado",
+            ticket_open_content: "",
+            ticket_open_title: "",
+            ticket_open_description: "",
+            ticket_open_color: "",
+            ticket_open_footer: "",
+            ticket_open_image_url: "",
+            ticket_open_thumbnail_url: ""
           }
         ],
         permissions: {
           ticket_role_permissions: [],
+          owner_permissions: [...defaultTicketOwnerPermissions],
+          add_member_roles: "",
+          add_member_user_ids: "",
           claim_roles: "",
           close_roles: "",
           reopen_roles: "",
@@ -254,6 +341,20 @@
     function formatNumber(value) {
       const number = Number(value || 0);
       return Number.isFinite(number) ? number.toLocaleString("es-AR") : value;
+    }
+
+    function formatDateTime(value) {
+      const raw = String(value || "").trim();
+      if (!raw) return "Sin fecha";
+      const date = new Date(raw);
+      if (Number.isNaN(date.getTime())) return raw;
+      return date.toLocaleString("es-AR", {
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit"
+      });
     }
 
     function escapeHtml(value) {
@@ -269,6 +370,10 @@
 
     function lootItemKey(playerName, itemId) {
       return `${playerName}\u0000${itemId}`;
+    }
+
+    function lootVisibilityKey(playerName, item) {
+      return lootItemKey(playerName, item.itemKey || item.itemId);
     }
 
     function resolveLootTier(itemId) {
@@ -288,13 +393,21 @@
       return `https://render.albiononline.com/v1/item/${encodeURIComponent(itemId)}.png`;
     }
 
-    function createLootItem(itemId, itemName) {
+    function createLootItem(itemId, itemName, itemKey = "", quality = null) {
       return {
+        itemKey: itemKey || itemId,
         itemId,
         itemName: itemName || itemId || "Objeto desconocido",
         tier: resolveLootTier(itemId),
+        quality,
         totalQuantity: 0,
-        price: 0,
+        price: null,
+        priceAvailable: false,
+        priceStatus: "pending",
+        priceLocation: "",
+        priceServer: "",
+        priceQuality: quality || 1,
+        priceUpdatedAt: "",
         totalPrice: 0,
         imageUrl: lootImageUrl(itemId)
       };
@@ -308,12 +421,65 @@
       if (!cleanPlayer || !cleanItemId || !Number.isFinite(numericQuantity) || numericQuantity <= 0) return;
       if (!lootMap[cleanPlayer]) lootMap[cleanPlayer] = {};
       if (!lootMap[cleanPlayer][cleanItemId]) {
-        lootMap[cleanPlayer][cleanItemId] = createLootItem(cleanItemId, itemName);
+        lootMap[cleanPlayer][cleanItemId] = createLootItem(cleanItemId, itemName, cleanItemId);
       }
       const item = lootMap[cleanPlayer][cleanItemId];
       item.totalQuantity += numericQuantity;
-      if (!item.price && Number.isFinite(numericPrice)) item.price = numericPrice;
-      if (Number.isFinite(numericPrice)) item.totalPrice += numericPrice * numericQuantity;
+      if (!item.priceAvailable && Number.isFinite(numericPrice) && numericPrice > 0) {
+        item.price = numericPrice;
+        item.priceAvailable = true;
+      }
+      if (Number.isFinite(numericPrice) && numericPrice > 0) item.totalPrice += numericPrice * numericQuantity;
+    }
+
+    function addPricedLootEntry(lootMap, playerName, itemRecord) {
+      const cleanPlayer = String(playerName || "").trim();
+      const cleanItemId = String(itemRecord.item_unique_name || itemRecord.item_id || "").trim();
+      const quality = itemRecord.quality || itemRecord.price_quality || 1;
+      const itemKey = `${cleanItemId}::q${quality}`;
+      if (!cleanPlayer || !cleanItemId) return;
+      if (!lootMap[cleanPlayer]) lootMap[cleanPlayer] = {};
+      if (!lootMap[cleanPlayer][itemKey]) {
+        lootMap[cleanPlayer][itemKey] = createLootItem(cleanItemId, itemRecord.item_name, itemKey, quality);
+      }
+      const item = lootMap[cleanPlayer][itemKey];
+      item.totalQuantity += Number(itemRecord.quantity || 0);
+      item.tier = itemRecord.tier ?? item.tier;
+      item.quality = quality;
+      item.price = itemRecord.price ?? null;
+      item.priceAvailable = Boolean(itemRecord.price_available);
+      item.priceStatus = itemRecord.price_status || (item.priceAvailable ? "priced" : "missing");
+      item.priceLocation = itemRecord.price_location || "";
+      item.priceServer = itemRecord.price_server || "";
+      item.priceQuality = itemRecord.price_quality || quality;
+      item.priceUpdatedAt = itemRecord.price_updated_at || "";
+      item.totalPrice += Number(itemRecord.total_price || 0);
+    }
+
+    function lootPayloadToMap(loot) {
+      const lootMap = {};
+      (loot.players || []).forEach(player => {
+        (player.items || []).forEach(item => addPricedLootEntry(lootMap, player.player_name, item));
+      });
+      return lootMap;
+    }
+
+    async function normalizeLootWithPrices({ content, format, fileName, refreshPrices = false, includePrices = true }) {
+      const response = await fetch("/api/loot/normalize", {
+        method: "POST",
+        headers: csrfHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({
+          guild_id: state.guildId,
+          content,
+          format,
+          file_name: fileName,
+          include_prices: includePrices,
+          refresh_prices: refreshPrices
+        })
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.error || "No pude procesar el loot.");
+      return payload.loot || {};
     }
 
     function detectCsvDelimiter(text) {
@@ -407,7 +573,7 @@
     }
 
     function isLootItemIncluded(playerName, item) {
-      const key = lootItemKey(playerName, item.itemId);
+      const key = lootVisibilityKey(playerName, item);
       if (item.tier == null) return !state.loot.manualHides.has(key);
       if (state.loot.excludedTiers.has(item.tier)) return state.loot.manualShows.has(key);
       return !state.loot.manualHides.has(key);
@@ -426,13 +592,13 @@
     function lootTierState(tier) {
       if (!state.loot.excludedTiers.has(tier)) return "all";
       return lootItemsForTier(tier).some(([playerName, item]) =>
-        state.loot.manualShows.has(lootItemKey(playerName, item.itemId))
+        state.loot.manualShows.has(lootVisibilityKey(playerName, item))
       ) ? "partial" : "none";
     }
 
     function clearLootTierOverrides(tier) {
       lootItemsForTier(tier).forEach(([playerName, item]) => {
-        const key = lootItemKey(playerName, item.itemId);
+        const key = lootVisibilityKey(playerName, item);
         state.loot.manualHides.delete(key);
         state.loot.manualShows.delete(key);
       });
@@ -448,7 +614,7 @@
     function toggleLootItem(playerName, itemId) {
       const item = state.loot.data?.[playerName]?.[itemId];
       if (!item) return;
-      const key = lootItemKey(playerName, itemId);
+      const key = lootVisibilityKey(playerName, item);
       const visible = isLootItemIncluded(playerName, item);
       if (item.tier != null && state.loot.excludedTiers.has(item.tier)) {
         if (visible) state.loot.manualShows.delete(key);
@@ -470,17 +636,21 @@
 
     function lootItemHtml(playerName, item) {
       const included = isLootItemIncluded(playerName, item);
-      const noPrice = item.price === 0 && item.totalPrice === 0;
+      const noPrice = !item.priceAvailable;
+      const priceLabel = item.priceStatus === "pending"
+        ? "..."
+        : (noPrice ? "N/A" : formatNumber(item.price));
       return `
         <div class="loot-item-wrap">
           <button class="loot-item${included ? "" : " excluded"}${noPrice ? " no-price" : ""}" type="button"
-            data-loot-player="${escapeHtml(playerName)}" data-loot-item="${escapeHtml(item.itemId)}"
+            data-loot-player="${escapeHtml(playerName)}" data-loot-item="${escapeHtml(item.itemKey)}"
             title="${escapeHtml(item.itemName)} - ${included ? "clic para excluir" : "clic para incluir"}">
             <img src="${escapeHtml(item.imageUrl)}" alt="${escapeHtml(item.itemName)}" loading="lazy">
             <span class="loot-quantity">${formatNumber(item.totalQuantity)}</span>
+            <span class="loot-price">${escapeHtml(priceLabel)}</span>
           </button>
           <button class="loot-info" type="button" data-loot-detail-player="${escapeHtml(playerName)}"
-            data-loot-detail-item="${escapeHtml(item.itemId)}" aria-label="Ver detalles de ${escapeHtml(item.itemName)}">i</button>
+            data-loot-detail-item="${escapeHtml(item.itemKey)}" aria-label="Ver detalles de ${escapeHtml(item.itemName)}">i</button>
         </div>
       `;
     }
@@ -504,7 +674,7 @@
         <article class="loot-player-card">
           <div class="loot-player-header">
             <h3>${escapeHtml(playerName)}</h3>
-            ${state.loot.format === "json" ? `<span class="loot-player-total">${formatNumber(total)} silver</span>` : `<span class="muted">${itemList.length} objetos</span>`}
+            <span class="loot-player-total">${formatNumber(total)} silver</span>
           </div>
           ${content}
         </article>
@@ -522,11 +692,15 @@
       const players = Object.entries(state.loot.data);
       const itemKinds = players.reduce((sum, [, items]) => sum + Object.keys(items).length, 0);
       document.getElementById("lootFileName").textContent = state.loot.fileName;
+      const pricing = state.loot.pricing || {};
+      const pricingText = pricing.source === "deferred"
+        ? "precios cargando"
+        : `${pricing.priced_items || 0} con precio / ${pricing.unpriced_items || 0} sin precio`;
       document.getElementById("lootFileMeta").textContent =
-        `${players.length} jugadores - ${itemKinds} objetos agrupados - ${state.loot.format.toUpperCase()}`;
+        `${players.length} jugadores - ${itemKinds} objetos agrupados - ${state.loot.format.toUpperCase()} - ${pricingText}`;
       document.getElementById("lootGrandTotal").textContent = state.loot.format === "json"
         ? `${formatNumber(players.reduce((sum, [playerName, items]) => sum + Object.values(items).reduce((subtotal, item) => isLootItemIncluded(playerName, item) ? subtotal + item.totalPrice : subtotal, 0), 0))} silver total`
-        : "";
+        : `${formatNumber(players.reduce((sum, [playerName, items]) => sum + Object.values(items).reduce((subtotal, item) => isLootItemIncluded(playerName, item) ? subtotal + item.totalPrice : subtotal, 0), 0))} silver total`;
       document.getElementById("lootTierButtons").innerHTML = lootTiers.map(tier =>
         `<button class="loot-tier-button ${lootTierState(tier)}" type="button" data-loot-tier="${tier}">T${tier}</button>`
       ).join("");
@@ -544,7 +718,7 @@
     function showLootDetail(playerName, itemId) {
       const item = state.loot.data?.[playerName]?.[itemId];
       if (!item) return;
-      const noPrice = item.price === 0 && item.totalPrice === 0;
+      const noPrice = !item.priceAvailable;
       document.getElementById("lootModalPanel").innerHTML = `
         <button class="loot-modal-close" type="button" data-loot-modal-close aria-label="Cerrar">x</button>
         <div class="loot-modal-hero">
@@ -554,9 +728,11 @@
         <div class="loot-detail-grid">
           <div class="loot-detail"><span>ID</span><strong>${escapeHtml(item.itemId)}</strong></div>
           <div class="loot-detail"><span>Tier</span><strong>${lootTierLabel(item.tier)}</strong></div>
+          <div class="loot-detail"><span>Calidad</span><strong>${escapeHtml(item.priceQuality || item.quality || 1)}</strong></div>
           <div class="loot-detail"><span>Cantidad total</span><strong>${formatNumber(item.totalQuantity)}</strong></div>
-          <div class="loot-detail"><span>Precio estimado</span><strong>${noPrice ? "N/A" : `${formatNumber(item.price)} silver`}</strong></div>
-          <div class="loot-detail"><span>Valor total</span><strong>${noPrice ? "N/A" : `${formatNumber(item.totalPrice)} silver`}</strong></div>
+          <div class="loot-detail"><span>Precio unitario</span><strong>${item.priceStatus === "pending" ? "Cargando" : (noPrice ? "N/A" : `${formatNumber(item.price)} silver`)}</strong></div>
+          <div class="loot-detail"><span>Valor total</span><strong>${item.priceStatus === "pending" ? "Cargando" : (noPrice ? "N/A" : `${formatNumber(item.totalPrice)} silver`)}</strong></div>
+          <div class="loot-detail"><span>Mercado</span><strong>${escapeHtml(item.priceLocation || "Sin precio")}</strong></div>
           <div class="loot-detail"><span>Estado</span><strong>${isLootItemIncluded(playerName, item) ? "Incluido" : "Excluido"}</strong></div>
         </div>
       `;
@@ -572,20 +748,39 @@
       const extension = file.name.split(".").pop()?.toLowerCase();
       if (!["csv", "json"].includes(extension)) throw new Error("Formato no soportado. Usa un archivo CSV o JSON.");
       const text = await file.text();
-      const data = extension === "csv" ? parseLootCsvText(text) : parseLootJsonValue(JSON.parse(text));
+      const loadToken = Date.now();
+      state.loot.loadToken = loadToken;
+      const loot = await normalizeLootWithPrices({ content: text, format: extension, fileName: file.name, includePrices: false });
+      const data = lootPayloadToMap(loot);
       if (!Object.keys(data).length) throw new Error("No se encontraron eventos de loot validos en el archivo.");
       state.loot.data = data;
       state.loot.fileName = file.name;
       state.loot.format = extension;
+      state.loot.pricing = loot.pricing || null;
       resetLootVisibility();
       document.getElementById("lootError").hidden = true;
       renderLoot();
+      normalizeLootWithPrices({ content: text, format: extension, fileName: file.name, includePrices: true })
+        .then(pricedLoot => {
+          if (state.loot.loadToken !== loadToken) return;
+          state.loot.data = lootPayloadToMap(pricedLoot);
+          state.loot.pricing = pricedLoot.pricing || null;
+          renderLoot();
+        })
+        .catch(error => {
+          if (state.loot.loadToken !== loadToken) return;
+          const message = error.message || "No pude cargar precios de Albion Online Data.";
+          state.loot.pricing = { ...(state.loot.pricing || {}), source: "error", errors: [message] };
+          renderLoot();
+        });
     }
 
     function clearLoot() {
       state.loot.data = null;
       state.loot.fileName = "";
       state.loot.format = "";
+      state.loot.loadToken += 1;
+      state.loot.pricing = null;
       resetLootVisibility();
       document.getElementById("lootFileInput").value = "";
       document.getElementById("lootError").hidden = true;
@@ -616,6 +811,10 @@
       if (field === "decision") {
         if (lowered.includes("acept")) cls = "accepted";
         if (lowered.includes("rechaz")) cls = "rejected";
+      }
+      if (field === "member_status" || field === "player_status") {
+        if (lowered.includes("en servidor")) cls = "add";
+        if (lowered.includes("fuera")) cls = "remove";
       }
       return cls ? `<span class="pill ${cls}">${escapeHtml(text)}</span>` : escapeHtml(text);
     }
@@ -744,6 +943,9 @@
       head.innerHTML = `<tr>${selectedColumns.map(([, label, cls]) => `<th class="${cls || ""}">${label}</th>`).join("")}</tr>`;
       body.innerHTML = rows.map(row => {
         const cells = selectedColumns.map(([field, , cls]) => {
+          if (field === "__actions") {
+            return `<td class="${cls || ""}"><div class="row-actions"><button class="action-button economy-edit-balance" type="button" data-user-id="${escapeHtml(row.user_id || "")}" data-user-name="${escapeHtml(row.user_name || "")}" data-user-status="${escapeHtml(row.member_status || "")}">Editar</button></div></td>`;
+          }
           const raw = row[field] ?? "";
           const value = numberFields.has(field) ? formatNumber(raw) : badge(raw, field);
           return `<td class="${cls || ""}">${value}</td>`;
@@ -762,10 +964,14 @@
         renderTemplates();
       } else if (section === "tickets") {
         renderTickets();
+      } else if (section === "fines") {
+        renderFines();
       } else if (section === "audit") {
         renderAudit();
       } else if (section === "permissions") {
         renderPermissions();
+      } else if (section === "admin-panel") {
+        renderAdminPanel();
       } else if (section === "registration") {
         renderAlbionRegistration();
       } else if (section === "report-calculator") {
@@ -950,7 +1156,6 @@
     function renderTickets() {
       document.getElementById("ticketPanelTotal").textContent = state.ticketPanels.length;
       renderTicketLiveSummary();
-      renderFineConfig();
       const hasPanel = Boolean(currentTicketPanel());
       document.getElementById("clonePanelButton").hidden = !hasPanel;
       document.getElementById("deletePanelButton").hidden = !hasPanel;
@@ -961,6 +1166,12 @@
       renderTicketEditorSections();
       renderTicketRecords();
       renderTicketLiveViewer();
+      renderTicketTranscriptPreview();
+      applyTicketFocusMode();
+    }
+
+    function renderFines() {
+      renderFineConfig();
     }
 
     function renderFineConfig() {
@@ -998,12 +1209,29 @@
     }
 
     function renderTicketEditorSections() {
+      const panel = currentTicketPanel();
+      const hideTicketMessage = panel?.mode === "select";
+      if (hideTicketMessage && state.ticketEditorSection === "ticketMessage") {
+        state.ticketEditorSection = "options";
+        localStorage.setItem("dashboardTicketEditorSection", state.ticketEditorSection);
+      }
       document.querySelectorAll(".editor-tab").forEach(button => {
+        if (button.dataset.editorSection === "ticketMessage") {
+          button.hidden = hideTicketMessage;
+        }
         button.classList.toggle("active", button.dataset.editorSection === state.ticketEditorSection);
       });
       document.querySelectorAll("[data-editor-panel]").forEach(panel => {
-        panel.hidden = panel.dataset.editorPanel !== state.ticketEditorSection;
+        panel.hidden = panel.dataset.editorPanel === "ticketMessage" && hideTicketMessage
+          ? true
+          : panel.dataset.editorPanel !== state.ticketEditorSection;
       });
+    }
+
+    function applyTicketFocusMode() {
+      const dashboard = document.getElementById("ticketDashboardMain");
+      if (!dashboard) return;
+      dashboard.classList.toggle("ticket-focus-mode", Boolean(state.ticketFocusView));
     }
 
     function renderAudit() {
@@ -1165,6 +1393,396 @@
       `;
     }
 
+    function renderAdminPanel() {
+      const overview = state.adminOverview || {};
+      const server = overview.server || {};
+      const bot = overview.bot || {};
+      const actions = overview.future_actions || [];
+      const botStatus = bot.status === "connected" ? "Conectado" : "Fuera del servidor";
+      const memberCount = server.member_count == null ? "No disponible" : formatNumber(server.member_count);
+      const optionalCount = value => value == null ? "No disponible" : formatNumber(value);
+
+      document.getElementById("adminGuildList").innerHTML = state.adminGuilds.length
+        ? state.adminGuilds.map(guild => {
+          const active = String(guild.id || "") === String(state.guildId || "");
+          const connected = guild.bot?.status === "connected";
+          const icon = guild.icon_url
+            ? `<img src="${escapeHtml(guild.icon_url)}" alt="">`
+            : `<span>${initialForName(guild.name || "S")}</span>`;
+          return `
+            <button class="admin-guild-card${active ? " active" : ""}" type="button" data-admin-guild-id="${escapeHtml(guild.id || "")}">
+              <span class="admin-guild-icon">${icon}</span>
+              <span class="admin-guild-main">
+                <strong>${escapeHtml(guild.name || `Servidor ${guild.id || ""}`)}</strong>
+                <span>${escapeHtml(guild.id || "")}</span>
+              </span>
+              <span class="admin-guild-meta">
+                <span class="pill">${connected ? "Conectado" : "Sin conexion"}</span>
+                <span>${optionalCount(guild.channel_count)} canales</span>
+                <span>${optionalCount(guild.role_count)} roles</span>
+                <span>${guild.has_saved_config ? "Config guardada" : "Sin config"}</span>
+              </span>
+            </button>
+          `;
+        }).join("")
+        : `<div class="empty">No hay servidores administrables disponibles.</div>`;
+
+      document.getElementById("adminServerName").textContent = server.name || "-";
+      document.getElementById("adminServerId").textContent = server.id || "-";
+      document.getElementById("adminBotStatus").textContent = botStatus;
+      document.getElementById("adminMemberCount").textContent = memberCount;
+      document.getElementById("adminChannelCount").textContent = optionalCount(server.channel_count);
+      document.getElementById("adminRoleCount").textContent = optionalCount(server.role_count);
+      document.getElementById("adminServerDetails").innerHTML = [
+        ["Nombre", server.name || "-"],
+        ["ID", server.id || "-"],
+        ["Miembros", memberCount],
+        ["Canales", optionalCount(server.channel_count)],
+        ["Roles", optionalCount(server.role_count)],
+        ["Bot presente", server.bot_present ? "Si" : "No"],
+        ["Metadata", bot.metadata_available ? "Disponible" : "Limitada"],
+        ["Configuracion", server.has_saved_config ? "Guardada" : "Sin registros"]
+      ].map(([label, value]) => `
+        <div class="admin-detail">
+          <span>${escapeHtml(label)}</span>
+          <strong>${escapeHtml(value)}</strong>
+        </div>
+      `).join("");
+      renderAdminServerBackups();
+      renderAdminServerTemplate();
+      document.getElementById("adminFutureActions").innerHTML = actions.map(action => `
+        <article class="admin-action-card">
+          <div>
+            <strong>${escapeHtml(action.label || action.key || "Accion futura")}</strong>
+            <span>${escapeHtml(action.description || "")}</span>
+          </div>
+          <span class="pill">${escapeHtml(action.status === "planned" ? "Preparado" : action.status || "Pendiente")}</span>
+        </article>
+      `).join("");
+      renderAdminBotMessageForm();
+    }
+
+    function renderAdminServerBackups() {
+      const list = document.getElementById("adminServerBackupsList");
+      const detail = document.getElementById("adminServerBackupDetail");
+      const statusElement = document.getElementById("adminServerBackupsStatus");
+      if (!list || !detail || !statusElement) return;
+
+      const backups = state.adminServerBackups || [];
+      const maxBackups = state.adminServerBackupsMax || 2;
+      const status = state.adminServerBackupsStatus || "idle";
+      const error = state.adminServerBackupsError || "";
+      const createButton = document.getElementById("adminCreateBackupButton");
+      createButton.disabled = !state.guildId || status === "loading";
+      createButton.textContent = state.adminBackupReplaceMode ? "Cancelar reemplazo" : "Crear backup";
+      statusElement.textContent = status === "loading"
+        ? "Cargando backups..."
+        : error || (state.adminBackupReplaceMode
+          ? "Elige que backup quieres reemplazar."
+          : `${backups.length} / ${maxBackups} backups guardados.`);
+
+      if (!backups.length) {
+        list.innerHTML = `<div class="empty">No hay backups guardados para este servidor.</div>`;
+      } else {
+        list.innerHTML = backups.map((backup, index) => {
+          const active = String(backup.id || "") === String(state.selectedAdminBackupId || "");
+          const label = `Backup ${index + 1}`;
+          const createdAt = formatDateTime(backup.created_at);
+          return `
+            <article class="admin-action-card${active ? " active" : ""}">
+              <div>
+                <strong>${escapeHtml(label)}</strong>
+                <span>Creado: ${escapeHtml(createdAt)}</span>
+              </div>
+              <div class="ticket-actions">
+                <button class="action-button" type="button" data-admin-backup-id="${escapeHtml(backup.id || "")}" data-admin-backup-label="${escapeHtml(label)}">Ver detalle</button>
+                ${state.adminBackupReplaceMode ? `<button class="action-button danger" type="button" data-admin-replace-backup-id="${escapeHtml(backup.id || "")}" data-admin-backup-label="${escapeHtml(label)}">Reemplazar este</button>` : ""}
+              </div>
+            </article>
+          `;
+        }).join("");
+      }
+
+      if (state.selectedAdminBackupDetail) {
+        detail.hidden = false;
+        detail.innerHTML = renderAdminBackupPreview(state.selectedAdminBackupDetail);
+      } else {
+        detail.hidden = true;
+        detail.innerHTML = "";
+      }
+    }
+
+    function renderAdminBackupPreview(detail) {
+      const backup = detail.backup || {};
+      const guild = backup.guild || {};
+      const summary = detail.summary || {};
+      const roles = backup.roles || [];
+      const categories = backup.categories || [];
+      const channels = backup.channels || [];
+      const config = backup.bot_config || {};
+      const categoryById = new Map(categories.map(category => [String(category.original_id || category.id || ""), category]));
+      const channelsByCategory = channels.reduce((acc, channel) => {
+        const parentId = String(channel.parent_id || "");
+        if (!acc[parentId]) acc[parentId] = [];
+        acc[parentId].push(channel);
+        return acc;
+      }, {});
+      const rolePreview = roles
+        .filter(role => role.name !== "@everyone")
+        .slice(0, 10)
+        .map(role => `
+          <span class="admin-preview-chip">
+            <span class="role-color-dot" style="background:${role.color ? `#${Number(role.color).toString(16).padStart(6, "0")}` : "#94a3b8"}"></span>
+            ${escapeHtml(role.name || role.original_id || "")}
+          </span>
+        `).join("") || `<span class="muted">Sin roles personalizados.</span>`;
+
+      const categoryPreview = categories.slice(0, 8).map(category => {
+        const categoryId = String(category.original_id || category.id || "");
+        const childChannels = channelsByCategory[categoryId] || [];
+        return `
+          <article class="admin-preview-group">
+            <strong>${escapeHtml(category.name || "Categoria")}</strong>
+            <div class="admin-preview-channel-list">
+              ${childChannels.length ? childChannels.slice(0, 10).map(renderAdminBackupChannelRow).join("") : `<span class="muted">Sin canales en esta categoria.</span>`}
+            </div>
+          </article>
+        `;
+      }).join("");
+      const uncategorized = (channelsByCategory[""] || []).slice(0, 10).map(renderAdminBackupChannelRow).join("");
+      const configKeys = Object.keys(config.guild_config || {});
+      const permissionRoles = Object.keys(config.role_permissions || {});
+
+      return `
+        <div class="admin-preview">
+          <div class="admin-preview-heading">
+            <div>
+              <strong>${escapeHtml(guild.name || detail.guild_name || "Servidor")}</strong>
+              <span>ID original: ${escapeHtml(guild.original_id || detail.guild_id || "")}</span>
+              <span>Creado: ${escapeHtml(formatDateTime(detail.created_at))}</span>
+            </div>
+            <span class="pill">Version ${escapeHtml(backup.schema_version || detail.schema_version || 1)}</span>
+          </div>
+          <div class="admin-preview-stats">
+            <div><span>Roles</span><strong>${escapeHtml(summary.roles || roles.length || 0)}</strong></div>
+            <div><span>Categorias</span><strong>${escapeHtml(summary.categories || categories.length || 0)}</strong></div>
+            <div><span>Canales</span><strong>${escapeHtml(summary.channels || channels.length || 0)}</strong></div>
+            <div><span>Overwrites</span><strong>${escapeHtml(summary.permission_overwrites || 0)}</strong></div>
+          </div>
+          <section class="admin-preview-section">
+            <strong>Roles</strong>
+            <div class="admin-preview-chip-list">${rolePreview}</div>
+          </section>
+          <section class="admin-preview-section">
+            <strong>Estructura de canales</strong>
+            ${categoryPreview || `<div class="muted">Sin categorias guardadas.</div>`}
+            ${uncategorized ? `<article class="admin-preview-group"><strong>Sin categoria</strong><div class="admin-preview-channel-list">${uncategorized}</div></article>` : ""}
+          </section>
+          <section class="admin-preview-section">
+            <strong>Configuracion del bot</strong>
+            <div class="admin-preview-config">
+              <span>${escapeHtml(configKeys.length)} claves de configuracion</span>
+              <span>${escapeHtml(permissionRoles.length)} roles con permisos del bot</span>
+            </div>
+          </section>
+        </div>
+      `;
+
+      function renderAdminBackupChannelRow(channel) {
+        const overwrites = (channel.permission_overwrites || []).length;
+        const parent = categoryById.get(String(channel.parent_id || ""));
+        const typeLabel = {
+          text: "#",
+          announcement: "#",
+          voice: "Voz",
+          stage_voice: "Stage",
+          forum: "Foro",
+          media: "Media",
+        }[channel.type] || channel.type || "Canal";
+        return `
+          <div class="admin-preview-channel">
+            <span>${escapeHtml(typeLabel)} ${escapeHtml(channel.name || channel.original_id || "")}</span>
+            <small>${parent ? escapeHtml(parent.name || "") : "Sin categoria"} · ${escapeHtml(overwrites)} permisos</small>
+          </div>
+        `;
+      }
+    }
+
+    function renderAdminServerTemplate() {
+      const backupSelect = document.getElementById("adminTemplateBackup");
+      const targetSelect = document.getElementById("adminTemplateTargetGuild");
+      const previewPanel = document.getElementById("adminTemplatePreview");
+      const applyButton = document.getElementById("adminTemplateApplyButton");
+      const status = document.getElementById("adminTemplateStatus");
+      if (!backupSelect || !targetSelect || !previewPanel || !applyButton || !status) return;
+
+      const selectedBackup = backupSelect.value || state.selectedAdminBackupId || "";
+      backupSelect.innerHTML = `<option value="">Seleccionar backup</option>${(state.adminServerBackups || []).map((backup, index) => {
+        const selected = String(backup.id || "") === String(selectedBackup) ? " selected" : "";
+        return `<option value="${escapeHtml(backup.id || "")}"${selected}>Backup ${index + 1} - ${escapeHtml(formatDateTime(backup.created_at))}</option>`;
+      }).join("")}`;
+      if (selectedBackup) backupSelect.value = selectedBackup;
+
+      const selectedTarget = state.adminTemplateTargetGuildId || targetSelect.value || "";
+      targetSelect.innerHTML = `<option value="">Seleccionar destino</option>${(state.adminGuilds || []).map(guild => {
+        const isCurrentGuild = String(guild.id || "") === String(state.guildId || "");
+        const selected = String(guild.id || "") === String(selectedTarget) ? " selected" : "";
+        const label = `${guild.name || guild.id || ""}${isCurrentGuild ? " (mismo servidor)" : ""}`;
+        return `<option value="${escapeHtml(guild.id || "")}"${selected}>${escapeHtml(label)}</option>`;
+      }).join("")}`;
+      if (selectedTarget) targetSelect.value = selectedTarget;
+
+      document.getElementById("adminTemplateUpdateExisting").checked = Boolean(state.adminTemplateUpdateExisting);
+      document.getElementById("adminTemplateIncludeBotConfig").checked = state.adminTemplateIncludeBotConfig !== false;
+      document.getElementById("adminTemplateClearTarget").checked = Boolean(state.adminTemplateClearTarget);
+      status.textContent = state.adminTemplateStatus || "";
+
+      const confirmation = document.getElementById("adminTemplateConfirmation").value.trim().toUpperCase();
+      const preview = state.adminTemplatePreview?.preview || state.adminTemplatePreview || null;
+      applyButton.disabled = !preview || confirmation !== "APLICAR" || preview.bot_permissions_ok === false;
+      if (!preview) {
+        previewPanel.hidden = true;
+        previewPanel.innerHTML = "";
+        return;
+      }
+      previewPanel.hidden = false;
+      previewPanel.innerHTML = renderAdminTemplatePreview(preview);
+    }
+
+    function renderAdminTemplatePreview(preview) {
+      const count = key => (preview[key] || []).length;
+      const overwrite = preview.permission_overwrites || {};
+      const warnings = preview.warnings || [];
+      const isSameGuild = String(preview.source?.guild_id || "") === String(preview.target?.guild_id || "");
+      const conflictCount = [
+        ...(preview.roles_to_create || []),
+        ...(preview.categories_to_create || []),
+        ...(preview.channels_to_create || []),
+        ...(preview.roles_to_update || []),
+        ...(preview.categories_to_update || []),
+        ...(preview.channels_to_update || []),
+        ...(preview.roles_to_map || []),
+        ...(preview.categories_to_map || []),
+        ...(preview.channels_to_map || [])
+      ].filter(item => item.conflict).length;
+      const mappedCount = (preview.roles_to_map || []).length + (preview.categories_to_map || []).length + (preview.channels_to_map || []).length;
+      const sampleList = (items, empty) => {
+        const list = (items || []).slice(0, 8);
+        if (!list.length) return `<span class="muted">${escapeHtml(empty)}</span>`;
+        return list.map(item => `<span class="admin-preview-chip">${escapeHtml(item.name || "")}${item.target_name && item.target_name !== item.name ? ` -> ${escapeHtml(item.target_name)}` : ""}${item.type ? ` - ${escapeHtml(item.type)}` : ""}</span>`).join("");
+      };
+      return `
+        <div class="admin-preview-stats">
+          <div><span>Roles nuevos</span><strong>${escapeHtml(count("roles_to_create"))}</strong></div>
+          <div><span>Categorias nuevas</span><strong>${escapeHtml(count("categories_to_create"))}</strong></div>
+          <div><span>Canales nuevos</span><strong>${escapeHtml(count("channels_to_create"))}</strong></div>
+          <div><span>Overwrites</span><strong>${escapeHtml(overwrite.total || 0)}</strong></div>
+          <div><span>Mapeados</span><strong>${escapeHtml(mappedCount)}</strong></div>
+          <div><span>Conflictos</span><strong>${escapeHtml(conflictCount)}</strong></div>
+        </div>
+        ${preview.bot_permissions_ok === false ? `<div class="status error">El bot no tiene permisos suficientes en destino.</div>` : ""}
+        ${isSameGuild ? `<div class="status">El destino es el mismo servidor del backup. Sin limpieza se reutilizaran elementos existentes; con limpieza se reconstruira la estructura desde la copia.</div>` : ""}
+        ${warnings.length ? `<div class="status">${warnings.map(escapeHtml).join(" ")}</div>` : ""}
+        <div class="admin-preview-chip-list">${sampleList(preview.roles_to_create, "Sin roles nuevos.")}</div>
+        <div class="admin-preview-chip-list">${sampleList([...(preview.categories_to_create || []), ...(preview.channels_to_create || [])], "Sin canales nuevos.")}</div>
+        ${mappedCount ? `<div class="admin-preview-chip-list">${sampleList([...(preview.roles_to_map || []), ...(preview.categories_to_map || []), ...(preview.channels_to_map || [])], "Sin elementos mapeados.")}</div>` : ""}
+        <div class="admin-preview-config">
+          <span>${escapeHtml(overwrite.role_overwrites || 0)} overwrites de roles</span>
+          <span>${escapeHtml(overwrite.member_overwrites_skipped || 0)} overwrites de miembros omitidos</span>
+          <span>${preview.bot_config?.enabled ? escapeHtml(preview.bot_config.guild_config_keys || 0) : 0} claves de config</span>
+        </div>
+      `;
+    }
+
+    function renderAdminBotMessageForm() {
+      const channels = state.adminMessageChannels || [];
+      const channelSelect = document.getElementById("adminBotMessageChannel");
+      const submitButton = document.getElementById("adminBotMessageSubmit");
+      const status = state.adminMessageChannelsStatus || "idle";
+      const currentChannel = channelSelect.value || "";
+      let placeholder = "Seleccionar canal";
+      if (status === "loading") placeholder = "Cargando canales...";
+      else if (status === "error") placeholder = "No pude cargar canales";
+      else if (status === "loaded" && !channels.length) placeholder = "No hay canales permitidos";
+
+      channelSelect.innerHTML = `<option value="">${escapeHtml(placeholder)}</option>` + channels.map(channel => {
+        const selected = String(channel.id || "") === String(currentChannel) ? " selected" : "";
+        const notes = [];
+        if (!channel.can_read_history) notes.push("sin historial");
+        if (!channel.can_manage_messages) notes.push("sin gestionar");
+        const suffix = notes.length ? ` - ${notes.join(", ")}` : "";
+        return `<option value="${escapeHtml(channel.id || "")}"${selected}>#${escapeHtml(channel.name || channel.id || "")}${suffix}</option>`;
+      }).join("");
+      if (currentChannel && channels.some(channel => String(channel.id || "") === String(currentChannel))) {
+        channelSelect.value = currentChannel;
+      }
+      channelSelect.disabled = status === "loading" || status === "error" || !channels.length;
+      submitButton.disabled = status !== "loaded" || !channels.length;
+
+      if (status === "loading") {
+        document.getElementById("adminBotMessageStatus").textContent = "Cargando canales permitidos...";
+      } else if (status === "error") {
+        document.getElementById("adminBotMessageStatus").textContent = state.adminMessageChannelsError || "No pude cargar los canales. Reintenta.";
+      } else if (status === "loaded" && !channels.length) {
+        document.getElementById("adminBotMessageStatus").textContent = "No hay canales donde el bot pueda ver y enviar mensajes.";
+      } else if (status === "loaded") {
+        document.getElementById("adminBotMessageStatus").textContent = "";
+      }
+      updateAdminBotMessageMode();
+    }
+
+    function updateAdminBotMessageMode() {
+      const action = document.getElementById("adminBotMessageAction").value;
+      const needsMessageId = action === "edit" || action === "delete";
+      const needsContent = action === "send" || action === "edit";
+      document.getElementById("adminBotMessageIdField").hidden = !needsMessageId;
+      document.getElementById("adminBotMessageContentField").hidden = !needsContent;
+      document.getElementById("adminBotMessageId").required = needsMessageId;
+      document.getElementById("adminBotMessageContent").required = needsContent;
+      if (action === "edit") scheduleLoadAdminBotMessageForEdit();
+      updateAdminBotMessageCounter();
+    }
+
+    function updateAdminBotMessageCounter() {
+      const content = document.getElementById("adminBotMessageContent").value || "";
+      document.getElementById("adminBotMessageCounter").textContent = `${content.length} / 2000`;
+    }
+
+    function scheduleLoadAdminBotMessageForEdit() {
+      window.clearTimeout(state.debounceTimers.adminBotMessageLoad);
+      state.debounceTimers.adminBotMessageLoad = window.setTimeout(() => {
+        loadAdminBotMessageForEdit().catch(error => {
+          document.getElementById("adminBotMessageStatus").textContent = error.message;
+        });
+      }, 450);
+    }
+
+    async function loadAdminBotMessageForEdit() {
+      if (document.getElementById("adminBotMessageAction").value !== "edit") return;
+      const channelId = document.getElementById("adminBotMessageChannel").value;
+      const messageId = document.getElementById("adminBotMessageId").value.trim();
+      if (!state.guildId || !channelId || !messageId) return;
+      if (!/^\d+$/.test(messageId)) return;
+
+      const loadKey = `${state.guildId}:${channelId}:${messageId}`;
+      state.adminBotMessageLoadKey = loadKey;
+      document.getElementById("adminBotMessageStatus").textContent = "Cargando mensaje actual...";
+      const params = new URLSearchParams({
+        guild_id: state.guildId,
+        channel_id: channelId,
+        message_id: messageId
+      });
+      const response = await fetch(`/api/admin/bot-message?${params.toString()}`, { cache: "no-store" });
+      const payload = await readJsonResponse(response);
+      if (!response.ok) throw new Error(payload.error || "No pude cargar el mensaje.");
+      if (state.adminBotMessageLoadKey !== loadKey) return;
+
+      const message = payload.message || {};
+      document.getElementById("adminBotMessageContent").value = message.content || "";
+      updateAdminBotMessageCounter();
+      document.getElementById("adminBotMessageStatus").textContent = "Mensaje actual cargado. Edita el contenido y envia la solicitud.";
+    }
+
     function collectBotPermissions() {
       const permissions = { ...(state.botPermissions || {}) };
       document.querySelectorAll(".permission-row").forEach(row => {
@@ -1234,7 +1852,9 @@
       const records = state.ticketRecords || [];
       document.getElementById("ticketRecordSearch").value = state.ticketRecordSearch || "";
       document.getElementById("ticketRecordStatusFilter").value = state.ticketRecordFilters.status || "";
+      renderTicketRecordTypeFilter(records);
       document.getElementById("ticketRecordPageSize").value = String(state.ticketRecordFilters.page_size || 10);
+      renderTicketRecordSort();
       document.getElementById("ticketRecordsCount").textContent = pageRangeLabel(state.ticketRecordFilters, "ticket visible", "tickets visibles");
       renderPager("ticketRecordsPrevPageButton", "ticketRecordsNextPageButton", "ticketRecordsPageInfo", state.ticketRecordFilters, "ticket", "tickets");
       if (!records.length) {
@@ -1252,15 +1872,25 @@
       list.innerHTML = records.map(record => {
         const status = String(record.status || "open").toLowerCase();
         const label = status === "open" ? "Abierto" : status === "closed" ? "Cerrado" : status === "deleted" ? "Eliminado" : status;
-        const recordId = record.channel_id || record.number || "";
-        const hasTranscript = Boolean(record.transcribed_at || (Array.isArray(record.transcript) && record.transcript.length));
+        const recordId = record.record_id || record.channel_id || record.number || "";
+        const panelName = record.panel_name || (record.ticket_type === "fine" ? "Multa" : "");
+        const ticketName = `Ticket${panelName ? ` ${panelName}` : ""}`;
+        const hasTranscript = Boolean(record.has_transcript || record.transcribed_at || (Array.isArray(record.transcript) && record.transcript.length));
+        const fine = record.fine || {};
         const metadata = [
-          ["Usuario", record.owner_name || record.owner_id || "Desconocido"],
-          ["Panel", record.panel_name || "Sin panel"],
+          ["ID", record.number || record.record_id || record.channel_id || "Sin ID"],
+          ["Ticket", ticketName],
+          ["Canal", record.channel_name || record.channel_id || "Sin canal"],
+          ["Usuario", record.user_name || record.owner_name || record.user_id || record.owner_id || "Desconocido"],
+          record.ticket_type === "fine" && (fine.amount || record.amount) ? ["Monto", String(fine.amount || record.amount)] : null,
+          record.ticket_type === "fine" && (fine.reason || record.reason) ? ["Motivo", fine.reason || record.reason] : null,
+          record.ticket_type === "fine" && (fine.status || record.fine_status) ? ["Estado multa", fine.status || record.fine_status] : null,
+          record.ticket_type === "fine" && (fine.report_ava || record.report_ava) ? ["Reporte", fine.report_ava || record.report_ava] : null,
           record.option_label ? ["Opcion", record.option_label] : null,
           record.created_at ? ["Creado", record.created_at] : null,
           record.claimed_by_name ? ["Reclamado por", record.claimed_by_name] : null,
           record.closed_at ? ["Cerrado", record.closed_at] : null,
+          record.deleted_at ? ["Eliminado", record.deleted_at] : null,
           record.transcribed_at ? ["Transcrito", record.transcribed_at] : null
         ].filter(Boolean);
         return `
@@ -1277,6 +1907,7 @@
             <div class="ticket-card-actions">
               ${status === "open" && record.channel_id ? `<button class="action-button view-live-ticket-button${String(state.selectedLiveTicketId) === String(record.channel_id) ? " active" : ""}" type="button" data-channel-id="${escapeHtml(record.channel_id)}">Ver ticket</button>` : ""}
               <button class="action-button view-transcript-button${String(state.selectedTicketRecordId) === String(recordId) ? " active" : ""}" type="button" data-record-id="${escapeHtml(recordId)}" title="Ver transcripcion" aria-label="Ver transcripcion"${hasTranscript ? "" : " disabled"}>Ver transcripcion</button>
+              <button class="action-button export-ticket-record-button" type="button" data-record-id="${escapeHtml(recordId)}" title="Exportar ticket" aria-label="Exportar ticket"${hasTranscript ? "" : " disabled"}>Exportar</button>
               ${status !== "open" ? `<button class="action-button danger delete-ticket-record-button" type="button" data-record-id="${escapeHtml(recordId)}" data-channel-id="${escapeHtml(record.channel_id || "")}" data-record-name="${escapeHtml(record.channel_name || `ticket-${record.number || ""}`)}">Eliminar registro</button>` : ""}
             </div>
           </article>
@@ -1293,7 +1924,17 @@
 
       list.querySelectorAll(".view-transcript-button").forEach(button => {
         button.addEventListener("click", () => {
-          openTicketTranscript(button.dataset.recordId);
+          previewTicketTranscript(button.dataset.recordId).catch(error => {
+            document.getElementById("ticketStatus").textContent = error.message;
+          });
+        });
+      });
+
+      list.querySelectorAll(".export-ticket-record-button").forEach(button => {
+        button.addEventListener("click", () => {
+          exportTicketRecord(button.dataset.recordId).catch(error => {
+            document.getElementById("ticketStatus").textContent = error.message;
+          });
         });
       });
 
@@ -1310,6 +1951,89 @@
       });
     }
 
+    function ticketRecordTypeOptions(records) {
+      const options = new Map();
+      for (const panel of state.ticketPanels || []) {
+        if (!panel?.id || !panel?.name) continue;
+        options.set(`panel:${panel.id}`, `Ticket de ${panel.name}`);
+      }
+      for (const record of records || []) {
+        if (record.ticket_type === "fine") {
+          options.set("fine", "Ticket de Multa");
+          continue;
+        }
+        const panelId = String(record.panel_id || "").trim();
+        const panelName = String(record.panel_name || "").trim();
+        if (panelId && panelId !== "__fine__" && panelName) {
+          options.set(`panel:${panelId}`, `Ticket de ${panelName}`);
+        }
+      }
+      options.set("fine", options.get("fine") || "Ticket de Multa");
+      return [...options.entries()].sort(([, left], [, right]) => left.localeCompare(right, "es"));
+    }
+
+    function renderTicketRecordTypeFilter(records) {
+      const select = document.getElementById("ticketRecordTypeFilter");
+      const current = state.ticketRecordFilters.record_type || "";
+      const options = ticketRecordTypeOptions(records);
+      select.innerHTML = `<option value="">Todos los tickets</option>${options.map(([value, label]) =>
+        `<option value="${escapeHtml(value)}"${current === value ? " selected" : ""}>${escapeHtml(label)}</option>`
+      ).join("")}`;
+      if (current && !options.some(([value]) => value === current)) {
+        select.insertAdjacentHTML("beforeend", `<option value="${escapeHtml(current)}" selected>Filtro actual</option>`);
+      }
+    }
+
+    function renderTicketRecordSort() {
+      const sort = state.ticketRecordFilters.sort === "oldest" ? "oldest" : "newest";
+      const button = document.getElementById("ticketRecordSortButton");
+      document.getElementById("ticketRecordSortIcon").textContent = sort === "oldest" ? "↑" : "↓";
+      document.getElementById("ticketRecordSortLabel").textContent = sort === "oldest" ? "Mas viejos" : "Mas recientes";
+      button.setAttribute("aria-pressed", String(sort === "oldest"));
+      button.title = sort === "oldest" ? "Orden actual: mas viejos primero" : "Orden actual: mas recientes primero";
+    }
+
+    async function previewTicketTranscript(recordId) {
+      const params = new URLSearchParams({
+        guild_id: state.guildId,
+        record_id: recordId
+      });
+      const response = await fetch(`/api/ticket-transcript?${params.toString()}`, { cache: "no-store" });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || "No pude cargar la transcripcion.");
+      state.selectedTicketRecordId = String(recordId || "");
+      state.selectedTicketTranscriptRecord = payload.record || null;
+      state.selectedTicketTranscriptMessages = payload.messages || [];
+      state.selectedLiveTicketId = "";
+      state.ticketLiveMessages = [];
+      state.ticketLiveStatus = "";
+      state.ticketFocusView = "transcript";
+      document.getElementById("ticketStatus").textContent = `${payload.message_count || 0} mensajes cargados.`;
+      renderTickets();
+    }
+
+    function renderTicketTranscriptPreview() {
+      const preview = document.getElementById("ticketTranscriptPreview");
+      if (!preview) return;
+      const record = state.selectedTicketTranscriptRecord;
+      const messages = state.selectedTicketTranscriptMessages || [];
+      const open = state.ticketFocusView === "transcript" && Boolean(record);
+      preview.hidden = !open;
+      if (!open) return;
+      document.getElementById("ticketTranscriptPreviewTitle").textContent = record.channel_name || `Ticket ${record.number || record.record_id || ""}`;
+      const panelName = record.panel_name || (record.ticket_type === "fine" ? "Multa" : "");
+      const ticketName = `Ticket${panelName ? ` ${panelName}` : ""}`;
+      const fine = record.fine || {};
+      const fineDetail = record.ticket_type === "fine" && (fine.amount || fine.reason)
+        ? ` - ${fine.amount ? `Monto ${fine.amount}` : "Multa"}${fine.reason ? ` - ${fine.reason}` : ""}`
+        : "";
+      document.getElementById("ticketTranscriptPreviewSubtitle").textContent =
+        `${ticketName} - ${record.user_name || record.user_id || "Usuario desconocido"}${fineDetail} - ${messages.length} mensajes`;
+      document.getElementById("ticketTranscriptPreviewMessages").innerHTML = messages.length
+        ? messages.map(renderTranscriptMessage).join("")
+        : `<div class="transcript-message"><div></div><div class="muted">La transcripcion no tiene mensajes guardados.</div></div>`;
+    }
+
     function openTicketTranscript(recordId) {
       const params = new URLSearchParams({
         guild_id: state.guildId,
@@ -1318,9 +2042,41 @@
       window.location.href = `/ticket-transcript?${params.toString()}`;
     }
 
+    async function exportTicketRecord(recordId) {
+      const params = new URLSearchParams({
+        guild_id: state.guildId,
+        record_id: recordId
+      });
+      const response = await fetch(`/api/export/ticket?${params.toString()}`, { cache: "no-store" });
+      if (!response.ok) {
+        let message = "No pude exportar este ticket.";
+        try {
+          const payload = await response.json();
+          message = payload.error || message;
+        } catch (error) {
+          message = await response.text() || message;
+        }
+        throw new Error(message);
+      }
+
+      const blob = await response.blob();
+      const disposition = response.headers.get("Content-Disposition") || "";
+      const filenameMatch = disposition.match(/filename="([^"]+)"/i);
+      const filename = filenameMatch ? filenameMatch[1] : `ticket_${recordId || "export"}.json`;
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      document.getElementById("ticketStatus").textContent = "Ticket exportado.";
+    }
+
     async function deleteTicketRecord(recordId, channelId, recordName) {
       const confirmed = window.confirm(
-        `Eliminar definitivamente ${recordName || "este ticket"} de la base de datos? Desaparecera de la lista junto con su transcripcion y archivos guardados.`
+        `Eliminar ${recordName || "este ticket"}? En tickets de multa se aplicara borrado logico y se conservara la transcripcion.`
       );
       if (!confirmed) return;
 
@@ -1344,7 +2100,7 @@
         closeLiveTicket();
       }
       await loadTicketRecordsLive();
-      document.getElementById("ticketStatus").textContent = "Registro del ticket eliminado definitivamente.";
+      document.getElementById("ticketStatus").textContent = "Registro del ticket actualizado.";
       renderTickets();
     }
 
@@ -1356,6 +2112,10 @@
       state.selectedLiveTicketId = String(channelId || "");
       state.ticketLiveMessages = [];
       state.ticketLiveStatus = "Cargando mensajes...";
+      state.selectedTicketRecordId = "";
+      state.selectedTicketTranscriptRecord = null;
+      state.selectedTicketTranscriptMessages = [];
+      state.ticketFocusView = "live";
       renderTickets();
       await loadLiveTicketMessages();
     }
@@ -1364,6 +2124,7 @@
       state.selectedLiveTicketId = "";
       state.ticketLiveMessages = [];
       state.ticketLiveStatus = "";
+      state.ticketFocusView = "";
       renderTickets();
     }
 
@@ -1387,7 +2148,7 @@
       if (!content) return;
       const response = await fetch("/api/ticket-live-message", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: csrfHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({
           guild_id: state.guildId,
           channel_id: state.selectedLiveTicketId,
@@ -1403,19 +2164,11 @@
 
     function renderTicketLiveViewer() {
       const viewer = document.getElementById("ticketLiveViewer");
-      const empty = document.getElementById("ticketEmptyEditor");
-      const editor = document.getElementById("ticketEditor");
       const record = liveTicketRecord();
-      const open = Boolean(state.selectedLiveTicketId && record && String(record.status || "open").toLowerCase() === "open");
+      const open = state.ticketFocusView === "live" && Boolean(state.selectedLiveTicketId && record && String(record.status || "open").toLowerCase() === "open");
       viewer.hidden = !open;
-      if (!open) {
-        if (!currentTicketPanel()) empty.hidden = false;
-        editor.hidden = !currentTicketPanel();
-        return;
-      }
+      if (!open) return;
 
-      empty.hidden = true;
-      editor.hidden = true;
       document.getElementById("ticketLiveTitle").textContent = record.channel_name || `ticket-${record.number || ""}`;
       document.getElementById("ticketLiveSubtitle").textContent = `${record.panel_name || "Sin panel"} - ${record.owner_name || record.owner_id || "Usuario desconocido"}`;
       document.getElementById("ticketLiveMessageStatus").textContent = state.ticketLiveStatus || "";
@@ -1510,6 +2263,11 @@
       return String(value || "").split(",").map(item => item.trim()).filter(Boolean);
     }
 
+    function userIdValues(value) {
+      const source = Array.isArray(value) ? value.join(",") : String(value || "");
+      return source.split(/[\s,]+/).map(item => item.trim()).filter(item => /^\d+$/.test(item));
+    }
+
     function rolePickerValues(inputId) {
       return permissionValues(document.getElementById(inputId)?.value || "");
     }
@@ -1581,6 +2339,75 @@
       }).slice(0, 20);
     }
 
+    function normalizeTicketPermissionValues(values, fallback = []) {
+      if (!Array.isArray(values)) return [...fallback];
+      const allowed = new Set(ticketChannelPermissionOptions.map(([key]) => key));
+      return values.map(String).filter(value => allowed.has(value));
+    }
+
+    function ticketPermissionOpenIndexes() {
+      return new Set(
+        Array.from(document.querySelectorAll("[data-ticket-permission-index]"))
+          .filter(row => row.querySelector(".ticket-permission-details")?.open)
+          .map(row => Number(row.dataset.ticketPermissionIndex))
+      );
+    }
+
+    function renderTicketOwnerPermissions(panel) {
+      const container = document.getElementById("ticketOwnerPermissions");
+      if (!container) return;
+      const selected = new Set(normalizeTicketPermissionValues(
+        panel?.permissions?.owner_permissions,
+        defaultTicketOwnerPermissions
+      ));
+      const optionByKey = new Map(ticketChannelPermissionOptions);
+      const selectedCount = ticketChannelPermissionOptions.filter(([key]) => selected.has(key)).length;
+      container.innerHTML = `
+        <div class="owner-permission-toolbar">
+          <span class="owner-permission-count">${selectedCount} activos</span>
+          <span class="owner-permission-note">Se aplican al creador y a personas agregadas mientras el ticket esta abierto.</span>
+          <button class="owner-permission-reset" type="button" data-owner-permission-defaults>Restaurar base</button>
+        </div>
+        <div class="owner-permission-groups">
+          ${ownerPermissionGroups.map(group => `
+            <section class="owner-permission-group">
+              <div class="owner-permission-group-head">
+                <strong>${escapeHtml(group.title)}</strong>
+                <span>${escapeHtml(group.description)}</span>
+              </div>
+              <div class="owner-permission-options-row">
+                ${group.keys.map(key => `
+                  <label class="owner-permission-option${selected.has(key) ? " active" : ""}">
+                    <input class="ticket-owner-permission-checkbox" type="checkbox" value="${escapeHtml(key)}"${selected.has(key) ? " checked" : ""}>
+                    <span>${escapeHtml(optionByKey.get(key) || key)}</span>
+                  </label>
+                `).join("")}
+              </div>
+            </section>
+          `).join("")}
+        </div>
+      `;
+      container.querySelectorAll(".ticket-owner-permission-checkbox").forEach(input => {
+        input.addEventListener("change", () => {
+          const current = currentTicketPanel();
+          if (!current) return;
+          current.permissions = current.permissions || {};
+          current.permissions.owner_permissions = collectTicketOwnerPermissions();
+          input.closest(".owner-permission-option")?.classList.toggle("active", input.checked);
+          persistCurrentTicketPanel();
+          renderTicketOwnerPermissions(current);
+        });
+      });
+      container.querySelector("[data-owner-permission-defaults]")?.addEventListener("click", () => {
+        const current = currentTicketPanel();
+        if (!current) return;
+        current.permissions = current.permissions || {};
+        current.permissions.owner_permissions = [...defaultTicketOwnerPermissions];
+        persistCurrentTicketPanel();
+        renderTicketOwnerPermissions(current);
+      });
+    }
+
     function roleOptionsHtml(selectedRoleId) {
       return `<option value="">Seleccionar rol</option>` + state.ticketRoles.map(role => {
         const selected = String(role.id) === String(selectedRoleId || "") ? " selected" : "";
@@ -1591,6 +2418,7 @@
     function renderTicketRolePermissions(panel) {
       const container = document.getElementById("ticketRolePermissionsList");
       if (!container) return;
+      const openIndexes = ticketPermissionOpenIndexes();
       const savedEntries = panel?.permissions?.ticket_role_permissions;
       const entries = Array.isArray(savedEntries)
         ? savedEntries.map(entry => ({
@@ -1616,7 +2444,7 @@
                 <button class="action-button danger remove-ticket-permission-role" type="button">Quitar</button>
               </div>
             </div>
-            <details class="ticket-permission-details">
+            <details class="ticket-permission-details"${openIndexes.has(index) ? " open" : ""}>
               <summary>Editar permisos</summary>
               <div class="ticket-permission-options">
                 ${ticketChannelPermissionOptions.map(([key, label]) => `
@@ -1662,7 +2490,15 @@
       }).filter(entry => entry.role_id && entry.permissions.length);
     }
 
+    function collectTicketOwnerPermissions() {
+      return normalizeTicketPermissionValues(
+        Array.from(document.querySelectorAll(".ticket-owner-permission-checkbox:checked")).map(input => input.value),
+        []
+      );
+    }
+
     function renderAllRolePickers(panel) {
+      renderRoleSelect("addMemberRoles", panel.permissions?.add_member_roles || []);
       renderRoleSelect("claimRoles", panel.permissions?.claim_roles || []);
       renderRoleSelect("closeRoles", panel.permissions?.close_roles || []);
       renderRoleSelect("reopenRoles", panel.permissions?.reopen_roles || []);
@@ -1673,6 +2509,7 @@
       const panel = currentTicketPanel();
       if (!panel) return;
       const map = {
+        addMemberRoles: "add_member_roles",
         claimRoles: "claim_roles",
         closeRoles: "close_roles",
         reopenRoles: "reopen_roles",
@@ -1695,7 +2532,7 @@
       document.getElementById("ticketEmptyEditor").hidden = Boolean(panel);
       document.getElementById("ticketEditor").hidden = !panel;
       const disabled = !panel;
-      ["ticketName", "ticketMode", "ticketChannel", "ticketOpenCategory", "ticketColor", "ticketContent", "ticketTitle", "ticketFooter", "ticketDescription", "ticketImage", "ticketOpenContent", "ticketOpenTitle", "ticketOpenColor", "ticketOpenDescription", "ticketOpenFooter", "ticketOpenImage", "ticketOpenThumbnail", "claimRoles", "closeRoles", "reopenRoles", "deleteRoles"].forEach(id => {
+      ["ticketName", "ticketMode", "ticketChannel", "ticketOpenCategory", "ticketColor", "ticketContent", "ticketTitle", "ticketFooter", "ticketDescription", "ticketImage", "ticketOpenContent", "ticketOpenTitle", "ticketOpenColor", "ticketOpenDescription", "ticketOpenFooter", "ticketOpenImage", "ticketOpenThumbnail", "addMemberRoles", "addMemberUserIds", "claimRoles", "closeRoles", "reopenRoles", "deleteRoles"].forEach(id => {
         document.getElementById(id).disabled = disabled;
       });
 
@@ -1710,7 +2547,9 @@
         document.getElementById("ticketPreview").textContent = "Crea un panel para empezar.";
         document.getElementById("ticketOptions").innerHTML = "";
         document.getElementById("ticketRolePermissionsList").innerHTML = "";
-        ["claimRoles", "closeRoles", "reopenRoles", "deleteRoles"].forEach(id => {
+        document.getElementById("ticketOwnerPermissions").innerHTML = "";
+        document.getElementById("addMemberUserIds").value = "";
+        ["addMemberRoles", "claimRoles", "closeRoles", "reopenRoles", "deleteRoles"].forEach(id => {
           document.getElementById(id).value = "";
           document.getElementById(`${id}Picker`).innerHTML = "";
         });
@@ -1734,7 +2573,9 @@
       document.getElementById("ticketOpenFooter").value = panel.ticket_open_footer || "";
       document.getElementById("ticketOpenImage").value = panel.ticket_open_image_url || "";
       document.getElementById("ticketOpenThumbnail").value = panel.ticket_open_thumbnail_url || "";
+      document.getElementById("addMemberUserIds").value = userIdValues(panel.permissions?.add_member_user_ids || []).join(", ");
       renderTicketRolePermissions(panel);
+      renderTicketOwnerPermissions(panel);
       renderAllRolePickers(panel);
       renderTicketOptions(panel);
       renderTicketPreview(panel);
@@ -1745,15 +2586,50 @@
       const container = document.getElementById("ticketOptions");
       const emojiOptions = buildEmojiOptions();
       container.innerHTML = (panel.options || []).map((option, index) => `
-        <div class="option-row" data-option-index="${index}">
-          <select class="ticket-option-emoji">${emojiOptions(option.emoji || "")}</select>
-          <input class="ticket-option-label" type="text" placeholder="Nombre de opcion" value="${escapeHtml(option.label || "")}">
-          <input class="ticket-option-description" type="text" placeholder="Descripcion" value="${escapeHtml(option.description || "")}">
-          <button class="icon-button remove-ticket-option" type="button" title="Quitar opcion" aria-label="Quitar opcion">x</button>
-        </div>
+        <article class="ticket-option-card" data-option-index="${index}">
+          <div class="option-row">
+            <select class="ticket-option-emoji">${emojiOptions(option.emoji || "")}</select>
+            <input class="ticket-option-label" type="text" placeholder="Nombre de opcion" value="${escapeHtml(option.label || "")}">
+            <input class="ticket-option-description" type="text" placeholder="Descripcion" value="${escapeHtml(option.description || "")}">
+            <button class="icon-button remove-ticket-option" type="button" title="Quitar opcion" aria-label="Quitar opcion">x</button>
+          </div>
+          <details class="ticket-option-message-details">
+            <summary>Mensaje propio de esta opcion</summary>
+            <div class="ticket-option-message-grid">
+              <div class="field full">
+                <label>Mensaje arriba del embed</label>
+                <textarea class="ticket-option-open-content" placeholder="Vacio: usa el mensaje general del panel.">${escapeHtml(option.ticket_open_content || "")}</textarea>
+              </div>
+              <div class="field">
+                <label>Titulo del embed</label>
+                <input class="ticket-option-open-title" type="text" placeholder="Vacio: usa el general" value="${escapeHtml(option.ticket_open_title || "")}">
+              </div>
+              <div class="field">
+                <label>Color del embed</label>
+                <input class="ticket-option-open-color" type="text" placeholder="#38bdf8" value="${escapeHtml(option.ticket_open_color || "")}">
+              </div>
+              <div class="field full">
+                <label>Contenido del embed</label>
+                <textarea class="ticket-option-open-description" placeholder="Vacio: usa el contenido general.">${escapeHtml(option.ticket_open_description || "")}</textarea>
+              </div>
+              <div class="field full">
+                <label>Footer del embed</label>
+                <input class="ticket-option-open-footer" type="text" placeholder="Vacio: usa el general" value="${escapeHtml(option.ticket_open_footer || "")}">
+              </div>
+              <div class="field">
+                <label>Imagen grande URL</label>
+                <input class="ticket-option-open-image" type="url" placeholder="https://..." value="${escapeHtml(option.ticket_open_image_url || "")}">
+              </div>
+              <div class="field">
+                <label>Miniatura URL</label>
+                <input class="ticket-option-open-thumbnail" type="url" placeholder="https://..." value="${escapeHtml(option.ticket_open_thumbnail_url || "")}">
+              </div>
+            </div>
+          </details>
+        </article>
       `).join("");
 
-      container.querySelectorAll("input, select").forEach(input => {
+      container.querySelectorAll("input, select, textarea").forEach(input => {
         input.addEventListener("input", () => {
           persistCurrentTicketPanel();
           renderCurrentTicketPreviews();
@@ -1765,10 +2641,10 @@
       });
       container.querySelectorAll(".remove-ticket-option").forEach(button => {
         button.addEventListener("click", event => {
-          const row = event.target.closest(".option-row");
-          const index = Number(row.dataset.optionIndex);
+          const card = event.target.closest("[data-option-index]");
+          const index = Number(card?.dataset.optionIndex);
           const current = currentTicketPanel();
-          if (!current || current.options.length <= 1) return;
+          if (!current || !Number.isFinite(index) || current.options.length <= 1) return;
           current.options.splice(index, 1);
           state.ticketPanelsDirty = true;
           renderTickets();
@@ -1788,11 +2664,18 @@
     }
 
     function collectTicketOptions() {
-      return Array.from(document.querySelectorAll(".option-row")).map(row => ({
+      return Array.from(document.querySelectorAll("[data-option-index]")).map(row => ({
         id: currentTicketPanel()?.options?.[Number(row.dataset.optionIndex)]?.id || (crypto.randomUUID ? crypto.randomUUID() : String(Date.now())),
         emoji: row.querySelector(".ticket-option-emoji").value.trim(),
         label: row.querySelector(".ticket-option-label").value.trim() || "Abrir ticket",
-        description: row.querySelector(".ticket-option-description").value.trim()
+        description: row.querySelector(".ticket-option-description").value.trim(),
+        ticket_open_content: row.querySelector(".ticket-option-open-content")?.value || "",
+        ticket_open_title: row.querySelector(".ticket-option-open-title")?.value.trim() || "",
+        ticket_open_description: row.querySelector(".ticket-option-open-description")?.value || "",
+        ticket_open_color: row.querySelector(".ticket-option-open-color")?.value.trim() || "",
+        ticket_open_footer: row.querySelector(".ticket-option-open-footer")?.value.trim() || "",
+        ticket_open_image_url: row.querySelector(".ticket-option-open-image")?.value.trim() || "",
+        ticket_open_thumbnail_url: row.querySelector(".ticket-option-open-thumbnail")?.value.trim() || ""
       }));
     }
 
@@ -1820,6 +2703,9 @@
       panel.options = collectTicketOptions();
       panel.permissions = {
         ticket_role_permissions: normalizeTicketRolePermissions(collectTicketRolePermissions()),
+        owner_permissions: collectTicketOwnerPermissions(),
+        add_member_roles: rolePickerValues("addMemberRoles"),
+        add_member_user_ids: userIdValues(document.getElementById("addMemberUserIds").value).slice(0, 10),
         claim_roles: rolePickerValues("claimRoles"),
         close_roles: rolePickerValues("closeRoles"),
         reopen_roles: rolePickerValues("reopenRoles"),
@@ -1948,7 +2834,9 @@
       return {
         showItems: mode !== "silver",
         showSilver: mode !== "items",
-        showCosts: mode !== "items",
+        showMapCost: mode !== "items",
+        showRepairCost: true,
+        showTabSale: mode === "items" || mode === "items_silver",
         showBothExtras: mode === "items_silver"
       };
     }
@@ -1969,13 +2857,13 @@
       const config = reportCalculatorModeConfig(mode);
       setReportFieldVisible("reportItemsField", config.showItems);
       setReportFieldVisible("reportSilverField", config.showSilver);
-      setReportFieldVisible("reportMapCostField", config.showCosts);
-      setReportFieldVisible("reportRepairCostField", config.showCosts);
+      setReportFieldVisible("reportMapCostField", config.showMapCost);
+      setReportFieldVisible("reportRepairCostField", config.showRepairCost);
       setReportFieldVisible("reportCallerPercentField", config.showBothExtras);
       setReportFieldVisible("reportLooterPaymentField", config.showBothExtras);
       const looterPayment = config.showBothExtras ? parseReportAmount(document.getElementById("reportLooterPayment").value) : 0;
       setReportFieldVisible("reportLooterUserField", config.showBothExtras && looterPayment > 0);
-      setReportFieldVisible("reportTabSaleField", config.showBothExtras);
+      setReportFieldVisible("reportTabSaleField", config.showTabSale);
       return config;
     }
 
@@ -1997,11 +2885,344 @@
       }).join("");
     }
 
+    function reportSplitExclusions() {
+      return Array.isArray(state.reportCalculator?.split_exclusions)
+        ? state.reportCalculator.split_exclusions
+        : [];
+    }
+
+    function syncReportSplitExclusions(participants) {
+      if (!state.reportCalculator) return [];
+      const participantIds = new Set(participants.map(participant => String(participant.user_id)));
+      const seen = new Set();
+      const exclusions = reportSplitExclusions().filter(exclusion => {
+        const userId = String(exclusion?.user_id || "");
+        if (!userId || seen.has(userId) || !participantIds.has(userId)) return false;
+        seen.add(userId);
+        return true;
+      }).map(exclusion => ({
+        ...exclusion,
+        user_id: String(exclusion.user_id),
+        activity_percentage: String(exclusion.activity_percentage || ""),
+      }));
+      state.reportCalculator.split_exclusions = exclusions;
+      return exclusions;
+    }
+
+    function findReportSplitExclusion(userId) {
+      return reportSplitExclusions().find(exclusion => String(exclusion.user_id) === String(userId)) || null;
+    }
+
+    function reportExclusionDiscount(exclusion) {
+      const rawPercentage = String(exclusion?.activity_percentage || "").trim();
+      return rawPercentage ? parseReportPercentage(rawPercentage) : 100;
+    }
+
+    function reportParticipantSplitWeight(participant) {
+      const exclusion = findReportSplitExclusion(participant?.user_id);
+      if (!exclusion) return 1;
+      return Math.max(0, (100 - reportExclusionDiscount(exclusion)) / 100);
+    }
+
+    function reportSplitModifierRows() {
+      return [...document.querySelectorAll(".report-modifier-row")];
+    }
+
+    function reportModifierSignedAmount(modifier) {
+      const amount = parseReportAmount(modifier.amount);
+      return modifier.operation === "add" ? amount : -amount;
+    }
+
+    function collectReportSplitModifiers() {
+      return reportSplitModifierRows().map(row => {
+        const targetType = row.querySelector(".report-modifier-target").value;
+        const userSelect = row.querySelector(".report-modifier-user");
+        const selectedOption = userSelect.options[userSelect.selectedIndex];
+        return {
+          name: row.querySelector(".report-modifier-name").value.trim(),
+          operation: row.querySelector(".report-modifier-operation").value,
+          amount: row.querySelector(".report-modifier-amount").value.trim(),
+          description: row.querySelector(".report-modifier-description").value.trim(),
+          target_type: targetType,
+          user_id: targetType === "player" ? userSelect.value : "",
+          user_name: targetType === "player" ? (selectedOption?.textContent?.split(" - ")[0] || "") : "",
+          slot: targetType === "player" ? (selectedOption?.textContent?.split(" - ").slice(1).join(" - ") || "") : "",
+        };
+      }).filter(modifier => {
+        const amountText = String(modifier.amount || "").trim();
+        return modifier.name && /\d/.test(amountText) && !amountText.startsWith("-") && parseReportAmount(amountText) >= 0;
+      });
+    }
+
+    function syncReportModifierParticipantOptions(participants) {
+      document.querySelectorAll(".report-modifier-user").forEach(select => {
+        const previous = select.value;
+        select.innerHTML = reportParticipantOptionsMarkup(participants, previous);
+      });
+    }
+
+    function reportBuildLoanRows() {
+      return [...document.querySelectorAll(".report-build-loan-row")];
+    }
+
+    const reportBuildLoanMethods = [
+      ["split", "Descontar del split"],
+      ["balance", "Descontar del balance"],
+      ["paid_now", "Pago al momento"],
+    ];
+
+    function reportBuildLoanMethodOptions(selectedValue = "split") {
+      const selected = selectedValue || "split";
+      return reportBuildLoanMethods.map(([value, label]) => (
+        `<option value="${escapeHtml(value)}"${value === selected ? " selected" : ""}>${escapeHtml(label)}</option>`
+      )).join("");
+    }
+
+    function collectReportBuildLoanDiscounts({ includeProof = false } = {}) {
+      return reportBuildLoanRows().map(row => {
+        const userSelect = row.querySelector(".report-build-loan-user");
+        const selectedOption = userSelect.options[userSelect.selectedIndex];
+        const proofInput = row.querySelector(".report-build-loan-proof");
+        const discount = {
+          user_id: userSelect.value,
+          user_name: selectedOption?.textContent?.split(" - ")[0] || "",
+          slot: selectedOption?.textContent?.split(" - ").slice(1).join(" - ") || "",
+          amount: row.querySelector(".report-build-loan-amount").value.trim(),
+          collection_method: row.querySelector(".report-build-loan-method").value,
+          reason: row.querySelector(".report-build-loan-reason").value.trim(),
+          proof_name: proofInput?.dataset.proofName || "",
+        };
+        if (includeProof) discount.proof_data_url = proofInput?.dataset.proofDataUrl || "";
+        return discount;
+      }).filter(discount => {
+        const amountText = String(discount.amount || "").trim();
+        if (!discount.user_id || !discount.reason) return false;
+        if (discount.collection_method === "paid_now") {
+          return !amountText || (!amountText.startsWith("-") && parseReportAmount(amountText) >= 0);
+        }
+        return /\d/.test(amountText) && !amountText.startsWith("-") && parseReportAmount(amountText) > 0;
+      });
+    }
+
+    function syncReportBuildLoanParticipantOptions(participants) {
+      document.querySelectorAll(".report-build-loan-user").forEach(select => {
+        const previous = select.value;
+        select.innerHTML = reportParticipantOptionsMarkup(participants, previous);
+      });
+    }
+
+    function bindReportBuildLoanRow(row) {
+      row.querySelectorAll("select, input").forEach(element => {
+        if (element.matches(".report-build-loan-proof")) return;
+        const handleBuildLoanChange = () => {
+          setReportCopyStatus();
+          renderReportCalculator();
+        };
+        element.addEventListener("input", handleBuildLoanChange);
+        element.addEventListener("change", handleBuildLoanChange);
+      });
+      row.querySelector(".report-build-loan-remove").addEventListener("click", () => {
+        row.remove();
+        setReportCopyStatus();
+        renderReportCalculator();
+      });
+      row.querySelector(".report-build-loan-proof").addEventListener("change", async event => {
+        const file = event.target.files?.[0];
+        const label = row.querySelector(".report-build-loan-proof-name");
+        if (!file) {
+          event.target.dataset.proofDataUrl = "";
+          event.target.dataset.proofName = "";
+          label.textContent = "";
+          return;
+        }
+        const proofRead = (async () => {
+          event.target.dataset.proofDataUrl = await fileToDataUrl(file);
+          event.target.dataset.proofName = file.name;
+          label.textContent = file.name;
+          setReportCopyStatus();
+        })();
+        state.reportBuildLoanProofReads.add(proofRead);
+        try {
+          await proofRead;
+        } catch (error) {
+          event.target.value = "";
+          event.target.dataset.proofDataUrl = "";
+          event.target.dataset.proofName = "";
+          label.textContent = error.message;
+        } finally {
+          state.reportBuildLoanProofReads.delete(proofRead);
+        }
+      });
+    }
+
+    function appendReportBuildLoanRow(discount = {}) {
+      const container = document.getElementById("reportBuildLoansList");
+      const participants = state.reportCalculator?.participants || [];
+      const row = document.createElement("div");
+      const collectionMethod = discount.collection_method || "split";
+      row.className = "report-build-loan-row";
+      row.innerHTML = `
+        <div class="field report-build-loan-user-field">
+          <label>Jugador</label>
+          <select class="report-build-loan-user">${reportParticipantOptionsMarkup(participants, discount.user_id || "")}</select>
+        </div>
+        <div class="field report-build-loan-amount-field">
+          <label>Monto</label>
+          <input class="report-build-loan-amount" type="text" inputmode="decimal" maxlength="50" placeholder="Ej: 500k" value="${escapeHtml(discount.amount || "")}">
+        </div>
+        <div class="field report-build-loan-method-field">
+          <label>Cobro</label>
+          <select class="report-build-loan-method">${reportBuildLoanMethodOptions(collectionMethod)}</select>
+        </div>
+        <div class="field report-build-loan-reason-field">
+          <label>Motivo</label>
+          <input class="report-build-loan-reason" type="text" maxlength="300" placeholder="Ej: préstamo build healer" value="${escapeHtml(discount.reason || "")}">
+        </div>
+        <div class="field report-build-loan-proof-field">
+          <label>Imagen</label>
+          <input class="report-build-loan-proof" type="file" accept="image/*">
+          <div class="report-build-loan-proof-name report-fine-proof-name">${escapeHtml(discount.proof_name || "")}</div>
+        </div>
+        <button class="action-button danger report-build-loan-remove" type="button">Quitar</button>
+      `;
+      const proofInput = row.querySelector(".report-build-loan-proof");
+      if (discount.proof_data_url) proofInput.dataset.proofDataUrl = discount.proof_data_url;
+      if (discount.proof_name) proofInput.dataset.proofName = discount.proof_name;
+      bindReportBuildLoanRow(row);
+      container.appendChild(row);
+    }
+
+    function bindReportModifierRow(row) {
+      const renderTargetVisibility = () => {
+        const targetType = row.querySelector(".report-modifier-target").value;
+        row.querySelector(".report-modifier-user-field").hidden = targetType !== "player";
+      };
+      row.querySelectorAll("select, input").forEach(element => {
+        const handleModifierChange = () => {
+          renderTargetVisibility();
+          setReportCopyStatus();
+          renderReportCalculator();
+        };
+        element.addEventListener("input", handleModifierChange);
+        element.addEventListener("change", handleModifierChange);
+      });
+      row.querySelector(".report-modifier-remove").addEventListener("click", () => {
+        row.remove();
+        setReportCopyStatus();
+        renderReportCalculator();
+      });
+      renderTargetVisibility();
+    }
+
+    function appendReportModifierRow(modifier = {}) {
+      const container = document.getElementById("reportModifiersList");
+      const participants = state.reportCalculator?.participants || [];
+      const row = document.createElement("div");
+      const operation = modifier.operation === "subtract" ? "subtract" : "add";
+      const targetType = modifier.target_type === "player" ? "player" : "total";
+      row.className = "report-modifier-row";
+      row.innerHTML = `
+        <div class="field">
+          <label>Concepto</label>
+          <input class="report-modifier-name" type="text" maxlength="120" placeholder="Ej: Compra de sets" value="${escapeHtml(modifier.name || "")}">
+        </div>
+        <div class="field">
+          <label>Operacion</label>
+          <select class="report-modifier-operation">
+            <option value="add"${operation === "add" ? " selected" : ""}>Suma</option>
+            <option value="subtract"${operation === "subtract" ? " selected" : ""}>Resta</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>Monto</label>
+          <input class="report-modifier-amount" type="text" inputmode="decimal" maxlength="50" placeholder="Ej: 100k" value="${escapeHtml(modifier.amount || "")}">
+        </div>
+        <div class="field">
+          <label>Afecta a</label>
+          <select class="report-modifier-target">
+            <option value="total"${targetType === "total" ? " selected" : ""}>Total general</option>
+            <option value="player"${targetType === "player" ? " selected" : ""}>Jugador</option>
+          </select>
+        </div>
+        <div class="field report-modifier-user-field">
+          <label>Jugador</label>
+          <select class="report-modifier-user">${reportParticipantOptionsMarkup(participants, modifier.user_id || "")}</select>
+        </div>
+        <div class="field report-modifier-description-field">
+          <label>Descripcion</label>
+          <input class="report-modifier-description" type="text" maxlength="300" placeholder="Detalle opcional" value="${escapeHtml(modifier.description || "")}">
+        </div>
+        <button class="action-button danger report-modifier-remove" type="button">Quitar</button>
+      `;
+      bindReportModifierRow(row);
+      container.appendChild(row);
+    }
+
+    function setReportSplitExclusion(participant, reason = "", activityPercentage = "") {
+      if (!state.reportCalculator || !participant) return;
+      const userId = String(participant.user_id || "");
+      const exclusions = reportSplitExclusions().filter(exclusion => String(exclusion.user_id) !== userId);
+      exclusions.push({
+        user_id: userId,
+        user_name: participant.display_name || participant.user_id || "",
+        slot: participant.slot || "",
+        reason: String(reason || "").trim(),
+        activity_percentage: String(activityPercentage || "").trim(),
+      });
+      state.reportCalculator.split_exclusions = exclusions;
+    }
+
+    function removeReportSplitExclusion(userId) {
+      if (!state.reportCalculator) return;
+      state.reportCalculator.split_exclusions = reportSplitExclusions()
+        .filter(exclusion => String(exclusion.user_id) !== String(userId));
+    }
+
     function syncReportFineParticipantOptions(participants) {
       document.querySelectorAll(".report-fine-user").forEach(select => {
         const previous = select.value;
         select.innerHTML = reportParticipantOptionsMarkup(participants, previous);
       });
+    }
+
+    function manualReportParticipantCount() {
+      const value = Number.parseInt(document.getElementById("reportManualParticipants").value, 10);
+      if (!Number.isFinite(value)) return 0;
+      return Math.max(0, Math.min(value, 200));
+    }
+
+    function manualReportTitle() {
+      return document.getElementById("reportManualTitle").value.trim() || "Actividad manual";
+    }
+
+    function manualReportParticipants() {
+      return Array.from({ length: manualReportParticipantCount() }, (_, index) => {
+        const number = index + 1;
+        return {
+          index: number,
+          slot: "Participante",
+          user_id: String(-number),
+          display_name: `Participante ${number}`,
+        };
+      });
+    }
+
+    function createManualReportCalculator() {
+      const viewer = state.data?.viewer || {};
+      return {
+        guild_id: state.guildId || state.reportContext?.guildId || "",
+        caller_id: viewer.id || "",
+        numero_ava: "",
+        title: manualReportTitle(),
+        caller_name: viewer.global_name || viewer.username || "",
+        finalized: true,
+        cancelled: false,
+        report_sent: false,
+        report_generated: false,
+        report_rejected: false,
+        manual: true,
+        participants: manualReportParticipants(),
+      };
     }
 
     async function fileToDataUrl(file) {
@@ -2015,11 +3236,16 @@
 
     function bindReportFineRow(row) {
       row.querySelectorAll("select, input").forEach(element => {
-        element.addEventListener("input", () => renderReportCalculator());
-        element.addEventListener("change", () => renderReportCalculator());
+        const handleFineChange = () => {
+          setReportCopyStatus();
+          renderReportCalculator();
+        };
+        element.addEventListener("input", handleFineChange);
+        element.addEventListener("change", handleFineChange);
       });
       row.querySelector(".report-fine-remove").addEventListener("click", () => {
         row.remove();
+        setReportCopyStatus();
         renderReportCalculator();
       });
       row.querySelector(".report-fine-proof").addEventListener("change", async event => {
@@ -2076,20 +3302,21 @@
       container.appendChild(row);
     }
 
-    function collectReportFines() {
+    function collectReportFines({ includeProof = true } = {}) {
       return [...document.querySelectorAll(".report-fine-row")].map(row => {
         const userSelect = row.querySelector(".report-fine-user");
         const selectedOption = userSelect.options[userSelect.selectedIndex];
         const proofInput = row.querySelector(".report-fine-proof");
-        return {
+        const fine = {
           user_id: userSelect.value,
           user_name: selectedOption?.textContent?.split(" - ")[0] || "",
           slot: selectedOption?.textContent?.split(" - ").slice(1).join(" - ") || "",
           amount: row.querySelector(".report-fine-amount").value,
           reason: row.querySelector(".report-fine-reason").value,
-          proof_data_url: proofInput.dataset.proofDataUrl || "",
           proof_name: proofInput.dataset.proofName || "",
         };
+        if (includeProof) fine.proof_data_url = proofInput.dataset.proofDataUrl || "";
+        return fine;
       }).filter(fine => fine.user_id && fine.amount && fine.reason);
     }
 
@@ -2109,15 +3336,19 @@
       state.reportCalculatorOptions = payload.calculators || [];
       state.reportCalculatorOptionsGuildId = state.guildId;
       const currentAva = state.reportContext?.ava || "";
+      const currentCallerId = state.reportContext?.callerId || "";
       if (!state.reportCalculatorOptions.length) {
-        state.reportContext = null;
-        state.reportCalculator = null;
+        state.reportContext = { guildId: state.guildId, callerId: state.data.viewer.id, ava: "__manual__" };
+        state.reportCalculator = createManualReportCalculator();
         return;
       }
-      const selected = state.reportCalculatorOptions.find(item => item.numero_ava === currentAva) || state.reportCalculatorOptions[0];
+      const selected = state.reportCalculatorOptions.find(item => (
+        item.numero_ava === currentAva
+        && (!currentCallerId || String(item.caller_id || "") === String(currentCallerId))
+      )) || state.reportCalculatorOptions.find(item => item.numero_ava === currentAva) || state.reportCalculatorOptions[0];
       state.reportContext = {
         guildId: state.guildId,
-        callerId: state.data.viewer.id,
+        callerId: selected.caller_id || state.data.viewer.id,
         ava: selected.numero_ava,
       };
     }
@@ -2126,41 +3357,60 @@
       const select = document.getElementById("reportCalculatorSelect");
       const options = state.reportCalculatorOptions || [];
       const currentAva = state.reportContext?.ava || "";
-      select.innerHTML = `<option value="">Selecciona una Ava</option>` + options.map(option => {
-        const selected = option.numero_ava === currentAva ? " selected" : "";
+      const currentCallerId = state.reportContext?.callerId || "";
+      const currentKey = currentAva === "__manual__" || !currentAva ? "__manual__" : `${currentCallerId}:${currentAva}`;
+      select.innerHTML = `<option value="__manual__"${currentKey === "__manual__" ? " selected" : ""}>Calculadora manual</option>` + options.map(option => {
+        const optionKey = `${option.caller_id || ""}:${option.numero_ava}`;
+        const selected = optionKey === currentKey ? " selected" : "";
         const suffix = option.report_rejected ? " - Rechazado" : option.report_sent ? " - Enviado" : "";
-        return `<option value="${escapeHtml(option.numero_ava)}"${selected}>${escapeHtml(option.title)}${escapeHtml(suffix)}</option>`;
+        return `<option value="${escapeHtml(optionKey)}"${selected}>${escapeHtml(option.title)}${escapeHtml(suffix)}</option>`;
       }).join("");
-      select.disabled = options.length === 0;
+      select.disabled = false;
     }
 
     function reportCalculatorValues() {
       const participants = state.reportCalculator?.participants || [];
-      const participantCount = participants.length;
+      const splitParticipantWeight = participants.reduce(
+        (total, participant) => total + reportParticipantSplitWeight(participant),
+        0
+      );
       const mode = document.getElementById("reportSplitMode").value;
       const config = applyReportModeVisibility(mode);
       const items = config.showItems ? parseReportAmount(document.getElementById("reportItems").value) : 0;
       const silver = config.showSilver ? parseReportAmount(document.getElementById("reportSilver").value) : 0;
-      const mapCost = config.showCosts ? parseReportAmount(document.getElementById("reportMapCost").value) : 0;
-      const repairCost = config.showCosts ? parseReportAmount(document.getElementById("reportRepairCost").value) : 0;
+      const mapCost = config.showMapCost ? parseReportAmount(document.getElementById("reportMapCost").value) : 0;
+      const repairCost = config.showRepairCost ? parseReportAmount(document.getElementById("reportRepairCost").value) : 0;
       const callerPercent = config.showBothExtras ? parseReportPercentage(document.getElementById("reportCallerPercent").value) : 0;
       const callerPayment = config.showBothExtras ? Math.floor(silver * callerPercent / 100) : 0;
       const looterPayment = config.showBothExtras ? parseReportAmount(document.getElementById("reportLooterPayment").value) : 0;
       const looterUserId = config.showBothExtras && looterPayment > 0 ? document.getElementById("reportLooterUser").value : "";
-      const tabSalePercent = config.showBothExtras ? parseReportPercentage(document.getElementById("reportTabSalePercent").value) : 0;
-      const netSilver = Math.max(silver - callerPayment - looterPayment - mapCost - repairCost, 0);
-      const soldTabValue = config.showBothExtras && tabSalePercent > 0
+      const tabSalePercent = config.showTabSale ? parseReportPercentage(document.getElementById("reportTabSalePercent").value) : 0;
+      const splitModifiers = collectReportSplitModifiers();
+      const buildLoanDiscounts = collectReportBuildLoanDiscounts();
+      const globalModifierTotal = splitModifiers
+        .filter(modifier => modifier.target_type === "total")
+        .reduce((total, modifier) => total + reportModifierSignedAmount(modifier), 0);
+      const looterParticipant = participants.find(participant => String(participant.user_id) === String(looterUserId));
+      const looterWeight = looterParticipant ? reportParticipantSplitWeight(looterParticipant) : 0;
+      const looterExcluded = looterUserId && looterWeight < 1;
+      const effectiveLooterPayment = looterExcluded ? 0 : looterPayment;
+      const netSilver = Math.max(silver - callerPayment - effectiveLooterPayment - mapCost - repairCost, 0);
+      const soldTabValue = config.showTabSale && tabSalePercent > 0
         ? Math.floor(items * ((100 - tabSalePercent) / 100))
         : 0;
-      const splitParticipantCount = participantCount - (looterPayment > 0 && looterUserId ? 1 : 0);
+      const splitParticipantCount = splitParticipantWeight - (effectiveLooterPayment > 0 && looterUserId ? 1 : 0);
       let itemPool = 0;
       let silverPool = 0;
-      if (mode === "items") itemPool = items;
-      else if (mode === "silver") silverPool = netSilver;
+      if (mode === "items") itemPool = Math.max((tabSalePercent > 0 ? soldTabValue : items) + silver - mapCost - repairCost, 0);
+      else if (mode === "silver") silverPool = items + netSilver;
       else if (tabSalePercent > 0) silverPool = Math.max(netSilver - callerPayment, 0) + soldTabValue;
       else {
         itemPool = items;
         silverPool = netSilver;
+      }
+      if (globalModifierTotal) {
+        if (mode === "items") itemPool = Math.max(itemPool + globalModifierTotal, 0);
+        else silverPool = Math.max(silverPool + globalModifierTotal, 0);
       }
       return {
         mode,
@@ -2171,10 +3421,15 @@
         repairCost,
         callerPercent,
         callerPayment,
-        looterPayment,
+        looterPayment: effectiveLooterPayment,
+        requestedLooterPayment: looterPayment,
         looterUserId,
+        looterExcluded,
         tabSalePercent,
         soldTabValue,
+        splitModifiers,
+        buildLoanDiscounts,
+        globalModifierTotal,
         splitParticipantCount: Math.max(splitParticipantCount, 0),
         itemPool,
         silverPool,
@@ -2184,43 +3439,612 @@
       };
     }
 
+    function buildReportCalculatorPayload({ sendToChannel = false, includeProof = false } = {}) {
+      if (!state.reportCalculator) return null;
+      const mode = document.getElementById("reportSplitMode").value;
+      const config = reportCalculatorModeConfig(mode);
+      const isManual = Boolean(state.reportCalculator.manual);
+      return {
+        guild_id: state.reportCalculator.guild_id,
+        caller_id: state.reportCalculator.caller_id,
+        numero_ava: state.reportCalculator.numero_ava,
+        manual: isManual,
+        manual_title: isManual ? manualReportTitle() : "",
+        participant_count: isManual ? String(manualReportParticipantCount()) : "",
+        split_mode: mode,
+        send_to_channel: isManual ? false : sendToChannel,
+        estimated: document.getElementById("reportEstimated").value,
+        items: config.showItems ? document.getElementById("reportItems").value : "",
+        silver: config.showSilver ? document.getElementById("reportSilver").value : "",
+        costs: (config.showMapCost || config.showRepairCost) ? `mapa=${config.showMapCost ? document.getElementById("reportMapCost").value : ""}; repa=${config.showRepairCost ? document.getElementById("reportRepairCost").value : ""}` : "",
+        caller_percentage: config.showBothExtras ? document.getElementById("reportCallerPercent").value : "",
+        looter_payment: config.showBothExtras && !findReportSplitExclusion(document.getElementById("reportLooterUser").value) ? document.getElementById("reportLooterPayment").value : "",
+        looter_user_id: config.showBothExtras && !findReportSplitExclusion(document.getElementById("reportLooterUser").value) ? document.getElementById("reportLooterUser").value : "",
+        tab_sale_percentage: config.showTabSale ? document.getElementById("reportTabSalePercent").value : "",
+        adjustments: "",
+        split_exclusions: reportSplitExclusions(),
+        split_modifiers: collectReportSplitModifiers(),
+        build_loan_discounts: collectReportBuildLoanDiscounts({ includeProof }),
+        fines: collectReportFines({ includeProof }),
+        chest_table_id: isPersistedChestId(state.chestTable?.id) && (state.chestTable?.rows || []).length ? String(state.chestTable.id) : "",
+      };
+    }
+
+    function reportFinalTextFromPreview(preview) {
+      return String(preview?.evaluation_content || preview?.content || "");
+    }
+
+    function setReportCopyStatus(message = "", tone = "") {
+      const status = document.getElementById("reportCopyStatus");
+      if (!status) return;
+      status.textContent = message;
+      status.dataset.tone = tone;
+    }
+
+    function syncReportCopyButton() {
+      const button = document.getElementById("copyReportFinalButton");
+      if (!button) return;
+      button.disabled = state.reportSubmitting || !state.reportCalculator || !state.reportFinalPreviewText;
+    }
+
+    function renderReportFinalPreview(preview) {
+      const previewBox = document.getElementById("reportFinalPreview");
+      const warningsBox = document.getElementById("reportPreviewWarnings");
+      const warnings = preview?.warnings || [];
+      const previewText = reportFinalTextFromPreview(preview);
+      const finalText = preview?.copyable === false ? "" : previewText;
+      state.reportFinalPreviewText = finalText;
+      previewBox.textContent = previewText || "Completa los datos para ver el informe final.";
+      warningsBox.hidden = warnings.length === 0;
+      warningsBox.innerHTML = warnings.map(warning => (
+        `<div class="report-preview-warning">${escapeHtml(warning)}</div>`
+      )).join("");
+      syncReportCopyButton();
+    }
+
+    async function fetchReportFinalPreview() {
+      const payload = buildReportCalculatorPayload({ sendToChannel: false, includeProof: false });
+      if (!payload) throw new Error("No hay una Ava cargada.");
+      const response = await fetch("/api/report-calculator/preview", {
+        method: "POST",
+        headers: csrfHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify(payload)
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error || "No pude generar la vista previa.");
+      return body.preview;
+    }
+
+    async function copyTextToClipboard(text) {
+      if (navigator.clipboard?.writeText && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+        return;
+      }
+
+      const textarea = document.createElement("textarea");
+      textarea.value = text;
+      textarea.setAttribute("readonly", "");
+      textarea.style.position = "fixed";
+      textarea.style.top = "-9999px";
+      textarea.style.opacity = "0";
+      document.body.appendChild(textarea);
+      textarea.focus();
+      textarea.select();
+      try {
+        if (!document.execCommand("copy")) {
+          throw new Error("El navegador rechazo la copia al portapapeles.");
+        }
+      } finally {
+        textarea.remove();
+      }
+    }
+
+    async function copyReportFinalPreview() {
+      const button = document.getElementById("copyReportFinalButton");
+      if (button) button.disabled = true;
+      setReportCopyStatus("Generando...", "");
+      try {
+        const preview = await fetchReportFinalPreview();
+        renderReportFinalPreview(preview);
+        const finalText = reportFinalTextFromPreview(preview);
+        if (!finalText) throw new Error("No hay informe final para copiar.");
+        await copyTextToClipboard(finalText);
+        setReportCopyStatus("Copiado.", "success");
+      } catch (error) {
+        setReportCopyStatus(error.message || "No pude copiar.", "error");
+      } finally {
+        syncReportCopyButton();
+      }
+    }
+
+    function scheduleReportPreview() {
+      window.clearTimeout(state.reportPreviewTimer);
+      if (!state.reportCalculator) {
+        renderReportFinalPreview(null);
+        return;
+      }
+      state.reportPreviewTimer = window.setTimeout(async () => {
+        const requestId = (state.reportPreviewRequestId || 0) + 1;
+        state.reportPreviewRequestId = requestId;
+        try {
+          const preview = await fetchReportFinalPreview();
+          if (requestId !== state.reportPreviewRequestId) return;
+          renderReportFinalPreview(preview);
+        } catch (error) {
+          if (requestId !== state.reportPreviewRequestId) return;
+          renderReportFinalPreview({
+            content: "No pude generar la vista previa todavia.",
+            copyable: false,
+            warnings: [error.message]
+          });
+        }
+      }, 250);
+    }
+
+    function parseChestAmount(value) {
+      const text = String(value || "").trim();
+      if (!text || text === "-") return 0;
+      if (text.startsWith("-")) return 0;
+      const digits = text.replace(/\D/g, "");
+      return digits ? Number(digits) : 0;
+    }
+
+    function normalizeChestTableDraft() {
+      const table = state.chestTable;
+      if (!table) return null;
+      return {
+        ...table,
+        name: table.name || "Cofres",
+        columns: [...(table.columns || [])],
+        rows: (table.rows || []).map((row, index) => ({
+          ...row,
+          name: `Cofre ${index + 1}`,
+          position: index + 1,
+        })),
+        cells: { ...(table.cells || {}) },
+      };
+    }
+
+    function chestTableTotals(table = state.chestTable) {
+      const columns = table?.columns || [];
+      const rows = table?.rows || [];
+      const cells = table?.cells || {};
+      const columnTotals = {};
+      const rowTotals = {};
+      let grandTotal = 0;
+      columns.forEach(column => { columnTotals[String(column.id)] = 0; });
+      rows.forEach(row => {
+        const rowId = String(row.id);
+        let rowTotal = 0;
+        columns.forEach(column => {
+          const columnId = String(column.id);
+          const value = parseChestAmount(cells[rowId]?.[columnId]);
+          columnTotals[columnId] += value;
+          rowTotal += column.operation === "-" ? -value : value;
+        });
+        rowTotals[rowId] = rowTotal;
+        grandTotal += rowTotal;
+      });
+      return { rows: rowTotals, columns: columnTotals, grand_total: grandTotal };
+    }
+
+    function chestColumnByRole(role) {
+      const columns = state.chestTable?.columns || [];
+      if (role === "loot") {
+        return columns.find(column => String(column.name || "").trim().toUpperCase() === "LQS") || columns[0] || null;
+      }
+      if (role === "remaining") {
+        return columns.find(column => String(column.name || "").trim().toUpperCase() === "LQQ") || columns[1] || null;
+      }
+      return null;
+    }
+
+    function chestEstimateValues() {
+      const table = state.chestTable;
+      if (!table || !(table.rows || []).length) {
+        return { enabled: false, loot: 0, remaining: 0 };
+      }
+      const totals = chestTableTotals(table);
+      const lootColumn = chestColumnByRole("loot");
+      const remainingColumn = chestColumnByRole("remaining");
+      return {
+        enabled: true,
+        loot: lootColumn ? totals.columns[String(lootColumn.id)] || 0 : 0,
+        remaining: remainingColumn ? totals.columns[String(remainingColumn.id)] || 0 : 0,
+      };
+    }
+
+    function applyChestEstimateToReport() {
+      const input = document.getElementById("reportEstimated");
+      if (!input) return chestEstimateValues();
+      const chestValues = chestEstimateValues();
+      input.readOnly = chestValues.enabled;
+      input.classList.toggle("readonly-from-chests", chestValues.enabled);
+      if (chestValues.enabled) {
+        input.value = chestValues.loot ? formatNumber(chestValues.loot) : "";
+        input.title = "Estimado calculado desde LQS de los cofres.";
+      } else {
+        input.title = "";
+      }
+      return chestValues;
+    }
+
+    function nextChestTempId(prefix) {
+      state.chestTempId = (state.chestTempId || 0) + 1;
+      return `${prefix}_${Date.now()}_${state.chestTempId}`;
+    }
+
+    function chestGuildId() {
+      return String(state.guildId || state.reportCalculator?.guild_id || state.reportContext?.guildId || "");
+    }
+
+    function isPersistedChestId(value) {
+      return /^\d+$/.test(String(value || ""));
+    }
+
+    function ensureLocalChestTable() {
+      if (state.chestTable) return state.chestTable;
+      state.chestTable = {
+        id: "",
+        guild_id: chestGuildId(),
+        name: "Cofres",
+        columns: [
+          { id: "local_lqs", name: "LQS", operation: "+", position: 1 },
+          { id: "local_lqq", name: "LQQ", operation: "+", position: 2 },
+        ],
+        rows: [],
+        cells: {},
+        images: [],
+        totals: { rows: {}, columns: {}, grand_total: 0 },
+      };
+      state.chestTableDirty = true;
+      return state.chestTable;
+    }
+
+    async function loadChestTables({ force = false } = {}) {
+      const guildId = chestGuildId();
+      if (!guildId) return;
+      if (!force && state.chestTablesGuildId === guildId && state.chestTables.length) return;
+      const params = new URLSearchParams({ guild_id: guildId });
+      const response = await fetch(`/api/chest-tables?${params.toString()}`, { cache: "no-store" });
+      const payload = await readJsonResponse(response);
+      if (!response.ok) throw new Error(payload.error || "No pude cargar las tablas de cofres.");
+      state.chestTables = payload.tables || [];
+      state.chestTablesGuildId = guildId;
+      const selectedId = localStorage.getItem(`dashboardChestTable:${guildId}`) || state.chestTables[0]?.id || "";
+      if (selectedId) await loadChestTable(selectedId);
+      else state.chestTable = null;
+    }
+
+    async function loadChestTable(tableId) {
+      const guildId = chestGuildId();
+      if (!guildId || !tableId) return;
+      const params = new URLSearchParams({ guild_id: guildId, table_id: tableId });
+      const response = await fetch(`/api/chest-tables?${params.toString()}`, { cache: "no-store" });
+      const payload = await readJsonResponse(response);
+      if (!response.ok) throw new Error(payload.error || "No pude cargar esa tabla de cofres.");
+      state.chestTable = payload.table || null;
+      state.chestTableDirty = false;
+      if (state.chestTable?.id) localStorage.setItem(`dashboardChestTable:${guildId}`, state.chestTable.id);
+      renderChestTables();
+    }
+
+    async function createChestTable() {
+      const guildId = chestGuildId();
+      if (!guildId) throw new Error("Selecciona un servidor antes de agregar cofres.");
+      const response = await fetch("/api/chest-tables", {
+        method: "POST",
+        headers: csrfHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ guild_id: guildId, name: "Cofres" })
+      });
+      const payload = await readJsonResponse(response);
+      if (!response.ok) throw new Error(payload.error || "No pude crear la tabla de cofres.");
+      state.chestTables = payload.tables || [];
+      state.chestTable = payload.table || null;
+      state.chestTableDirty = false;
+      state.chestTableStatus = "";
+      renderChestTables();
+    }
+
+    async function saveChestTable({ silent = false } = {}) {
+      const table = normalizeChestTableDraft();
+      const guildId = chestGuildId();
+      if (!guildId || !table?.id || !isPersistedChestId(table.id)) return;
+      const response = await fetch("/api/chest-tables", {
+        method: "POST",
+        headers: csrfHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ guild_id: guildId, table_id: table.id, table })
+      });
+      const payload = await readJsonResponse(response);
+      if (!response.ok) throw new Error(payload.error || "No pude guardar la tabla de cofres.");
+      state.chestTables = payload.tables || state.chestTables;
+      state.chestTable = payload.table || table;
+      state.chestTableDirty = false;
+      state.chestTableStatus = silent ? "" : "Cofres guardados.";
+      renderChestTables();
+    }
+
+    function remapChestCells(cells, columnMap) {
+      const remapped = {};
+      Object.entries(cells || {}).forEach(([rowId, rowCells]) => {
+        remapped[rowId] = {};
+        Object.entries(rowCells || {}).forEach(([columnId, value]) => {
+          remapped[rowId][String(columnMap[columnId] || columnId)] = value;
+        });
+      });
+      return remapped;
+    }
+
+    async function syncChestTableNow({ silent = true } = {}) {
+      const table = state.chestTable;
+      const guildId = chestGuildId();
+      if (!table || !guildId) return;
+      if (isPersistedChestId(table.id)) {
+        await saveChestTable({ silent });
+        return;
+      }
+
+      const localTable = normalizeChestTableDraft();
+      await createChestTable();
+      const serverTable = state.chestTable;
+      if (!serverTable?.id) return;
+      const serverLootColumn = chestColumnByRole("loot");
+      const serverRemainingColumn = chestColumnByRole("remaining");
+      const localLootColumn = (localTable.columns || [])[0];
+      const localRemainingColumn = (localTable.columns || [])[1];
+      const columnMap = {
+        [String(localLootColumn?.id || "")]: serverLootColumn?.id,
+        [String(localRemainingColumn?.id || "")]: serverRemainingColumn?.id,
+      };
+      state.chestTable = {
+        ...serverTable,
+        rows: localTable.rows || [],
+        cells: remapChestCells(localTable.cells || {}, columnMap),
+        images: [],
+      };
+      state.chestTableDirty = true;
+      await saveChestTable({ silent });
+    }
+
+    function scheduleChestAutosave() {
+      window.clearTimeout(state.chestAutosaveTimer);
+      state.chestAutosaveTimer = window.setTimeout(() => {
+        syncChestTableNow({ silent: true }).then(() => {
+          renderReportCalculator();
+        }).catch(error => {
+          state.chestTableStatus = error.message;
+          renderChestTables();
+        });
+      }, 450);
+    }
+
+    async function deleteChestTable() {
+      const table = state.chestTable;
+      if (!state.guildId || !table?.id) return;
+      if (!window.confirm(`Eliminar ${table.name || "esta tabla de cofres"}?`)) return;
+      const response = await fetch("/api/chest-tables", {
+        method: "DELETE",
+        headers: csrfHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ guild_id: state.guildId, table_id: table.id })
+      });
+      const payload = await readJsonResponse(response);
+      if (!response.ok) throw new Error(payload.error || "No pude eliminar la tabla.");
+      state.chestTables = payload.tables || [];
+      state.chestTable = null;
+      state.chestTableDirty = false;
+      state.chestTableStatus = "Tabla eliminada.";
+      if (state.chestTables[0]?.id) await loadChestTable(state.chestTables[0].id);
+      else renderChestTables();
+    }
+
+    function setChestDirty(message = "Cambios sin guardar.") {
+      state.chestTableDirty = true;
+      state.chestTableStatus = message;
+      renderChestTables();
+      scheduleChestAutosave();
+    }
+
+    async function addChestRow() {
+      ensureLocalChestTable();
+      const rows = state.chestTable.rows || [];
+      rows.push({ id: nextChestTempId("row"), name: `Cofre ${rows.length + 1}`, position: rows.length + 1 });
+      state.chestTable.rows = rows;
+      state.chestTableDirty = true;
+      state.chestTableStatus = "";
+      renderReportCalculator();
+      scheduleChestAutosave();
+    }
+
+    function chestImageFor(rowId, imageType) {
+      return (state.chestTable?.images || []).find(image => (
+        String(image.row_id || "") === String(rowId || "")
+        && String(image.image_type || "") === String(imageType || "")
+      )) || null;
+    }
+
+    function renderChestTables() {
+      const select = document.getElementById("chestTableSelect");
+      const wrap = document.getElementById("chestTableWrap");
+      if (!select || !wrap) return;
+      const table = state.chestTable;
+      select.innerHTML = state.chestTables.length
+        ? state.chestTables.map(item => `<option value="${escapeHtml(item.id)}"${String(table?.id || "") === String(item.id) ? " selected" : ""}>${escapeHtml(item.name || `Tabla ${item.id}`)}</option>`).join("")
+        : `<option value="">Sin tablas</option>`;
+      const deleteButton = document.getElementById("deleteChestTableButton");
+      if (deleteButton) deleteButton.disabled = !table;
+      document.getElementById("addChestRowButton").disabled = false;
+      document.getElementById("chestTableStatus").textContent = state.chestTableStatus || "";
+      if (!table || !(table.rows || []).length) {
+        wrap.innerHTML = "";
+        if (state.chestTableStatus === "La tabla debe tener al menos un cofre.") {
+          state.chestTableStatus = "";
+          document.getElementById("chestTableStatus").textContent = "";
+        }
+        return;
+      }
+
+      const lootColumn = chestColumnByRole("loot");
+      const remainingColumn = chestColumnByRole("remaining");
+      const rows = table.rows || [];
+      const cells = table.cells || {};
+      const totals = chestTableTotals(table);
+      wrap.innerHTML = `
+        <table class="chest-table-grid">
+          <thead>
+            <tr>
+              <th class="sticky-col">Cofre</th>
+              <th class="chest-amount-col">LQS</th>
+              <th>Subir evidencia</th>
+              <th class="chest-amount-col">LQQ</th>
+              <th>Subir evidencia</th>
+              <th class="chest-action-col" aria-label="Acciones"></th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows.map((row, rowIndex) => {
+              const rowId = String(row.id);
+              const lootColumnId = String(lootColumn?.id || "");
+              const remainingColumnId = String(remainingColumn?.id || "");
+              const lootValue = parseChestAmount(cells[rowId]?.[lootColumnId]);
+              const remainingValue = parseChestAmount(cells[rowId]?.[remainingColumnId]);
+              const lootImage = chestImageFor(rowId, "lqs");
+              const remainingImage = chestImageFor(rowId, "lqq");
+              return `
+                <tr data-row-id="${escapeHtml(rowId)}">
+                  <th class="sticky-col">${escapeHtml(`Cofre ${rowIndex + 1}`)}</th>
+                  <td><input class="chest-cell-input" inputmode="numeric" data-column-id="${escapeHtml(lootColumnId)}" value="${lootValue ? escapeHtml(formatNumber(lootValue)) : ""}" placeholder="0"></td>
+                  <td>${chestEvidenceControl(rowId, "lqs", lootImage)}</td>
+                  <td><input class="chest-cell-input" inputmode="numeric" data-column-id="${escapeHtml(remainingColumnId)}" value="${remainingValue ? escapeHtml(formatNumber(remainingValue)) : ""}" placeholder="0"></td>
+                  <td>${chestEvidenceControl(rowId, "lqq", remainingImage)}</td>
+                  <td class="chest-action-cell">
+                    <button class="mini-action danger" type="button" data-chest-delete-row="${escapeHtml(rowId)}" title="Eliminar cofre" aria-label="Eliminar ${escapeHtml(`Cofre ${rowIndex + 1}`)}">x</button>
+                  </td>
+                </tr>
+              `;
+            }).join("")}
+          </tbody>
+          <tfoot>
+            <tr>
+              <th class="sticky-col">Total</th>
+              <td class="chest-total-cell">${formatNumber(lootColumn ? totals.columns[String(lootColumn.id)] || 0 : 0)}</td>
+              <td></td>
+              <td class="chest-total-cell">${formatNumber(remainingColumn ? totals.columns[String(remainingColumn.id)] || 0 : 0)}</td>
+              <td></td>
+              <td></td>
+            </tr>
+          </tfoot>
+        </table>
+      `;
+    }
+
+    function chestEvidenceControl(rowId, imageType, image) {
+      const label = image ? "Ver evidencia" : "Subir evidencia";
+      const preview = image
+        ? `<a class="chest-evidence-link" href="${escapeHtml(image.url)}" target="_blank" rel="noreferrer">${escapeHtml(label)}</a>`
+        : "";
+      return `
+        <label class="mini-upload">
+          <input class="chest-evidence-input" type="file" accept=".png,.jpg,.jpeg,.webp,image/png,image/jpeg,image/webp" data-row-id="${escapeHtml(rowId)}" data-image-type="${escapeHtml(imageType)}">
+          <span>${image ? "Cambiar" : "Subir"}</span>
+        </label>
+        ${preview}
+      `;
+    }
+
     function renderReportCalculator() {
-      const calculator = state.reportCalculator;
+      let calculator = state.reportCalculator;
+      if (calculator?.manual) {
+        calculator = { ...calculator, title: manualReportTitle(), participants: manualReportParticipants() };
+        state.reportCalculator = calculator;
+      }
       const participants = calculator?.participants || [];
+      const splitExclusions = syncReportSplitExclusions(participants);
       renderReportCalculatorOptions();
+      document.getElementById("reportManualFields").hidden = !calculator?.manual;
+      document.getElementById("addReportFineButton").disabled = !calculator;
       populateReportLooterOptions(participants);
       syncReportFineParticipantOptions(participants);
+      syncReportModifierParticipantOptions(participants);
+      syncReportBuildLoanParticipantOptions(participants);
       const selectedLooterId = document.getElementById("reportLooterUser").value;
       document.getElementById("reportCalculatorParticipantsTotal").textContent = participants.length;
       document.getElementById("reportCalculatorSubtitle").textContent = calculator
-        ? `${calculator.title} - Caller: ${calculator.caller_name || calculator.caller_id}`
-        : "Abre esta seccion desde el boton Enviar informe de una Ava finalizada.";
+        ? calculator.manual
+          ? `${calculator.title} - modo manual`
+          : `${calculator.title} - Caller: ${calculator.caller_name || calculator.caller_id}`
+        : "Usa la calculadora manual o selecciona una Ava finalizada.";
       document.getElementById("reportParticipantsList").innerHTML = participants.length
-        ? participants.map(participant => `
-            <article class="report-participant-card">
+        ? participants.map(participant => {
+            const exclusion = findReportSplitExclusion(participant.user_id);
+            const isExcluded = Boolean(exclusion);
+            return `
+            <article class="report-participant-card${isExcluded ? " excluded" : ""}">
               <div class="report-participant-head">
                 <strong>${escapeHtml(`${participant.index}. ${participant.slot}`)}</strong>
-                ${participant.user_id === selectedLooterId ? '<span class="report-participant-role">Looter</span>' : ''}
+                <span class="report-participant-tags">
+                  ${participant.user_id === selectedLooterId ? '<span class="report-participant-role">Looter</span>' : ''}
+                  ${isExcluded ? '<span class="report-participant-role excluded">Excluido</span>' : ''}
+                </span>
               </div>
               <span class="report-participant-name">${escapeHtml(participant.display_name || participant.user_id)}</span>
+              ${isExcluded ? `
+                <label class="report-exclusion-reason-field">
+                  <span>Motivo opcional</span>
+                  <input class="report-exclusion-reason" data-user-id="${escapeHtml(participant.user_id)}" type="text" maxlength="300" value="${escapeHtml(exclusion.reason || "")}" placeholder="Ej: no participa del loot">
+                </label>
+                <label class="report-exclusion-reason-field">
+                  <span>Descuento actividad</span>
+                  <input class="report-exclusion-percentage" data-user-id="${escapeHtml(participant.user_id)}" type="text" maxlength="20" value="${escapeHtml(exclusion.activity_percentage || "")}" placeholder="Ej: 50%">
+                </label>
+                <button class="action-button danger report-exclusion-toggle" data-action="remove" data-user-id="${escapeHtml(participant.user_id)}" type="button">Quitar exclusion</button>
+              ` : `
+                <button class="action-button report-exclusion-toggle" data-action="exclude" data-user-id="${escapeHtml(participant.user_id)}" type="button">Excluir del split</button>
+              `}
             </article>
-          `).join("")
+          `;
+          }).join("")
         : `<article class="report-participant-card">
               <div class="report-participant-head">
                 <strong>Sin integrantes cargados</strong>
               </div>
-              <span class="muted">Abre una Ava finalizada desde Discord.</span>
+              <span class="muted">Indica la cantidad de participantes para usar la calculadora manual.</span>
             </article>
           `;
 
       const values = reportCalculatorValues();
+      const chestValues = applyChestEstimateToReport();
       document.getElementById("reportSplitParticipantsTotal").textContent = formatNumber(values.splitParticipantCount);
       document.getElementById("reportItemsPerUserStat").hidden = values.itemPool <= 0;
       document.getElementById("reportSilverPerUserStat").hidden = values.silverPool <= 0;
       document.getElementById("reportItemsPerUser").textContent = formatNumber(values.itemPerUser);
       document.getElementById("reportSilverPerUser").textContent = formatNumber(values.silverPerUser);
       document.getElementById("reportNetTotal").textContent = formatNumber(values.total);
+      if (calculator?.manual) document.getElementById("reportDeliveryMode").value = "preview";
+      document.getElementById("reportDeliveryMode").disabled = Boolean(calculator?.manual);
+      const deliveryMode = document.getElementById("reportDeliveryMode").value;
+      const willSendReport = deliveryMode !== "preview";
+      document.getElementById("reportDeliveryStatus").textContent = willSendReport
+        ? "El informe se enviara al canal de evaluacion configurado."
+        : calculator?.manual
+          ? "Modo manual: la vista previa se actualiza automaticamente."
+          : "El informe se guardara como vista previa y no se enviara a Discord.";
+      document.getElementById("submitReportCalculatorButton").hidden = Boolean(calculator?.manual);
+      document.getElementById("submitReportCalculatorButton").textContent = willSendReport
+        ? "Enviar informe a evaluacion"
+        : "Guardar vista previa";
       const breakdown = [];
+      if (chestValues.enabled) {
+        breakdown.push({
+          label: "Estimado de lo que salio",
+          value: formatNumber(chestValues.loot),
+          tone: "accent"
+        });
+        breakdown.push({
+          label: "Lo que quedo",
+          value: formatNumber(chestValues.remaining),
+          tone: "accent"
+        });
+      }
       if (values.itemPool) {
         breakdown.push({
           label: "Items netos",
@@ -2235,36 +4059,66 @@
           tone: "accent"
         });
       }
-      if (values.config.showCosts) {
-        if (values.callerPayment) {
-          breakdown.push({
-            label: `Caller (${values.callerPercent}%)`,
-            value: `-${formatNumber(values.callerPayment)}`,
-            tone: "negative"
-          });
-        }
-        if (values.looterPayment) {
-          breakdown.push({
-            label: "Pago looter",
-            value: `-${formatNumber(values.looterPayment)}`,
-            tone: "negative"
-          });
-        }
-        if (values.mapCost) {
-          breakdown.push({
-            label: "Mapa",
-            value: `-${formatNumber(values.mapCost)}`,
-            tone: "negative"
-          });
-        }
-        if (values.repairCost) {
-          breakdown.push({
-            label: "Reparaciones",
-            value: `-${formatNumber(values.repairCost)}`,
-            tone: "negative"
-          });
-        }
+      if (values.tabSalePercent) {
+        breakdown.push({
+          label: `Venta de tab (${values.tabSalePercent}%)`,
+          value: `-${formatNumber(Math.max(values.items - values.soldTabValue, 0))}`,
+          tone: "negative"
+        });
       }
+      if (values.callerPayment) {
+        breakdown.push({
+          label: `Caller (${values.callerPercent}%)`,
+          value: `-${formatNumber(values.callerPayment)}`,
+          tone: "negative"
+        });
+      }
+      if (values.looterPayment) {
+        breakdown.push({
+          label: "Pago looter",
+          value: `-${formatNumber(values.looterPayment)}`,
+          tone: "negative"
+        });
+      }
+      if (values.mapCost) {
+        breakdown.push({
+          label: "Mapa",
+          value: `-${formatNumber(values.mapCost)}`,
+          tone: "negative"
+        });
+      }
+      if (values.repairCost) {
+        breakdown.push({
+          label: "Reparaciones",
+          value: `-${formatNumber(values.repairCost)}`,
+          tone: "negative"
+        });
+      }
+      values.splitModifiers.forEach(modifier => {
+        const signedAmount = reportModifierSignedAmount(modifier);
+        if (!signedAmount) return;
+        breakdown.push({
+          label: modifier.target_type === "player"
+            ? `${modifier.name} (${modifier.user_name || "Jugador"})`
+            : modifier.name,
+          value: `${signedAmount > 0 ? "+" : "-"}${formatNumber(Math.abs(signedAmount))}`,
+          tone: signedAmount > 0 ? "accent" : "negative"
+        });
+      });
+      values.buildLoanDiscounts.forEach(discount => {
+        const methodLabels = {
+          split: "split",
+          balance: "balance",
+          paid_now: "pago al momento",
+        };
+        const method = discount.collection_method || "split";
+        const amount = parseReportAmount(discount.amount);
+        breakdown.push({
+          label: `Préstamo build (${discount.user_name || "Jugador"} - ${methodLabels[method] || "split"})`,
+          value: method === "paid_now" && !amount ? "Pagado" : `${method === "paid_now" ? "" : "-"}${formatNumber(amount)}`,
+          tone: method === "paid_now" ? "accent" : "negative"
+        });
+      });
       document.getElementById("reportCalculatorBreakdown").innerHTML = breakdown.length
         ? breakdown.map(item => `
             <div class="report-breakdown-item ${item.tone ? escapeHtml(item.tone) : ""}">
@@ -2273,27 +4127,46 @@
             </div>
           `).join("")
         : `<div class="report-breakdown-empty">Completa los datos para calcular el reparto.</div>`;
-      if (values.looterPayment && !values.looterUserId) {
+      if (values.looterPayment && participants.length > 0 && !values.looterUserId) {
         document.getElementById("reportCalculatorBreakdown").innerHTML += `
           <div class="report-breakdown-empty">Selecciona quien fue el looter para excluirlo del split.</div>
         `;
       }
-      document.getElementById("submitReportCalculatorButton").disabled = !calculator || calculator.report_sent || calculator.cancelled || !calculator.finalized || (values.looterPayment > 0 && !values.looterUserId);
+      if (values.looterExcluded) {
+        document.getElementById("reportCalculatorBreakdown").innerHTML += `
+          <div class="report-breakdown-empty">El looter esta excluido y no recibira pago de looter.</div>
+        `;
+      }
+      if (splitExclusions.length) {
+        document.getElementById("reportCalculatorBreakdown").innerHTML += `
+          <div class="report-breakdown-empty">${formatNumber(splitExclusions.length)} jugador(es) excluido(s) del split.</div>
+        `;
+      }
+      const reportAlreadyGenerated = Boolean(calculator?.report_generated && !calculator?.report_rejected);
+      document.getElementById("submitReportCalculatorButton").disabled = state.reportSubmitting || !calculator || calculator.report_sent || reportAlreadyGenerated || calculator.cancelled || !calculator.finalized || (values.looterPayment > 0 && participants.length > 0 && !values.looterUserId);
+      renderChestTables();
+      syncReportCopyButton();
+      scheduleReportPreview();
     }
 
     function resetReportCalculator() {
-      ["reportEstimated", "reportItems", "reportSilver", "reportMapCost", "reportRepairCost", "reportCallerPercent", "reportLooterPayment", "reportLooterUser", "reportTabSalePercent"].forEach(id => {
+      ["reportManualTitle", "reportEstimated", "reportItems", "reportSilver", "reportMapCost", "reportRepairCost", "reportCallerPercent", "reportLooterPayment", "reportLooterUser", "reportTabSalePercent"].forEach(id => {
         document.getElementById(id).value = "";
       });
+      document.getElementById("reportManualParticipants").value = "0";
       document.getElementById("reportFinesList").innerHTML = "";
+      document.getElementById("reportModifiersList").innerHTML = "";
+      document.getElementById("reportBuildLoansList").innerHTML = "";
+      if (state.reportCalculator) state.reportCalculator.split_exclusions = [];
       document.getElementById("reportCalculatorStatus").textContent = "";
+      setReportCopyStatus();
       renderReportCalculator();
     }
 
     async function loadReportCalculator() {
       renderReportCalculatorOptions();
-      if (!state.reportContext) {
-        state.reportCalculator = null;
+      if (!state.reportContext || state.reportContext.ava === "__manual__") {
+        state.reportCalculator = createManualReportCalculator();
         renderReportCalculator();
         return;
       }
@@ -2314,6 +4187,8 @@
       }
       state.reportCalculator = payload.calculator;
       document.getElementById("reportFinesList").innerHTML = "";
+      document.getElementById("reportModifiersList").innerHTML = "";
+      document.getElementById("reportBuildLoansList").innerHTML = "";
       state.guildId = payload.calculator.guild_id;
       renderReportCalculator();
     }
@@ -2321,41 +4196,57 @@
     async function submitReportCalculator() {
       if (!state.reportCalculator) throw new Error("No hay una Ava cargada.");
       const status = document.getElementById("reportCalculatorStatus");
-      const mode = document.getElementById("reportSplitMode").value;
-      const config = reportCalculatorModeConfig(mode);
-      status.textContent = "Enviando informe al bot...";
-      const response = await fetch("/api/report-calculator", {
-        method: "POST",
-        headers: csrfHeaders({ "Content-Type": "application/json" }),
-        body: JSON.stringify({
-          guild_id: state.reportCalculator.guild_id,
-          caller_id: state.reportCalculator.caller_id,
-          numero_ava: state.reportCalculator.numero_ava,
-          split_mode: mode,
-          estimated: document.getElementById("reportEstimated").value,
-          items: config.showItems ? document.getElementById("reportItems").value : "",
-          silver: config.showSilver ? document.getElementById("reportSilver").value : "",
-          costs: config.showCosts ? `mapa=${document.getElementById("reportMapCost").value}; repa=${document.getElementById("reportRepairCost").value}` : "",
-          caller_percentage: config.showBothExtras ? document.getElementById("reportCallerPercent").value : "",
-          looter_payment: config.showBothExtras ? document.getElementById("reportLooterPayment").value : "",
-          looter_user_id: config.showBothExtras ? document.getElementById("reportLooterUser").value : "",
-          tab_sale_percentage: config.showBothExtras ? document.getElementById("reportTabSalePercent").value : "",
-          adjustments: "",
-          fines: collectReportFines(),
-        })
-      });
-      const payload = await response.json();
-      if (!response.ok) {
-        if (response.status === 404) {
-          state.reportCalculator = null;
+      if (state.reportCalculator.manual) {
+        state.reportSubmitting = true;
+        renderReportCalculator();
+        status.textContent = "Generando vista previa manual...";
+        try {
+          const preview = await fetchReportFinalPreview();
+          renderReportFinalPreview(preview);
+          status.textContent = "Vista previa manual generada.";
+        } finally {
+          state.reportSubmitting = false;
           renderReportCalculator();
-          throw new Error("Esta Ava ya no esta activa o ya fue cerrada. Abrela de nuevo desde Discord.");
         }
-        throw new Error(payload.error || "No pude enviar el informe.");
+        return;
       }
-      state.reportRequestId = payload.request.id;
-      status.textContent = "El bot esta procesando el informe...";
-      await pollReportRequest();
+
+      const sendToChannel = document.getElementById("reportDeliveryMode").value !== "preview";
+      if (state.reportBuildLoanProofReads.size) {
+        status.textContent = "Preparando imagenes de prestamos...";
+        await Promise.allSettled([...state.reportBuildLoanProofReads]);
+      }
+      if (state.chestTable && (state.chestTable.rows || []).length) {
+        status.textContent = "Guardando evidencias de cofres...";
+        await syncChestTableNow({ silent: true });
+      }
+      const payload = buildReportCalculatorPayload({ sendToChannel, includeProof: true });
+      state.reportSubmitting = true;
+      renderReportCalculator();
+      status.textContent = sendToChannel ? "Enviando informe al bot..." : "Generando vista previa...";
+      try {
+        const response = await fetch("/api/report-calculator", {
+          method: "POST",
+          headers: csrfHeaders({ "Content-Type": "application/json" }),
+          body: JSON.stringify(payload)
+        });
+        const responsePayload = await response.json();
+        if (!response.ok) {
+          if (response.status === 404) {
+            state.reportCalculator = null;
+            renderReportCalculator();
+            throw new Error("Esta Ava ya no esta activa o ya fue cerrada. Abrela de nuevo desde Discord.");
+          }
+          throw new Error(responsePayload.error || "No pude enviar el informe.");
+        }
+        state.reportRequestId = responsePayload.request.id;
+        status.textContent = sendToChannel ? "El bot esta procesando el informe..." : "El bot esta guardando la vista previa...";
+        await pollReportRequest();
+      } catch (error) {
+        state.reportSubmitting = false;
+        renderReportCalculator();
+        throw error;
+      }
     }
 
     async function pollReportRequest() {
@@ -2366,15 +4257,24 @@
       if (!response.ok) throw new Error(payload.error || "No pude consultar el envio.");
       const request = payload.request;
       if (request.status === "completed") {
-        document.getElementById("reportCalculatorStatus").textContent = "Informe enviado a evaluacion.";
-        state.reportCalculator.report_sent = true;
+        const sentToChannel = Boolean(request.result?.sent_to_channel ?? request.result?.published);
+        document.getElementById("reportCalculatorStatus").textContent = sentToChannel
+          ? "Informe enviado a evaluacion."
+          : "Informe generado y guardado como vista previa.";
+        state.reportSubmitting = false;
+        state.reportCalculator.report_sent = sentToChannel;
+        state.reportCalculator.report_generated = true;
         renderReportCalculator();
         return;
       }
       if (request.status === "error") {
+        state.reportSubmitting = false;
+        renderReportCalculator();
         throw new Error(request.error || "El bot no pudo enviar el informe.");
       }
       setTimeout(() => pollReportRequest().catch(error => {
+        state.reportSubmitting = false;
+        renderReportCalculator();
         document.getElementById("reportCalculatorStatus").textContent = error.message;
       }), 1500);
     }
@@ -2410,11 +4310,13 @@
       document.getElementById("templatesSection").hidden = state.section !== "templates";
       document.getElementById("lootSection").hidden = state.section !== "loot";
       document.getElementById("ticketsSection").hidden = state.section !== "tickets";
+      document.getElementById("finesSection").hidden = state.section !== "fines";
       document.getElementById("reportCalculatorSection").hidden = state.section !== "report-calculator";
       document.getElementById("registrationSection").hidden = state.section !== "registration";
       document.getElementById("welcomeSection").hidden = state.section !== "welcome";
       document.getElementById("auditSection").hidden = state.section !== "audit";
       document.getElementById("permissionsSection").hidden = state.section !== "permissions";
+      document.getElementById("adminPanelSection").hidden = state.section !== "admin-panel";
       document.getElementById("searchInput").hidden = state.section !== "economy";
       document.querySelectorAll(".section-button").forEach(button => {
         button.hidden = !canUseSection(button.dataset.section);
@@ -2432,8 +4334,10 @@
         economy: "economy",
         templates: "templates",
         tickets: "tickets",
+        fines: "fines",
         audit: "audit",
         permissions: "permissions",
+        "admin-panel": "adminPanel",
         registration: "registration"
       };
       if (sectionAccess[section]) return Boolean(access[sectionAccess[section]]);
@@ -2485,6 +4389,8 @@
       state.ticketRecordSearch = "";
       state.ticketRecordFilters = createPageState(10);
       state.selectedTicketRecordId = "";
+      state.selectedTicketTranscriptMessages = [];
+      state.selectedTicketTranscriptRecord = null;
       state.selectedLiveTicketId = "";
       state.ticketLiveMessages = [];
       state.auditCategories = [];
@@ -2494,6 +4400,23 @@
       state.auditFilters = createPageState(12);
       state.botPermissions = {};
       state.botPermissionOptions = [];
+      state.adminGuilds = [];
+      state.adminOverview = null;
+      state.adminMessageChannels = [];
+      state.adminMessageChannelsStatus = "idle";
+      state.adminMessageChannelsError = "";
+      state.adminBotMessageRequestId = "";
+      state.adminServerBackups = [];
+      state.adminServerBackupsStatus = "idle";
+      state.adminServerBackupsError = "";
+      state.selectedAdminBackupId = "";
+      state.selectedAdminBackupDetail = null;
+      state.adminBackupReplaceMode = false;
+      state.adminTemplateTargetGuildId = "";
+      state.adminTemplateClearTarget = false;
+      state.adminTemplatePreview = null;
+      state.adminTemplateRequestId = "";
+      state.adminTemplateStatus = "";
       state.albionRegistrationConfig = null;
       state.albionRegistrations = [];
       state.albionRegistrationSearch = "";
@@ -2501,6 +4424,10 @@
       state.reportCalculator = null;
       state.reportCalculatorOptions = [];
       state.reportRequestId = "";
+      state.chestTables = [];
+      state.chestTable = null;
+      state.chestTableStatus = "";
+      state.chestTableDirty = false;
       state.fineConfig = null;
       state.economyGuildId = "";
       state.search = "";
@@ -2518,8 +4445,10 @@
       state.fineConfigGuildId = "";
       state.auditGuildId = "";
       state.permissionsGuildId = "";
+      state.adminPanelGuildId = "";
       state.albionRegistrationGuildId = "";
       state.reportCalculatorOptionsGuildId = "";
+      state.chestTablesGuildId = "";
       state.ticketPanelsDirty = false;
       if (state.reportContext && state.reportContext.guildId !== state.guildId) {
         state.reportContext = null;
@@ -2531,8 +4460,10 @@
         economy: ["status"],
         templates: ["templateStatus"],
         tickets: ["ticketStatus"],
+        fines: ["fineConfigStatus"],
         audit: ["auditStatus"],
         permissions: ["permissionsStatus"],
+        "admin-panel": ["adminPanelStatus"],
         registration: ["albionRegistrationStatus"],
         "report-calculator": ["reportCalculatorStatus"]
       }[section] || [];
@@ -2654,11 +4585,13 @@
         readJsonResponse,
         applyPingTemplatesPayload,
         ensureDiscordMetadata: loadDiscordMetadata,
+        loadDashboardAccess,
         renderShell,
         renderSection,
         render,
         loadReportCalculatorOptions,
         loadReportCalculator,
+        loadChestTables,
       };
     }
 
@@ -2680,6 +4613,10 @@
 
     function loadPermissionsData(options = {}) {
       return window.NeoxDashboardRouter.load("permissions", createDashboardContext(), options);
+    }
+
+    function loadAdminPanelData(options = {}) {
+      return window.NeoxDashboardRouter.load("admin-panel", createDashboardContext(), options);
     }
 
     function loadAlbionRegistrationData(options = {}) {
@@ -2704,6 +4641,324 @@
       return headers;
     }
 
+    function openEconomyBalanceModal(button) {
+      const userId = button.dataset.userId || "";
+      const userName = button.dataset.userName || userId || "Usuario";
+      const userStatus = button.dataset.userStatus || "Estado no verificado";
+      document.getElementById("economyBalanceUser").value = userId;
+      document.getElementById("economyBalanceAction").value = "remove";
+      document.getElementById("economyBalanceCategory").value = "silver";
+      document.getElementById("economyBalanceAmount").value = "";
+      document.getElementById("economyBalanceReason").value = "";
+      document.getElementById("economyBalanceTargetName").textContent = `${userName} (${userId})`;
+      document.getElementById("economyBalanceTargetStatus").textContent = userStatus;
+      document.getElementById("economyBalanceModal").hidden = false;
+      document.getElementById("economyBalanceAmount").focus();
+      setSectionMessage("economy", `Editando balance de ${userName}.`);
+    }
+
+    function closeEconomyBalanceModal() {
+      document.getElementById("economyBalanceModal").hidden = true;
+    }
+
+    async function selectAdminPanelGuild(guildId) {
+      guildId = String(guildId || "");
+      if (!guildId || guildId === state.guildId) return;
+      state.guildId = guildId;
+      state.data = createEmptyDashboardData({
+        ...state.data,
+        selectedGuildId: state.guildId
+      });
+      localStorage.setItem("dashboardGuildId", state.guildId);
+      resetGuildScopedData();
+      state.adminMessageChannels = [];
+      state.adminMessageChannelsStatus = "idle";
+      state.adminMessageChannelsError = "";
+      state.adminBotMessageRequestId = "";
+      state.adminServerBackups = [];
+      state.adminServerBackupsStatus = "idle";
+      state.adminServerBackupsError = "";
+      state.selectedAdminBackupId = "";
+      state.selectedAdminBackupDetail = null;
+      state.adminBackupReplaceMode = false;
+      state.adminTemplateTargetGuildId = "";
+      state.adminTemplateClearTarget = false;
+      state.adminTemplatePreview = null;
+      state.adminTemplateRequestId = "";
+      state.adminTemplateStatus = "";
+      state.section = "admin-panel";
+      localStorage.setItem("dashboardSection", state.section);
+      render();
+      await loadDashboardAccess();
+      render();
+      await loadAdminPanelData({ force: true });
+    }
+
+    async function submitEconomyBalanceChange(event) {
+      event.preventDefault();
+      if (!state.guildId) return;
+      const submitButton = document.getElementById("economyBalanceSubmit");
+      submitButton.disabled = true;
+      setSectionMessage("economy", "Aplicando cambio de balance...");
+      try {
+        const response = await fetch("/api/economy/balance", {
+          method: "POST",
+          headers: csrfHeaders({ "Content-Type": "application/json" }),
+          body: JSON.stringify({
+            guild_id: state.guildId,
+            action: document.getElementById("economyBalanceAction").value,
+            user: document.getElementById("economyBalanceUser").value,
+            category: document.getElementById("economyBalanceCategory").value,
+            amount: document.getElementById("economyBalanceAmount").value,
+            reason: document.getElementById("economyBalanceReason").value
+          })
+        });
+        const payload = await readJsonResponse(response);
+        if (!response.ok) throw new Error(payload.error || "No pude modificar el balance.");
+        const operation = payload.operation || {};
+        document.getElementById("economyBalanceAmount").value = "";
+        closeEconomyBalanceModal();
+        await loadEconomyData({ force: true });
+        setSectionMessage(
+          "economy",
+          `Balance actualizado: ${operation.player || operation.player_id || "usuario"} - ${operation.player_status || "estado no verificado"}.`
+        );
+      } finally {
+        submitButton.disabled = false;
+      }
+    }
+
+    async function submitAdminBotMessage(event) {
+      event.preventDefault();
+      if (!state.guildId) return;
+
+      const action = document.getElementById("adminBotMessageAction").value;
+      const channelId = document.getElementById("adminBotMessageChannel").value;
+      const messageId = document.getElementById("adminBotMessageId").value.trim();
+      const content = document.getElementById("adminBotMessageContent").value;
+      if (action === "delete" && !window.confirm("Vas a eliminar un mensaje enviado por el bot. Esta accion no se puede deshacer.")) {
+        return;
+      }
+
+      const submitButton = document.getElementById("adminBotMessageSubmit");
+      submitButton.disabled = true;
+      document.getElementById("adminBotMessageStatus").textContent = "Encolando solicitud...";
+      try {
+        const response = await fetch("/api/admin/bot-message", {
+          method: "POST",
+          headers: csrfHeaders({ "Content-Type": "application/json" }),
+          body: JSON.stringify({
+            guild_id: state.guildId,
+            action,
+            channel_id: channelId,
+            message_id: messageId,
+            content
+          })
+        });
+        const payload = await readJsonResponse(response);
+        if (!response.ok) throw new Error(payload.error || "No pude crear la solicitud.");
+
+        const request = payload.request || {};
+        state.adminBotMessageRequestId = request.id || "";
+        document.getElementById("adminBotMessageStatus").textContent = "Solicitud enviada al bot. Esperando confirmacion...";
+        await pollAdminBotMessageRequest(state.adminBotMessageRequestId);
+      } finally {
+        submitButton.disabled = state.adminMessageChannelsStatus !== "loaded" || !(state.adminMessageChannels || []).length;
+      }
+    }
+
+    async function createAdminServerBackup({ replaceBackupId = "" } = {}) {
+      if (!state.guildId) return;
+      const button = document.getElementById("adminCreateBackupButton");
+      button.disabled = true;
+      document.getElementById("adminServerBackupsStatus").textContent = "Creando backup...";
+      try {
+        const response = await fetch("/api/admin/server-backups", {
+          method: "POST",
+          headers: csrfHeaders({ "Content-Type": "application/json" }),
+          body: JSON.stringify({
+            guild_id: state.guildId,
+            replace_backup_id: replaceBackupId
+          })
+        });
+        const payload = await readJsonResponse(response);
+        if (response.status === 409 && payload.requires_replacement_choice) {
+          state.adminServerBackups = payload.backups || state.adminServerBackups || [];
+          state.adminBackupReplaceMode = true;
+          state.selectedAdminBackupId = "";
+          state.selectedAdminBackupDetail = null;
+          renderAdminPanel();
+          document.getElementById("adminServerBackupsStatus").textContent = "Elige que backup quieres reemplazar.";
+          return;
+        }
+        if (!response.ok) throw new Error(payload.error || "No pude crear el backup.");
+
+        state.adminBackupReplaceMode = false;
+        state.selectedAdminBackupId = String(payload.backup?.id || "");
+        state.selectedAdminBackupDetail = payload.backup || null;
+        const page = window.NeoxDashboardPages?.["admin-panel"];
+        if (page?.loadServerBackups) {
+          await page.loadServerBackups(createDashboardContext());
+        }
+        renderAdminPanel();
+        document.getElementById("adminServerBackupsStatus").textContent = "Backup creado correctamente.";
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    async function loadAdminServerBackupDetail(backupId, label = "") {
+      backupId = String(backupId || "");
+      if (!state.guildId || !backupId) return;
+      state.selectedAdminBackupId = backupId;
+      state.adminTemplatePreview = null;
+      state.adminTemplateRequestId = "";
+      state.adminTemplateStatus = "";
+      document.getElementById("adminServerBackupsStatus").textContent = "Cargando detalle...";
+      const params = new URLSearchParams({
+        guild_id: state.guildId,
+        backup_id: backupId
+      });
+      const response = await fetch(`/api/admin/server-backups?${params.toString()}`, { cache: "no-store" });
+      const payload = await readJsonResponse(response);
+      if (!response.ok) throw new Error(payload.error || "No pude cargar el backup.");
+      state.selectedAdminBackupDetail = payload.backup || null;
+      renderAdminPanel();
+      document.getElementById("adminServerBackupsStatus").textContent = `Detalle de ${label || "backup"}.`;
+    }
+
+    function adminTemplateOptions() {
+      return {
+        update_existing: Boolean(state.adminTemplateUpdateExisting),
+        include_bot_config: Boolean(state.adminTemplateIncludeBotConfig),
+        clear_target: Boolean(state.adminTemplateClearTarget)
+      };
+    }
+
+    async function previewAdminServerTemplate() {
+      if (!state.guildId || !state.selectedAdminBackupId || !state.adminTemplateTargetGuildId) return;
+      state.adminTemplateStatus = "Calculando vista previa...";
+      renderAdminPanel();
+      const response = await fetch("/api/admin/server-template/preview", {
+        method: "POST",
+        headers: csrfHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({
+          source_guild_id: state.guildId,
+          backup_id: state.selectedAdminBackupId,
+          target_guild_id: state.adminTemplateTargetGuildId,
+          options: adminTemplateOptions()
+        })
+      });
+      const payload = await readJsonResponse(response);
+      if (!response.ok) throw new Error(payload.error || "No pude generar la vista previa.");
+      state.adminTemplatePreview = payload;
+      state.adminTemplateStatus = "Vista previa lista.";
+      renderAdminPanel();
+    }
+
+    async function applyAdminServerTemplate() {
+      const confirmation = String(document.getElementById("adminTemplateConfirmation")?.value || "").trim();
+      if (confirmation.toUpperCase() !== "APLICAR") {
+        state.adminTemplateStatus = "Escribe APLICAR para confirmar.";
+        renderAdminPanel();
+        return;
+      }
+      const applyingToSameGuild = String(state.adminTemplateTargetGuildId || "") === String(state.guildId || "");
+      const confirmMessage = state.adminTemplateClearTarget
+        ? applyingToSameGuild
+          ? "Esta operacion eliminara primero roles, canales y configuracion existente de este mismo servidor, y luego lo reconstruira desde el backup. Puedes cancelar ahora."
+          : "Esta operacion eliminara primero roles, canales y configuracion existente del servidor destino, y luego aplicara la plantilla. Puedes cancelar ahora."
+        : applyingToSameGuild
+          ? "Esta operacion aplicara el backup sobre este mismo servidor y reutilizara elementos existentes cuando coincidan. Puedes cancelar ahora."
+          : "Esta operacion creara roles, categorias, canales y permisos en el servidor destino. Puedes cancelar ahora.";
+      if (!window.confirm(confirmMessage)) {
+        state.adminTemplateStatus = "Operacion cancelada.";
+        renderAdminPanel();
+        return;
+      }
+
+      state.adminTemplateStatus = "Encolando aplicacion de plantilla...";
+      renderAdminPanel();
+      const response = await fetch("/api/admin/server-template/apply", {
+        method: "POST",
+        headers: csrfHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({
+          source_guild_id: state.guildId,
+          backup_id: state.selectedAdminBackupId,
+          target_guild_id: state.adminTemplateTargetGuildId,
+          options: adminTemplateOptions(),
+          confirmation,
+          confirmed: true
+        })
+      });
+      const payload = await readJsonResponse(response);
+      if (!response.ok) throw new Error(payload.error || "No pude encolar la plantilla.");
+      state.adminTemplateRequestId = payload.request?.id || "";
+      state.adminTemplateStatus = "Solicitud enviada al bot. Esperando resultado...";
+      renderAdminPanel();
+      await pollAdminTemplateRequest(state.adminTemplateRequestId);
+    }
+
+    async function pollAdminTemplateRequest(requestId) {
+      requestId = String(requestId || "");
+      if (!requestId) return;
+      for (let attempt = 0; attempt < 60; attempt += 1) {
+        await new Promise(resolve => window.setTimeout(resolve, attempt < 2 ? 1000 : 2500));
+        const params = new URLSearchParams({ request_id: requestId });
+        const response = await fetch(`/api/dashboard-action-request?${params.toString()}`, { cache: "no-store" });
+        const payload = await readJsonResponse(response);
+        if (!response.ok) throw new Error(payload.error || "No pude consultar el estado de la plantilla.");
+        const request = payload.request || {};
+        if (request.status === "completed") {
+          const result = request.result || {};
+          const created = result.created || {};
+          const deleted = result.deleted || {};
+          state.adminTemplateStatus = `Plantilla aplicada: ${(created.roles || []).length} roles, ${(created.categories || []).length} categorias, ${(created.channels || []).length} canales. Eliminados: ${(deleted.roles || []).length} roles y ${(deleted.channels || []).length} canales.`;
+          renderAdminPanel();
+          return;
+        }
+        if (request.status === "failed") {
+          throw new Error(request.error || "El bot no pudo aplicar la plantilla.");
+        }
+        state.adminTemplateStatus = `Solicitud ${request.status || "pendiente"}...`;
+        renderAdminPanel();
+      }
+      state.adminTemplateStatus = "Solicitud enviada. El bot sigue procesandola.";
+      renderAdminPanel();
+    }
+
+    async function pollAdminBotMessageRequest(requestId) {
+      requestId = String(requestId || "");
+      if (!requestId) return;
+
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        await new Promise(resolve => window.setTimeout(resolve, attempt < 2 ? 800 : 1500));
+        const params = new URLSearchParams({ request_id: requestId });
+        const response = await fetch(`/api/dashboard-action-request?${params.toString()}`, { cache: "no-store" });
+        const payload = await readJsonResponse(response);
+        if (!response.ok) throw new Error(payload.error || "No pude consultar el estado de la solicitud.");
+
+        const request = payload.request || {};
+        const status = String(request.status || "");
+        if (status === "completed") {
+          const result = request.result || {};
+          document.getElementById("adminBotMessageStatus").textContent =
+            `Accion completada. Mensaje: ${result.message_id || "sin ID"}.`;
+          if (document.getElementById("adminBotMessageAction").value === "send") {
+            document.getElementById("adminBotMessageContent").value = "";
+            updateAdminBotMessageCounter();
+          }
+          return;
+        }
+        if (status === "failed") {
+          throw new Error(request.error || "El bot no pudo completar la accion.");
+        }
+        document.getElementById("adminBotMessageStatus").textContent = `Solicitud ${status || "pendiente"}...`;
+      }
+
+      document.getElementById("adminBotMessageStatus").textContent = "Solicitud enviada. El bot sigue procesandola.";
+    }
+
     async function loadTicketRecordsLive() {
       if (!state.guildId) return;
       const filters = state.ticketRecordFilters;
@@ -2714,6 +4969,8 @@
         q: state.ticketRecordSearch || ""
       });
       if (filters.status) params.set("status", filters.status);
+      if (filters.record_type) params.set("type", filters.record_type);
+      if (filters.sort) params.set("sort", filters.sort);
       if (filters.date_from) params.set("date_from", filters.date_from);
       if (filters.date_to) params.set("date_to", filters.date_to);
       const response = await fetch(`/api/ticket-records?${params.toString()}`, { cache: "no-store" });
@@ -2987,6 +5244,148 @@
       loadEconomyData({ force: true }).catch(showError);
     });
 
+    document.getElementById("economyBalanceForm").addEventListener("submit", event => {
+      submitEconomyBalanceChange(event).catch(showError);
+    });
+
+    document.getElementById("tableBody").addEventListener("click", event => {
+      const button = event.target.closest(".economy-edit-balance");
+      if (!button) return;
+      openEconomyBalanceModal(button);
+    });
+
+    document.getElementById("economyBalanceModal").addEventListener("click", event => {
+      if (event.target.id === "economyBalanceModal" || event.target.closest("[data-economy-balance-close]")) {
+        closeEconomyBalanceModal();
+      }
+    });
+
+    document.getElementById("adminGuildList").addEventListener("click", event => {
+      const button = event.target.closest("[data-admin-guild-id]");
+      if (!button) return;
+      selectAdminPanelGuild(button.dataset.adminGuildId).catch(showError);
+    });
+
+    document.getElementById("adminBotMessageForm").addEventListener("submit", event => {
+      submitAdminBotMessage(event).catch(error => {
+        document.getElementById("adminBotMessageStatus").textContent = error.message;
+        document.getElementById("adminBotMessageSubmit").disabled =
+          state.adminMessageChannelsStatus !== "loaded" || !(state.adminMessageChannels || []).length;
+      });
+    });
+
+    document.getElementById("adminCreateBackupButton").addEventListener("click", () => {
+      if (state.adminBackupReplaceMode) {
+        state.adminBackupReplaceMode = false;
+        renderAdminPanel();
+        document.getElementById("adminServerBackupsStatus").textContent = "Reemplazo cancelado.";
+        return;
+      }
+      createAdminServerBackup().catch(error => {
+        document.getElementById("adminServerBackupsStatus").textContent = error.message;
+        document.getElementById("adminCreateBackupButton").disabled = false;
+      });
+    });
+
+    document.getElementById("adminServerBackupsList").addEventListener("click", event => {
+      const replaceButton = event.target.closest("[data-admin-replace-backup-id]");
+      if (replaceButton) {
+        const label = replaceButton.dataset.adminBackupLabel || "este backup";
+        if (!window.confirm(`Se eliminara ${label} y se creara uno nuevo. Quieres continuar?`)) return;
+        createAdminServerBackup({ replaceBackupId: replaceButton.dataset.adminReplaceBackupId }).catch(error => {
+          document.getElementById("adminServerBackupsStatus").textContent = error.message;
+          document.getElementById("adminCreateBackupButton").disabled = false;
+        });
+        return;
+      }
+
+      const button = event.target.closest("[data-admin-backup-id]");
+      if (!button) return;
+      loadAdminServerBackupDetail(button.dataset.adminBackupId, button.dataset.adminBackupLabel).catch(error => {
+        document.getElementById("adminServerBackupsStatus").textContent = error.message;
+      });
+    });
+
+    document.getElementById("adminServerTemplateForm").addEventListener("change", event => {
+      if (event.target.id === "adminTemplateBackup") {
+        state.selectedAdminBackupId = event.target.value;
+        state.selectedAdminBackupDetail = null;
+        state.adminTemplatePreview = null;
+        state.adminTemplateStatus = "";
+        renderAdminPanel();
+      }
+      if (event.target.id === "adminTemplateTargetGuild") {
+        state.adminTemplateTargetGuildId = event.target.value;
+        state.adminTemplatePreview = null;
+        state.adminTemplateStatus = "";
+        renderAdminPanel();
+      }
+      if (event.target.id === "adminTemplateUpdateExisting") {
+        state.adminTemplateUpdateExisting = event.target.checked;
+        state.adminTemplatePreview = null;
+        renderAdminPanel();
+      }
+      if (event.target.id === "adminTemplateIncludeBotConfig") {
+        state.adminTemplateIncludeBotConfig = event.target.checked;
+        state.adminTemplatePreview = null;
+        renderAdminPanel();
+      }
+      if (event.target.id === "adminTemplateClearTarget") {
+        state.adminTemplateClearTarget = event.target.checked;
+        state.adminTemplatePreview = null;
+        renderAdminPanel();
+      }
+    });
+
+    document.getElementById("adminTemplateConfirmation").addEventListener("input", () => {
+      renderAdminServerTemplate();
+    });
+
+    document.getElementById("adminTemplatePreviewButton").addEventListener("click", () => {
+      previewAdminServerTemplate().catch(error => {
+        state.adminTemplateStatus = error.message;
+        renderAdminPanel();
+      });
+    });
+
+    document.getElementById("adminServerTemplateForm").addEventListener("submit", event => {
+      event.preventDefault();
+      applyAdminServerTemplate().catch(error => {
+        state.adminTemplateStatus = error.message;
+        renderAdminPanel();
+      });
+    });
+
+    document.getElementById("adminServerBackupDetail").addEventListener("click", event => {
+      if (event.target.closest("#adminTemplatePreviewButton")) {
+        previewAdminServerTemplate().catch(error => {
+          state.adminTemplateStatus = error.message;
+          renderAdminPanel();
+        });
+      }
+      if (event.target.closest("#adminTemplateApplyButton")) {
+        applyAdminServerTemplate().catch(error => {
+          state.adminTemplateStatus = error.message;
+          renderAdminPanel();
+        });
+      }
+    });
+
+    document.getElementById("adminBotMessageAction").addEventListener("change", updateAdminBotMessageMode);
+    document.getElementById("adminBotMessageChannel").addEventListener("change", scheduleLoadAdminBotMessageForEdit);
+    document.getElementById("adminBotMessageId").addEventListener("input", scheduleLoadAdminBotMessageForEdit);
+    document.getElementById("adminBotMessageContent").addEventListener("input", updateAdminBotMessageCounter);
+    document.getElementById("refreshAdminMessageChannelsButton").addEventListener("click", () => {
+      const page = window.NeoxDashboardPages?.["admin-panel"];
+      if (!page?.loadMessageChannels) return;
+      page.loadMessageChannels(createDashboardContext(), { force: true }).catch(error => {
+        state.adminMessageChannels = [];
+        state.adminMessageChannelsStatus = "error";
+        state.adminMessageChannelsError = error.message || "No pude recargar canales.";
+        renderAdminPanel();
+      });
+    });
+
     document.getElementById("logoutButton").addEventListener("click", () => {
       window.location.href = "/logout";
     });
@@ -3089,16 +5488,18 @@
       });
     });
 
-    ["ticketName", "ticketMode", "ticketChannel", "ticketOpenCategory", "ticketColor", "ticketContent", "ticketTitle", "ticketFooter", "ticketDescription", "ticketImage", "ticketOpenContent", "ticketOpenTitle", "ticketOpenColor", "ticketOpenDescription", "ticketOpenFooter", "ticketOpenImage", "ticketOpenThumbnail", "claimRoles", "closeRoles", "reopenRoles", "deleteRoles"].forEach(id => {
+    ["ticketName", "ticketMode", "ticketChannel", "ticketOpenCategory", "ticketColor", "ticketContent", "ticketTitle", "ticketFooter", "ticketDescription", "ticketImage", "ticketOpenContent", "ticketOpenTitle", "ticketOpenColor", "ticketOpenDescription", "ticketOpenFooter", "ticketOpenImage", "ticketOpenThumbnail", "addMemberRoles", "addMemberUserIds", "claimRoles", "closeRoles", "reopenRoles", "deleteRoles"].forEach(id => {
       document.getElementById(id).addEventListener("input", () => {
         if (id.endsWith("Roles")) enforceRoleLimit(document.getElementById(id));
         persistCurrentTicketPanel();
         renderCurrentTicketPreviews();
+        if (id === "ticketMode") renderTicketEditorSections();
       });
       document.getElementById(id).addEventListener("change", () => {
         if (id.endsWith("Roles")) enforceRoleLimit(document.getElementById(id));
         persistCurrentTicketPanel();
         renderCurrentTicketPreviews();
+        if (id === "ticketMode") renderTicketEditorSections();
       });
     });
 
@@ -3184,8 +5585,24 @@
       });
     });
 
+    document.getElementById("ticketRecordTypeFilter").addEventListener("change", event => {
+      state.ticketRecordFilters.record_type = event.target.value;
+      state.ticketRecordFilters.page = 1;
+      loadTicketRecordsLive().catch(error => {
+        document.getElementById("ticketLiveStatus").textContent = error.message;
+      });
+    });
+
     document.getElementById("ticketRecordPageSize").addEventListener("change", event => {
       state.ticketRecordFilters.page_size = Number(event.target.value || 10);
+      state.ticketRecordFilters.page = 1;
+      loadTicketRecordsLive().catch(error => {
+        document.getElementById("ticketLiveStatus").textContent = error.message;
+      });
+    });
+
+    document.getElementById("ticketRecordSortButton").addEventListener("click", () => {
+      state.ticketRecordFilters.sort = state.ticketRecordFilters.sort === "oldest" ? "newest" : "oldest";
       state.ticketRecordFilters.page = 1;
       loadTicketRecordsLive().catch(error => {
         document.getElementById("ticketLiveStatus").textContent = error.message;
@@ -3212,6 +5629,14 @@
       loadTicketRecordsLive().catch(error => {
         document.getElementById("ticketLiveStatus").textContent = error.message;
       });
+    });
+
+    document.getElementById("closeTicketTranscriptPreviewButton").addEventListener("click", () => {
+      state.selectedTicketRecordId = "";
+      state.selectedTicketTranscriptRecord = null;
+      state.selectedTicketTranscriptMessages = [];
+      state.ticketFocusView = "";
+      renderTickets();
     });
 
     document.getElementById("newTemplateButton").addEventListener("click", () => {
@@ -3305,7 +5730,14 @@
         id: crypto.randomUUID ? crypto.randomUUID() : String(Date.now()),
         emoji: "",
         label: `Opcion ${panel.options.length + 1}`,
-        description: ""
+        description: "",
+        ticket_open_content: "",
+        ticket_open_title: "",
+        ticket_open_description: "",
+        ticket_open_color: "",
+        ticket_open_footer: "",
+        ticket_open_image_url: "",
+        ticket_open_thumbnail_url: ""
       });
       state.ticketPanelsDirty = true;
       renderTickets();
@@ -3458,9 +5890,106 @@
       });
     });
 
-    ["reportSplitMode", "reportEstimated", "reportItems", "reportSilver", "reportMapCost", "reportRepairCost", "reportCallerPercent", "reportLooterPayment", "reportLooterUser", "reportTabSalePercent"].forEach(id => {
-      document.getElementById(id).addEventListener("input", renderReportCalculator);
-      document.getElementById(id).addEventListener("change", renderReportCalculator);
+    document.getElementById("chestTableSelect").addEventListener("change", event => {
+      loadChestTable(event.target.value).catch(error => {
+        state.chestTableStatus = error.message;
+        renderChestTables();
+      });
+    });
+
+    const deleteChestTableButton = document.getElementById("deleteChestTableButton");
+    if (deleteChestTableButton) {
+      deleteChestTableButton.addEventListener("click", () => {
+        deleteChestTable().catch(error => {
+          state.chestTableStatus = error.message;
+          renderChestTables();
+        });
+      });
+    }
+
+    document.getElementById("addChestRowButton").addEventListener("click", () => {
+      addChestRow().then(() => {
+        renderReportCalculator();
+      }).catch(error => {
+        state.chestTableStatus = error.message;
+        renderChestTables();
+      });
+    });
+
+    document.getElementById("chestTableWrap").addEventListener("click", event => {
+      const deleteRow = event.target.closest("[data-chest-delete-row]");
+      if (deleteRow && state.chestTable) {
+        const rowId = String(deleteRow.dataset.chestDeleteRow || "");
+        state.chestTable.rows = (state.chestTable.rows || []).filter(row => String(row.id) !== rowId);
+        delete (state.chestTable.cells || {})[rowId];
+        setChestDirty();
+        renderReportCalculator();
+      }
+    });
+
+    document.getElementById("chestTableWrap").addEventListener("input", event => {
+      if (!state.chestTable) return;
+      const target = event.target;
+      if (target.matches(".chest-cell-input")) {
+        const rowId = String(target.closest("tr")?.dataset.rowId || "");
+        const columnId = String(target.dataset.columnId || "");
+        state.chestTable.cells = state.chestTable.cells || {};
+        state.chestTable.cells[rowId] = state.chestTable.cells[rowId] || {};
+        state.chestTable.cells[rowId][columnId] = parseChestAmount(target.value);
+        state.chestTableDirty = true;
+        state.chestTableStatus = "Cambios sin guardar.";
+        document.getElementById("chestTableStatus").textContent = state.chestTableStatus;
+        applyChestEstimateToReport();
+        scheduleChestAutosave();
+      }
+    });
+
+    document.getElementById("chestTableWrap").addEventListener("change", async event => {
+      if (!state.chestTable) return;
+      if (event.target.matches(".chest-cell-input")) {
+        renderReportCalculator();
+        return;
+      }
+      if (!event.target.matches(".chest-evidence-input")) return;
+      const input = event.target;
+      const file = input.files?.[0];
+      if (!file || !state.chestTable?.id) return;
+      try {
+        state.chestTableStatus = "Subiendo evidencia...";
+        renderChestTables();
+        const dataUrl = await fileToDataUrl(file);
+        const response = await fetch("/api/chest-table-image", {
+          method: "POST",
+          headers: csrfHeaders({ "Content-Type": "application/json" }),
+          body: JSON.stringify({
+            guild_id: state.guildId,
+            table_id: state.chestTable.id,
+            row_id: input.dataset.rowId || "",
+            image_type: input.dataset.imageType || "",
+            filename: file.name,
+            data_url: dataUrl
+          })
+        });
+        const payload = await readJsonResponse(response);
+        if (!response.ok) throw new Error(payload.error || "No pude subir la evidencia.");
+        state.chestTable = payload.table || state.chestTable;
+        state.chestTableStatus = "Evidencia subida.";
+        renderChestTables();
+      } catch (error) {
+        state.chestTableStatus = error.message;
+        renderChestTables();
+      } finally {
+        input.value = "";
+      }
+    });
+
+    ["reportSplitMode", "reportManualTitle", "reportManualParticipants", "reportEstimated", "reportItems", "reportSilver", "reportMapCost", "reportRepairCost", "reportCallerPercent", "reportLooterPayment", "reportLooterUser", "reportTabSalePercent", "reportDeliveryMode"].forEach(id => {
+      const handleReportInput = () => {
+        setReportCopyStatus();
+        renderReportCalculator();
+      };
+      document.getElementById(id).addEventListener("input", handleReportInput);
+      document.getElementById(id).addEventListener("change", handleReportInput);
     });
 
     document.getElementById("addReportFineButton").addEventListener("click", () => {
@@ -3468,19 +5997,78 @@
       renderReportCalculator();
     });
 
+    document.getElementById("addReportModifierButton").addEventListener("click", () => {
+      appendReportModifierRow();
+      renderReportCalculator();
+    });
+
+    document.getElementById("addReportBuildLoanButton").addEventListener("click", () => {
+      appendReportBuildLoanRow();
+      renderReportCalculator();
+    });
+
+    document.getElementById("reportParticipantsList").addEventListener("click", event => {
+      const button = event.target.closest(".report-exclusion-toggle");
+      if (!button || !state.reportCalculator) return;
+      const userId = button.dataset.userId || "";
+      const participant = (state.reportCalculator.participants || [])
+        .find(item => String(item.user_id) === String(userId));
+      if (!participant) return;
+      if (button.dataset.action === "remove") {
+        removeReportSplitExclusion(userId);
+      } else {
+        setReportSplitExclusion(participant, "");
+      }
+      setReportCopyStatus();
+      renderReportCalculator();
+    });
+
+    document.getElementById("reportParticipantsList").addEventListener("input", event => {
+      if (!event.target.matches(".report-exclusion-reason, .report-exclusion-percentage") || !state.reportCalculator) return;
+      const userId = event.target.dataset.userId || "";
+      const participant = (state.reportCalculator.participants || [])
+        .find(item => String(item.user_id) === String(userId));
+      if (!participant) return;
+      const current = findReportSplitExclusion(userId) || {};
+      const reason = event.target.matches(".report-exclusion-reason")
+        ? event.target.value
+        : current.reason || "";
+      const activityPercentage = event.target.matches(".report-exclusion-percentage")
+        ? event.target.value
+        : current.activity_percentage || "";
+      setReportSplitExclusion(participant, reason, activityPercentage);
+      setReportCopyStatus();
+      scheduleReportPreview();
+    });
+
     document.getElementById("reportCalculatorSelect").addEventListener("change", event => {
-      const ava = event.target.value;
-      if (!ava) {
+      const selectedKey = event.target.value;
+      if (!selectedKey) {
         state.reportContext = null;
         state.reportCalculator = null;
         renderReportCalculator();
         return;
       }
+      if (selectedKey === "__manual__") {
+        state.reportContext = {
+          guildId: state.guildId,
+          callerId: state.data?.viewer?.id || "",
+          ava: "__manual__",
+        };
+        document.getElementById("reportCalculatorStatus").textContent = "";
+        loadReportCalculator().catch(error => {
+          document.getElementById("reportCalculatorStatus").textContent = error.message;
+        });
+        return;
+      }
+      const selected = state.reportCalculatorOptions.find(item => `${item.caller_id || ""}:${item.numero_ava}` === selectedKey);
+      const ava = selected?.numero_ava || selectedKey.split(":").slice(1).join(":");
       state.reportContext = {
         guildId: state.guildId,
-        callerId: state.data?.viewer?.id || "",
+        callerId: selected?.caller_id || state.data?.viewer?.id || "",
         ava,
       };
+      document.getElementById("reportCalculatorStatus").textContent = "";
       loadReportCalculator().catch(error => {
         document.getElementById("reportCalculatorStatus").textContent = error.message;
       });
@@ -3491,6 +6079,8 @@
         document.getElementById("reportCalculatorStatus").textContent = error.message;
       });
     });
+
+    document.getElementById("copyReportFinalButton").addEventListener("click", copyReportFinalPreview);
 
     document.getElementById("resetReportCalculatorButton").addEventListener("click", resetReportCalculator);
 
@@ -3511,6 +6101,16 @@
         renderPermissions();
       }).catch(error => {
         document.getElementById("permissionsStatus").textContent = error.message;
+      });
+    });
+
+    document.getElementById("refreshAdminPanelButton").addEventListener("click", () => {
+      state.adminPanelGuildId = "";
+      loadAdminPanelData({ force: true }).then(() => {
+        document.getElementById("adminPanelStatus").textContent = "Panel administrativo recargado.";
+        renderAdminPanel();
+      }).catch(error => {
+        document.getElementById("adminPanelStatus").textContent = error.message;
       });
     });
 

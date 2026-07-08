@@ -1,9 +1,10 @@
 import discord
 
 from services.permission_service import PermissionService
+from utils.interaction_safety import SafeView
 
 
-class FineTicketView(discord.ui.View):
+class FineTicketView(SafeView):
     def __init__(self, *, fine_id, fine_service):
         super().__init__(timeout=None)
         self.fine_id = int(fine_id)
@@ -12,7 +13,7 @@ class FineTicketView(discord.ui.View):
 
     async def interaction_check(self, interaction):
         fine = self.fine_service.get(self.fine_id)
-        if not fine or fine.get("status") != "open":
+        if not fine or fine.get("status") != "open" or int(fine.get("is_deleted") or 0):
             await interaction.response.send_message("Esta multa ya no esta pendiente.", ephemeral=True)
             return False
 
@@ -42,6 +43,9 @@ class FineTicketView(discord.ui.View):
         fine = self.fine_service.get(self.fine_id)
         if not fine:
             await interaction.response.send_message("No encontre esta multa.", ephemeral=True)
+            return
+        if int(fine.get("is_deleted") or 0):
+            await interaction.response.send_message("Esta multa fue eliminada y no puede modificarse.", ephemeral=True)
             return
 
         member = interaction.guild.get_member(int(fine.get("fined_user_id") or 0))

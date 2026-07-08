@@ -108,6 +108,15 @@
             </span>
             <span class="section-copy"><span class="section-text">Tickets</span><span class="section-hint">Paneles y soporte</span></span>
           </button>
+          <button class="section-button" type="button" data-section="fines" title="Multas" aria-controls="finesSection">
+            <span class="section-icon">
+              <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 2v20"></path>
+                <path d="M17 5H9.5a3.5 3.5 0 0 0 0 7H14a3.5 3.5 0 0 1 0 7H6"></path>
+              </svg>
+            </span>
+            <span class="section-copy"><span class="section-text">Multas</span><span class="section-hint">Roles y tickets multa</span></span>
+          </button>
           <button class="section-button" type="button" data-section="registration" title="Registro Albion" aria-controls="registrationSection">
             <span class="section-icon">
               <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -148,6 +157,19 @@
               </svg>
             </span>
             <span class="section-copy"><span class="section-text">Permisos</span><span class="section-hint">Accesos por rol</span></span>
+          </button>
+          <button class="section-button" type="button" data-section="admin-panel" title="Panel Administrativo" aria-controls="adminPanelSection">
+            <span class="section-icon">
+              <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="3" y="4" width="18" height="16" rx="2"></rect>
+                <path d="M7 8h10"></path>
+                <path d="M7 12h4"></path>
+                <path d="M15 12h2"></path>
+                <path d="M7 16h2"></path>
+                <path d="M13 16h4"></path>
+              </svg>
+            </span>
+            <span class="section-copy"><span class="section-text">Panel Administrativo</span><span class="section-hint">Control avanzado</span></span>
           </button>
         </nav>
       </aside>
@@ -345,35 +367,6 @@
             <div class="ticket-stat"><span>Cerrados hoy</span><strong id="ticketClosedTodayTotal">0</strong></div>
           </section>
 
-          <section class="editor-section" aria-label="Configuracion de multas">
-            <div class="editor-section-header">
-              <div>
-                <strong>Configuracion de multas</strong>
-                <span>Define el canal, rol de bloqueo, rol que resuelve multas y categoria para tickets de multa.</span>
-              </div>
-              <button id="saveFineConfigButton" class="action-button primary" type="button">Guardar multas</button>
-            </div>
-            <div class="form-grid">
-              <div class="field">
-                <label for="fineChannel">Canal de multas</label>
-                <select id="fineChannel"></select>
-              </div>
-              <div class="field">
-                <label for="fineBlockedRole">Rol multado</label>
-                <select id="fineBlockedRole"></select>
-              </div>
-              <div class="field">
-                <label for="fineResolverRole">Rol que resuelve</label>
-                <select id="fineResolverRole"></select>
-              </div>
-              <div class="field">
-                <label for="fineTicketCategory">Categoria ticket multa</label>
-                <select id="fineTicketCategory"></select>
-              </div>
-            </div>
-            <div id="fineConfigStatus" class="status" role="status" aria-live="polite"></div>
-          </section>
-
           <section class="ticket-builder" aria-label="Constructor de tickets">
             <aside aria-label="Listado de paneles de tickets">
               <div class="section-label">Paneles creados</div>
@@ -549,6 +542,24 @@
                     </div>
                     <div id="ticketRolePermissionsList" class="ticket-permission-list"></div>
                   </div>
+                  <div class="field full">
+                    <div class="editor-section-header">
+                      <div>
+                        <strong>Permisos del usuario que abre el ticket</strong>
+                        <span>Define que puede hacer el creador mientras el ticket esta abierto.</span>
+                      </div>
+                    </div>
+                    <div id="ticketOwnerPermissions" class="ticket-permission-options owner-permission-options"></div>
+                  </div>
+                  <div class="field">
+                    <label for="addMemberRolesButton">Roles que agregan personas, maximo 3</label>
+                    <input id="addMemberRoles" type="hidden">
+                    <div id="addMemberRolesPicker" class="role-picker" data-role-picker="addMemberRoles"></div>
+                  </div>
+                  <div class="field">
+                    <label for="addMemberUserIds">Usuarios que agregan personas</label>
+                    <input id="addMemberUserIds" type="text" placeholder="IDs de Discord separados por coma">
+                  </div>
                   <div class="field">
                     <label for="claimRolesButton">Roles que reclaman, maximo 3</label>
                     <input id="claimRoles" type="hidden">
@@ -624,18 +635,81 @@
                   <option value="closed">Cerrado</option>
                   <option value="deleted">Eliminado</option>
                 </select>
+                <select id="ticketRecordTypeFilter" aria-label="Tipo de ticket">
+                  <option value="">Todos los tickets</option>
+                </select>
                 <select id="ticketRecordPageSize" aria-label="Tamano de pagina de tickets">
                   <option value="10" selected>10 por pagina</option>
                   <option value="25">25 por pagina</option>
                   <option value="50">50 por pagina</option>
                 </select>
-                <button id="ticketRecordsPrevPageButton" class="action-button" type="button">Anterior</button>
-                <span id="ticketRecordsPageInfo" class="muted">0 tickets.</span>
-                <button id="ticketRecordsNextPageButton" class="action-button" type="button">Siguiente</button>
-                <button id="refreshTicketRecordsButton" class="action-button" type="button">Actualizar</button>
+                <button id="ticketRecordSortButton" class="sort-toggle" type="button" aria-label="Cambiar orden de tickets" aria-pressed="false">
+                  <span id="ticketRecordSortIcon" aria-hidden="true">↓</span>
+                  <span id="ticketRecordSortLabel">Mas recientes</span>
+                </button>
+                <div class="pager-actions">
+                  <button id="ticketRecordsPrevPageButton" class="action-button" type="button">Anterior</button>
+                  <span id="ticketRecordsPageInfo" class="muted">0 tickets.</span>
+                  <button id="ticketRecordsNextPageButton" class="action-button" type="button">Siguiente</button>
+                  <button id="refreshTicketRecordsButton" class="action-button" type="button">Actualizar</button>
+                </div>
               </div>
             </div>
             <div id="ticketRecordsList" class="ticket-list"></div>
+          </section>
+
+          <section id="ticketTranscriptPreview" class="ticket-live-viewer transcript-preview" aria-label="Vista de transcripcion" hidden>
+            <div class="editor-section-header">
+              <div>
+                <strong id="ticketTranscriptPreviewTitle">Transcripcion</strong>
+                <span id="ticketTranscriptPreviewSubtitle">Selecciona un ticket con transcripcion disponible.</span>
+              </div>
+              <div class="ticket-actions">
+                <button id="closeTicketTranscriptPreviewButton" class="action-button" type="button">Cerrar vista</button>
+              </div>
+            </div>
+            <div id="ticketTranscriptPreviewMessages" class="live-chat-box"></div>
+          </section>
+        </div>
+      </section>
+
+      <!-- Modulo: Multas -->
+      <section id="finesSection" class="module-panel" aria-labelledby="finesSectionTitle" role="region" hidden>
+        <div class="ticket-dashboard">
+          <div class="ticket-toolbar">
+            <div>
+              <h2 id="finesSectionTitle">Multas</h2>
+              <p>Configura el canal, los roles y la categoria usada por los tickets de multa.</p>
+            </div>
+            <button id="saveFineConfigButton" class="action-button primary" type="button">Guardar multas</button>
+          </div>
+
+          <section class="editor-section" aria-label="Configuracion de multas">
+            <div class="editor-section-header">
+              <div>
+                <strong>Configuracion de multas</strong>
+                <span>Define el canal de avisos, rol de bloqueo, rol que resuelve multas y categoria para tickets.</span>
+              </div>
+            </div>
+            <div class="form-grid">
+              <div class="field">
+                <label for="fineChannel">Canal de multas</label>
+                <select id="fineChannel"></select>
+              </div>
+              <div class="field">
+                <label for="fineBlockedRole">Rol multado</label>
+                <select id="fineBlockedRole"></select>
+              </div>
+              <div class="field">
+                <label for="fineResolverRole">Rol que resuelve</label>
+                <select id="fineResolverRole"></select>
+              </div>
+              <div class="field">
+                <label for="fineTicketCategory">Categoria ticket multa</label>
+                <select id="fineTicketCategory"></select>
+              </div>
+            </div>
+            <div id="fineConfigStatus" class="status" role="status" aria-live="polite"></div>
           </section>
         </div>
       </section>
@@ -650,9 +724,9 @@
               <p id="reportCalculatorSubtitle">Carga una Ava desde el boton Enviar informe de Discord.</p>
             </div>
             <div class="field report-calculator-picker">
-              <label for="reportCalculatorSelect">Pings activos</label>
+              <label for="reportCalculatorSelect">Fuente de calculadora</label>
               <select id="reportCalculatorSelect">
-                <option value="">Selecciona una Ava</option>
+                <option value="__manual__">Calculadora manual</option>
               </select>
             </div>
           </div>
@@ -692,6 +766,18 @@
                     <option value="items_silver">Items + silver</option>
                   </select>
                 </div>
+                <div id="reportManualFields" class="field full" hidden>
+                  <div class="form-grid">
+                    <div class="field">
+                      <label for="reportManualTitle">Actividad</label>
+                      <input id="reportManualTitle" type="text" placeholder="Ej: Dungeon, gank, Ava roads">
+                    </div>
+                    <div class="field">
+                      <label for="reportManualParticipants">Participantes</label>
+                      <input id="reportManualParticipants" type="number" min="0" step="1" value="0">
+                    </div>
+                  </div>
+                </div>
                 <div class="field">
                   <label for="reportEstimated">Estimado</label>
                   <input id="reportEstimated" type="text" placeholder="Ej: 12.5m">
@@ -730,6 +816,55 @@
                   <label for="reportTabSalePercent">Venta de tab</label>
                   <input id="reportTabSalePercent" type="text" placeholder="Ej: 15%">
                 </div>
+                <div class="field full report-delivery-field">
+                  <label for="reportDeliveryMode">Destino del informe</label>
+                  <select id="reportDeliveryMode">
+                    <option value="send">Enviar al canal de evaluacion configurado</option>
+                    <option value="preview">Generar y guardar como vista previa</option>
+                  </select>
+                  <span id="reportDeliveryStatus" class="field-hint">El informe se enviara al canal asignado si existe uno valido.</span>
+                </div>
+                <div class="field full">
+                  <div class="editor-section chest-table-panel" aria-label="Tabla dinamica de cofres">
+                    <div class="editor-section-header">
+                      <div>
+                        <strong>Cofres</strong>
+                        <span>LQS es lo que salio. LQQ es lo que quedo.</span>
+                      </div>
+                      <div class="ticket-actions">
+                        <select id="chestTableSelect" aria-label="Tabla de cofres" hidden></select>
+                        <button id="addChestRowButton" class="action-button" type="button">+ Cofre</button>
+                        <button id="deleteChestTableButton" class="action-button danger" type="button" hidden>Eliminar tabla</button>
+                      </div>
+                    </div>
+                    <div id="chestTableWrap" class="chest-table-wrap"></div>
+                    <div id="chestTableStatus" class="status" role="status" aria-live="polite"></div>
+                  </div>
+                </div>
+                <div class="field full">
+                  <div class="editor-section report-modifiers-section">
+                    <div class="editor-section-header">
+                      <div>
+                        <strong>Modificadores del split</strong>
+                        <span>Agrega compras, gastos, descuentos o ajustes antes de finalizar.</span>
+                      </div>
+                      <button id="addReportModifierButton" class="action-button" type="button">+ Agregar modificador</button>
+                    </div>
+                    <div id="reportModifiersList" class="option-list"></div>
+                  </div>
+                </div>
+                <div class="field full">
+                  <div class="editor-section report-build-loans-section">
+                    <div class="editor-section-header">
+                      <div>
+                        <strong>Préstamos de build</strong>
+                        <span>Descuenta préstamos marcados para cobrarse desde el split.</span>
+                      </div>
+                      <button id="addReportBuildLoanButton" class="action-button" type="button">+ Agregar préstamo</button>
+                    </div>
+                    <div id="reportBuildLoansList" class="option-list"></div>
+                  </div>
+                </div>
                 <div class="field full">
                   <div class="editor-section report-fines-section">
                     <div class="editor-section-header">
@@ -757,6 +892,20 @@
                   <span>Resumen neto antes de enviar el informe a evaluacion.</span>
                 </div>
                 <div id="reportCalculatorBreakdown" class="report-breakdown-list"></div>
+              </div>
+              <div class="preview-box report-final-preview">
+                <div class="report-calculator-panel-head">
+                  <div>
+                    <strong>Vista previa del informe final</strong>
+                    <span>Este es el texto que se enviara o guardara.</span>
+                  </div>
+                  <div class="report-preview-actions">
+                    <button id="copyReportFinalButton" class="action-button" type="button">Copiar informe</button>
+                    <span id="reportCopyStatus" class="report-copy-status" role="status" aria-live="polite"></span>
+                  </div>
+                </div>
+                <div id="reportPreviewWarnings" class="report-preview-warnings" hidden></div>
+                <pre id="reportFinalPreview" class="report-final-preview-text">Completa los datos para ver el informe final.</pre>
               </div>
             </aside>
           </div>
@@ -858,7 +1007,7 @@
           </div>
         </div>
       </section>
-      
+
       <!-- Modulo: Bienvenidas -->
       <section id="welcomeSection" class="module-panel" aria-label="Bienvenidas" role="region" hidden></section>
 
@@ -1004,12 +1153,202 @@
         </div>
         <div id="permissionsStatus" class="status" role="status" aria-live="polite"></div>
       </section>
+
+      <!-- Modulo: Panel Administrativo -->
+      <section id="adminPanelSection" class="module-panel" aria-labelledby="adminPanelSectionTitle" role="region" hidden>
+        <div class="module-header">
+          <div>
+            <h2 id="adminPanelSectionTitle">Panel Administrativo</h2>
+            <p>Administracion general del bot y del servidor seleccionado.</p>
+          </div>
+          <div class="ticket-actions">
+            <button id="refreshAdminPanelButton" class="action-button" type="button">Recargar</button>
+          </div>
+        </div>
+        <section class="ticket-summary admin-summary" aria-label="Resumen administrativo">
+          <div class="ticket-stat"><span>Servidor</span><strong id="adminServerName">-</strong></div>
+          <div class="ticket-stat"><span>ID</span><strong id="adminServerId">-</strong></div>
+          <div class="ticket-stat"><span>Estado del bot</span><strong id="adminBotStatus">-</strong></div>
+          <div class="ticket-stat"><span>Miembros</span><strong id="adminMemberCount">-</strong></div>
+          <div class="ticket-stat"><span>Canales</span><strong id="adminChannelCount">0</strong></div>
+          <div class="ticket-stat"><span>Roles</span><strong id="adminRoleCount">0</strong></div>
+        </section>
+        <div class="admin-workspace">
+          <section class="editor-section admin-backups-panel">
+            <div class="editor-section-header">
+              <div>
+                <strong>Servidores administrables</strong>
+                <span>Solo aparecen servidores donde el bot esta conectado y tu sesion tiene permisos suficientes.</span>
+              </div>
+            </div>
+            <div id="adminGuildList" class="admin-guild-list"></div>
+          </section>
+          <section class="editor-section admin-template-panel">
+            <div class="editor-section-header">
+              <div>
+                <strong>Base administrativa</strong>
+                <span>Vista segura para centralizar funciones sensibles sin mezclar modulos existentes.</span>
+              </div>
+            </div>
+            <div id="adminServerDetails" class="admin-detail-grid"></div>
+          </section>
+          <section class="editor-section admin-message-panel">
+            <div class="editor-section-header">
+              <div>
+                <strong>Mensajes del bot</strong>
+                <span>Envia, edita o elimina mensajes propios del bot en canales permitidos.</span>
+              </div>
+              <button id="refreshAdminMessageChannelsButton" class="action-button" type="button">Recargar canales</button>
+            </div>
+            <form id="adminBotMessageForm" class="form-grid" autocomplete="off">
+              <div class="field full">
+                <label for="adminBotMessageChannel">Canal</label>
+                <select id="adminBotMessageChannel" required>
+                  <option value="">Seleccionar canal</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="adminBotMessageAction">Accion</label>
+                <select id="adminBotMessageAction">
+                  <option value="send">Enviar nuevo</option>
+                  <option value="edit">Editar existente</option>
+                  <option value="delete">Eliminar existente</option>
+                </select>
+              </div>
+              <div id="adminBotMessageIdField" class="field" hidden>
+                <label for="adminBotMessageId">ID del mensaje</label>
+                <input id="adminBotMessageId" type="text" inputmode="numeric" placeholder="Ej: 123456789012345678">
+              </div>
+              <div id="adminBotMessageContentField" class="field full">
+                <label for="adminBotMessageContent">Contenido</label>
+                <textarea id="adminBotMessageContent" rows="6" maxlength="2000" placeholder="Mensaje plano del bot"></textarea>
+                <span id="adminBotMessageCounter" class="field-hint">0 / 2000</span>
+              </div>
+              <div class="publish-row full">
+                <button id="adminBotMessageSubmit" class="action-button primary" type="submit">Enviar solicitud</button>
+                <div id="adminBotMessageStatus" class="status" role="status" aria-live="polite"></div>
+              </div>
+            </form>
+          </section>
+          <section class="editor-section">
+            <div class="editor-section-header">
+              <div>
+                <strong>Backups del servidor</strong>
+                <span>Guarda estructura, roles, permisos y configuracion local del bot. Maximo 2 por servidor.</span>
+              </div>
+              <button id="adminCreateBackupButton" class="action-button primary" type="button">Crear backup</button>
+            </div>
+            <div id="adminServerBackupsList" class="admin-action-grid"></div>
+            <div id="adminServerBackupDetail" class="admin-backup-detail" hidden></div>
+            <div id="adminServerBackupsStatus" class="status" role="status" aria-live="polite"></div>
+          </section>
+          <section class="editor-section">
+            <div class="editor-section-header">
+              <div>
+                <strong>Usar backup como plantilla</strong>
+                <span>Copia estructura a otro servidor sin eliminar nada por defecto.</span>
+              </div>
+            </div>
+            <form id="adminServerTemplateForm" class="form-grid admin-template-form" autocomplete="off">
+              <div class="field">
+                <label for="adminTemplateBackup">Backup origen</label>
+                <select id="adminTemplateBackup" required>
+                  <option value="">Seleccionar backup</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="adminTemplateTargetGuild">Servidor destino</label>
+                <select id="adminTemplateTargetGuild" required>
+                  <option value="">Seleccionar destino</option>
+                </select>
+              </div>
+              <label class="checkbox-field full">
+                <input id="adminTemplateIncludeBotConfig" type="checkbox" checked>
+                <span>Copiar configuracion local del bot cuando pueda mapear roles y canales.</span>
+              </label>
+              <label class="checkbox-field full">
+                <input id="adminTemplateUpdateExisting" type="checkbox">
+                <span>Modificar elementos existentes con el mismo nombre. Sin esto, se reutilizan como mapeo y no se crean duplicados.</span>
+              </label>
+              <label class="checkbox-field full danger-option">
+                <input id="adminTemplateClearTarget" type="checkbox">
+                <span>Eliminar primero roles, canales y configuracion existente del destino para aplicar la plantilla completa.</span>
+              </label>
+              <div class="field">
+                <label for="adminTemplateConfirmation">Confirmacion</label>
+                <input id="adminTemplateConfirmation" type="text" placeholder="Escribe APLICAR para ejecutar">
+              </div>
+              <div class="publish-row full">
+                <button id="adminTemplatePreviewButton" class="action-button" type="button">Previsualizar</button>
+                <button id="adminTemplateApplyButton" class="action-button danger" type="submit" disabled>Aplicar plantilla</button>
+                <div id="adminTemplateStatus" class="status" role="status" aria-live="polite"></div>
+              </div>
+            </form>
+            <div id="adminTemplatePreview" class="admin-backup-detail" hidden></div>
+          </section>
+          <section class="editor-section">
+            <div class="editor-section-header">
+              <div>
+                <strong>Acciones preparadas</strong>
+                <span>Entradas reservadas para futuras operaciones administrativas con auditoria.</span>
+              </div>
+            </div>
+            <div id="adminFutureActions" class="admin-action-grid"></div>
+          </section>
+        </div>
+        <div id="adminPanelStatus" class="status" role="status" aria-live="polite"></div>
+      </section>
     </div>
   </main>
 
   <!-- Modal: detalle de loot -->
   <div id="lootModal" class="loot-modal" role="dialog" aria-modal="true" aria-labelledby="lootModalTitle" hidden>
     <div id="lootModalPanel" class="loot-modal-panel"></div>
+  </div>
+
+  <div id="economyBalanceModal" class="loot-modal" role="dialog" aria-modal="true" aria-labelledby="economyBalanceModalTitle" hidden>
+    <form id="economyBalanceForm" class="loot-modal-panel economy-balance-panel" autocomplete="off">
+      <button class="loot-modal-close" type="button" data-economy-balance-close aria-label="Cerrar">x</button>
+      <div class="economy-balance-heading">
+        <div>
+          <h3 id="economyBalanceModalTitle">Editar balance</h3>
+          <p id="economyBalanceTargetName" class="muted">Selecciona una accion para este usuario.</p>
+        </div>
+        <span id="economyBalanceTargetStatus" class="pill">Estado</span>
+      </div>
+      <label>
+        <span>Usuario / ID</span>
+        <input id="economyBalanceUser" type="text" aria-label="Usuario a modificar" readonly>
+      </label>
+      <div class="economy-balance-grid">
+        <label>
+          <span>Accion</span>
+          <select id="economyBalanceAction" aria-label="Accion de balance">
+            <option value="remove">Remover</option>
+            <option value="add">Agregar</option>
+          </select>
+        </label>
+        <label>
+          <span>Categoria</span>
+          <select id="economyBalanceCategory" aria-label="Categoria de balance">
+            <option value="silver">Silver</option>
+            <option value="items">Items</option>
+          </select>
+        </label>
+        <label>
+          <span>Cantidad</span>
+          <input id="economyBalanceAmount" type="number" min="1" step="1" placeholder="Cantidad" aria-label="Cantidad">
+        </label>
+      </div>
+      <label>
+        <span>Motivo</span>
+        <input id="economyBalanceReason" type="text" maxlength="240" placeholder="Motivo administrativo" aria-label="Motivo">
+      </label>
+      <div class="ticket-actions economy-balance-actions">
+        <button class="action-button" type="button" data-economy-balance-close>Cancelar</button>
+        <button id="economyBalanceSubmit" class="action-button primary" type="submit">Aplicar</button>
+      </div>
+    </form>
   </div>
 
   <!-- Scripts del dashboard -->
@@ -1020,6 +1359,7 @@
   <script src="/static/js/pages/tickets.js"></script>
   <script src="/static/js/pages/audit.js"></script>
   <script src="/static/js/pages/permissions.js"></script>
+  <script src="/static/js/pages/admin-panel.js"></script>
   <script src="/static/js/pages/albion.js"></script>
   <script src="/static/js/pages/report-calculator.js"></script>
   <script src="/static/js/dashboard.js"></script>

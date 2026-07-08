@@ -5,7 +5,13 @@
     async load(ctx, { force = false } = {}) {
       const { state } = ctx;
       if (!state.guildId) return;
-      if (!force && state.fineConfigGuildId === state.guildId) return;
+      if (!force && state.fineConfigGuildId === state.guildId) {
+        ctx.renderSection("fines");
+        return;
+      }
+
+      ctx.setSectionMessage("fines", "Cargando multas...");
+      await ctx.ensureDiscordMetadata({ force, kinds: ["channels", "categories", "roles"] });
 
       const params = new URLSearchParams({ guild_id: state.guildId });
       const response = await fetch(`/api/fine-config?${params.toString()}`, { cache: "no-store" });
@@ -16,6 +22,8 @@
 
       state.fineConfig = await response.json();
       state.fineConfigGuildId = state.guildId;
+      ctx.clearSectionMessage("fines");
+      ctx.renderSection("fines");
     },
   };
 })();

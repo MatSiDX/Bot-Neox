@@ -1,14 +1,15 @@
 import argparse
 import base64
+import hashlib
 import html
 import json
+import logging
 import mimetypes
 import os
 import re
 import secrets
 import shutil
 import socket
-import sqlite3
 import threading
 import time
 from datetime import datetime
@@ -51,24 +52,33 @@ from src.neox.dashboard.http_utils import (
 )
 from src.neox.dashboard.security import DashboardCookieManager, safe_dashboard_next
 from src.neox.dashboard.sessions import DashboardSessionStore
-from repositories.database import DATABASE_FILE, init_database
+from repositories.database import get_connection as database_connection, init_database
 from repositories.albion_registration_repository import AlbionRegistrationRepository
-from repositories.active_avalonian_repository import ACTIVE_AVALONIAN_FILE
+from repositories.active_avalonian_repository import ActiveAvalonianRepository
 from repositories.balance_repository import BalanceRepository, DATA_DIR
+from repositories.bot_message_audit_repository import BotMessageAuditRepository
 from repositories.dashboard_json_repository import DashboardJsonRepository
 from repositories.fine_repository import FineRepository
 from repositories.operation_repository import OperationRepository
 from repositories.pagination import normalize_page, normalize_page_size, page_response
 from repositories.report_dashboard_repository import ReportDashboardRepository
+from repositories.server_backup_repository import ServerBackupLimitError
 from services.config_service import ConfigService
 from services.dashboard_action_service import DashboardActionService
 from services.discord_metadata_service import DiscordMetadataCacheSettings, DiscordMetadataService
 from services.ping_template_service import MAX_TEMPLATES_PER_GUILD, SCRATCH_TEMPLATE_KEY, PingTemplateService
 from services.fine_service import FineService
+from services.albion_market_price_service import AlbionMarketPriceService
+from services.chest_table_service import ChestTableService
+from services.loot_normalization_service import LootNormalizationError, LootNormalizationService
+from services.report_service import ReportFormatService
+from services.server_backup_service import ServerBackupService
+from services.server_template_service import SERVER_TEMPLATE_ACTION_APPLY, ServerTemplateService
 from services.permission_service import (
     BOT_PERMISSION_DEFINITIONS,
     BOT_PERMISSION_KEYS,
     BOT_PERMISSION_LABELS,
+    MODULE_ADMIN_PANEL,
     MODULE_ALBION_REGISTRATION,
     MODULE_AUDIT,
     MODULE_ECONOMY,
@@ -77,6 +87,7 @@ from services.permission_service import (
     MODULE_EXPORT_TICKETS,
     MODULE_FINES,
     MODULE_PERMISSIONS,
+    MODULE_REPORTS,
     MODULE_TEMPLATES,
     MODULE_TICKETS,
     PERMISSION_GLOBAL,
@@ -102,6 +113,7 @@ TICKET_PANELS_FILE = os.path.join(DATA_DIR, "ticket_panels.json")
 TICKET_RECORDS_FILE = os.path.join(DATA_DIR, "ticket_records.json")
 TICKET_MEDIA_DIR = os.path.join(DATA_DIR, "ticket_media")
 FINE_PROOF_DIR = os.path.join(DATA_DIR, "fine_proofs")
+LOGGER = logging.getLogger(__name__)
 AUDIT_CONFIG_FILE = os.path.join(DATA_DIR, "audit_config.json")
 AUDIT_EVENTS_FILE = os.path.join(DATA_DIR, "audit_events.json")
 DEFAULT_LIMIT = 500
@@ -137,9 +149,29 @@ TICKET_CHANNEL_PERMISSION_KEYS = {
     key
     for key, _ in TICKET_CHANNEL_PERMISSION_OPTIONS
 }
+DEFAULT_TICKET_OWNER_PERMISSIONS = [
+    "view_channel",
+    "send_messages",
+    "read_message_history",
+    "attach_files",
+    "embed_links",
+]
 DISCORD_API_BASE = "https://discord.com/api/v10"
 ALBION_API_BASE = "https://gameinfo.albiononline.com/api/gameinfo"
 DISCORD_ADMINISTRATOR = 0x8
+DISCORD_PERM_VIEW_CHANNEL = 0x400
+DISCORD_PERM_SEND_MESSAGES = 0x800
+DISCORD_PERM_MANAGE_MESSAGES = 0x2000
+DISCORD_PERM_READ_MESSAGE_HISTORY = 0x10000
+BOT_MESSAGE_MAX_LENGTH = 2000
+BOT_MESSAGE_ACTION_SEND = "bot_message_send"
+BOT_MESSAGE_ACTION_EDIT = "bot_message_edit"
+BOT_MESSAGE_ACTION_DELETE = "bot_message_delete"
+BOT_MESSAGE_ACTIONS = {
+    "send": BOT_MESSAGE_ACTION_SEND,
+    "edit": BOT_MESSAGE_ACTION_EDIT,
+    "delete": BOT_MESSAGE_ACTION_DELETE,
+}
 SESSION_COOKIE = "dashboard_session"
 STATE_COOKIE = "dashboard_oauth_state"
 SESSION_TTL_SECONDS = 60 * 60 * 12
@@ -151,8 +183,16 @@ SESSIONS_LOCK = threading.RLock()
 OAUTH_STATES = {}
 OAUTH_STATES_LOCK = threading.RLock()
 BOT_GUILDS_CACHE = {"expires_at": 0, "guild_ids": None}
+BOT_GUILDS_CACHE_LOCK = threading.RLock()
+ADMIN_MESSAGE_CHANNELS_CACHE = {}
+ADMIN_MESSAGE_CHANNELS_CACHE_LOCK = threading.RLock()
+ADMIN_MESSAGE_CHANNELS_CACHE_TTL_SECONDS = 300
 MEMBER_ROLES_CACHE = {}
 MEMBER_NAME_CACHE = {}
+MEMBER_STATUS_CACHE = {}
+GUILD_SUMMARY_CACHE = {}
+GUILD_SUMMARY_CACHE_LOCK = threading.RLock()
+GUILD_SUMMARY_TTL_SECONDS = 300
 DISCORD_METADATA_CACHE_SETTINGS = DiscordMetadataCacheSettings(
     roles_ttl_seconds=DISCORD_METADATA_ROLES_TTL_SECONDS,
     channels_ttl_seconds=DISCORD_METADATA_CHANNELS_TTL_SECONDS,
@@ -230,18 +270,37 @@ def discord_request(path, *, token=None, auth_scheme="Bearer", data=None):
         encoded = None
 
     request = Request(f"{DISCORD_API_BASE}{path}", data=encoded, headers=headers)
-    try:
-        with urlopen(request, timeout=15) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"Discord respondio {exc.code}: {detail}") from exc
-    except URLError as exc:
-        raise RuntimeError(f"No pude conectar con Discord: {exc.reason}") from exc
+    max_attempts = 3 if data is None else 1
+    last_error = None
+    for attempt in range(max_attempts):
+        try:
+            with urlopen(request, timeout=15) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            last_error = RuntimeError(f"Discord respondio {exc.code}: {detail}")
+            if exc.code == 429 or exc.code >= 500:
+                retry_after = exc.headers.get("Retry-After")
+                try:
+                    delay = max(0.0, min(float(retry_after), 5.0))
+                except (TypeError, ValueError):
+                    delay = min(1.0 + attempt, 3.0)
+                if attempt + 1 < max_attempts:
+                    time.sleep(delay)
+                    continue
+            raise last_error from exc
+        except URLError as exc:
+            last_error = RuntimeError(f"No pude conectar con Discord: {exc.reason}")
+            if attempt + 1 < max_attempts:
+                time.sleep(min(1.0 + attempt, 3.0))
+                continue
+            raise last_error from exc
+
+    raise last_error or RuntimeError("No pude consultar la API de Discord.")
 
 
 def get_active_avalonian_state(guild_id, caller_id, numero_ava):
-    data = read_json_file(ACTIVE_AVALONIAN_FILE, {})
+    data = ActiveAvalonianRepository().load()
     state = (
         data.get(str(guild_id), {})
         .get(str(caller_id), {})
@@ -250,38 +309,92 @@ def get_active_avalonian_state(guild_id, caller_id, numero_ava):
     return dict(state) if isinstance(state, dict) else None
 
 
-def get_active_report_calculators_for_user(guild_id, caller_id):
-    data = read_json_file(ACTIVE_AVALONIAN_FILE, {})
-    caller_states = data.get(str(guild_id), {}).get(str(caller_id), {})
-    if not isinstance(caller_states, dict):
+def get_active_report_calculators(guild_id, caller_id=None):
+    data = ActiveAvalonianRepository().load()
+    guild_states = data.get(str(guild_id), {})
+    if not isinstance(guild_states, dict):
         return []
 
     calculators = []
-    for numero_ava, state in caller_states.items():
-        if not isinstance(state, dict):
+    for current_caller_id, caller_states in guild_states.items():
+        if caller_id is not None and str(current_caller_id) != str(caller_id):
             continue
-        if not state.get("finalized") or state.get("cancelled"):
+        if not isinstance(caller_states, dict):
             continue
-        if state.get("report_sent") and not state.get("report_rejected"):
-            continue
-        calculators.append(
-            {
-                "numero_ava": str(state.get("numero_ava") or numero_ava),
-                "title": str(state.get("title") or f"Ava {numero_ava}"),
-                "caller_name": str(state.get("caller_name") or ""),
-                "report_sent": bool(state.get("report_sent")),
-                "report_rejected": bool(state.get("report_rejected")),
-            }
-        )
-    calculators.sort(key=lambda item: int(item.get("numero_ava", 0) or 0), reverse=True)
+        for numero_ava, state in caller_states.items():
+            if not isinstance(state, dict):
+                continue
+            if not state.get("finalized") or state.get("cancelled"):
+                continue
+            if (
+                (state.get("report_sent") or state.get("report_generated"))
+                and not state.get("report_rejected")
+            ):
+                continue
+            calculators.append(
+                {
+                    "numero_ava": str(state.get("numero_ava") or numero_ava),
+                    "title": str(state.get("title") or f"Ava {numero_ava}"),
+                    "caller_id": str(state.get("caller_id") or current_caller_id),
+                    "caller_name": str(state.get("caller_name") or ""),
+                    "report_sent": bool(state.get("report_sent")),
+                    "report_generated": bool(state.get("report_generated", state.get("report_sent"))),
+                    "report_rejected": bool(state.get("report_rejected")),
+                }
+            )
+    calculators.sort(
+        key=lambda item: (
+            int(item.get("numero_ava", 0) or 0),
+            str(item.get("caller_name") or "").casefold(),
+            str(item.get("caller_id") or ""),
+        ),
+        reverse=True,
+    )
     return calculators
+
+
+def get_active_report_calculators_for_user(guild_id, caller_id):
+    return get_active_report_calculators(guild_id, caller_id=caller_id)
+
+
+def build_slot_keys_from_roles(slot_names):
+    keys = []
+    counts = {}
+    used = set()
+    for index, slot_name in enumerate(slot_names, start=1):
+        label = str(slot_name or "").strip()
+        if not label:
+            continue
+        group_key = label.lower()
+        counts[group_key] = counts.get(group_key, 0) + 1
+        candidate = label if counts[group_key] == 1 else f"{label}#{counts[group_key]}"
+        suffix = index
+        while candidate in used:
+            candidate = f"{label}#{suffix}"
+            suffix += 1
+        keys.append(candidate)
+        used.add(candidate)
+    return keys
+
+
+def ordered_report_slots(state, slots):
+    template = state.get("template") if isinstance(state.get("template"), dict) else {}
+    roles = template.get("roles") if isinstance(template.get("roles"), list) else []
+    slot_order = {
+        slot_key: index
+        for index, slot_key in enumerate(build_slot_keys_from_roles(roles), start=1)
+    }
+    return sorted(
+        slots.items(),
+        key=lambda item: (slot_order.get(str(item[0]), len(slot_order) + 1), str(item[0])),
+    )
 
 
 def serialize_report_calculator_state(state):
     slots = state.get("slots") if isinstance(state.get("slots"), dict) else {}
     participants = []
     guild_id = str(state.get("guild_id") or "")
-    for index, (slot_key, user_id) in enumerate(slots.items(), start=1):
+    for index, (slot_key, user_id) in enumerate(ordered_report_slots(state, slots), start=1):
         if not user_id:
             continue
         label = str(slot_key).split("#", 1)[0]
@@ -301,23 +414,302 @@ def serialize_report_calculator_state(state):
         "finalized": bool(state.get("finalized")),
         "cancelled": bool(state.get("cancelled")),
         "report_sent": bool(state.get("report_sent")),
+        "report_generated": bool(state.get("report_generated", state.get("report_sent"))),
+        "report_rejected": bool(state.get("report_rejected")),
         "participants": participants,
     }
+
+
+REPORT_FORMATTER = ReportFormatService()
+
+
+def report_formatter_slots_from_state(state):
+    formatter_slots = state.get("formatter_slots") if isinstance(state.get("formatter_slots"), list) else []
+    if formatter_slots:
+        return formatter_slots
+
+    slots = state.get("slots") if isinstance(state.get("slots"), dict) else {}
+    if not slots:
+        template = state.get("template") if isinstance(state.get("template"), dict) else {}
+        roles = template.get("roles") if isinstance(template.get("roles"), list) else []
+        slots = {slot_key: None for slot_key in build_slot_keys_from_roles(roles)}
+    result = []
+    for index, (slot_key, user_id) in enumerate(ordered_report_slots(state, slots), start=1):
+        result.append(
+            {
+                "index": index,
+                "slot": str(slot_key).split("#", 1)[0],
+                "user_id": int(user_id or 0) if user_id else 0,
+            }
+        )
+    return result
+
+
+def build_manual_report_calculator_state(body, session):
+    raw_count = str(body.get("participant_count") or "0").strip()
+    try:
+        participant_count = max(0, min(int(raw_count), 200))
+    except ValueError:
+        participant_count = 0
+
+    formatter_slots = [
+        {
+            "index": index,
+            "slot": "Participante",
+            "user_id": -index,
+            "mention": f"Participante {index}",
+        }
+        for index in range(1, participant_count + 1)
+    ]
+    user = session.get("user", {}) if isinstance(session, dict) else {}
+    return {
+        "guild_id": str(body.get("guild_id") or ""),
+        "caller_id": str(user.get("id") or body.get("caller_id") or ""),
+        "numero_ava": "",
+        "title": str(body.get("manual_title") or "Actividad manual")[:120],
+        "caller_name": str(user.get("global_name") or user.get("username") or ""),
+        "finalized": True,
+        "cancelled": False,
+        "manual": True,
+        "formatter_slots": formatter_slots,
+    }
+
+
+def build_report_calculator_preview(state, body):
+    slots = report_formatter_slots_from_state(state)
+    occupied_user_ids = [slot["user_id"] for slot in slots if slot.get("user_id")]
+    slot_by_user_id = {
+        int(slot["user_id"]): slot["slot"]
+        for slot in slots
+        if slot.get("user_id")
+    }
+    split_mode = str(body.get("split_mode") or "")
+    if split_mode not in {"items", "silver", "items_silver"}:
+        split_mode = "items"
+
+    silver = REPORT_FORMATTER.parse_amount(body.get("silver"))
+    items = REPORT_FORMATTER.parse_amount(body.get("items"))
+    estimated_amount = REPORT_FORMATTER.parse_amount(body.get("estimated"))
+    mapa, repa = REPORT_FORMATTER.parse_costs(body.get("costs"))
+    caller_percentage = REPORT_FORMATTER.parse_percentage(body.get("caller_percentage"))
+    looter_payment = REPORT_FORMATTER.parse_amount(body.get("looter_payment"))
+    looter_user_id = int(body.get("looter_user_id") or 0)
+    tab_sale_percentage = REPORT_FORMATTER.parse_percentage(body.get("tab_sale_percentage"))
+    adjustments = REPORT_FORMATTER.parse_adjustments(
+        body.get("adjustments"),
+        [slot["slot"] for slot in slots],
+    )
+    fines = REPORT_FORMATTER.normalize_fines(
+        body.get("fines", []),
+        occupied_user_ids,
+        lambda user_id: slot_by_user_id.get(int(user_id), ""),
+    )
+    exclusions = REPORT_FORMATTER.normalize_split_exclusions(
+        body.get("split_exclusions", []),
+        slots,
+    )
+    split_modifiers = REPORT_FORMATTER.normalize_split_modifiers(
+        body.get("split_modifiers", []),
+        slots,
+    )
+    build_loan_discounts = REPORT_FORMATTER.normalize_build_loan_discounts(
+        body.get("build_loan_discounts", []),
+        slots,
+    )
+    split_participant_count = REPORT_FORMATTER.split_participant_count(
+        occupied_user_ids,
+        exclusions,
+    )
+
+    warnings = []
+    is_manual = bool(state.get("manual"))
+    if not is_manual and not state.get("finalized"):
+        warnings.append("La Ava todavia no esta finalizada.")
+    if not occupied_user_ids:
+        warnings.append("No hay participantes cargados para el reparto.")
+    if occupied_user_ids and split_participant_count <= 0:
+        warnings.append("Todos los participantes estan excluidos del reparto.")
+    if not estimated_amount:
+        warnings.append("Falta completar el estimado.")
+    if split_mode != "silver" and not items:
+        warnings.append("Falta completar el valor de items.")
+    if split_mode != "items" and not silver:
+        warnings.append("Falta completar el silver.")
+    if looter_payment and occupied_user_ids and not looter_user_id:
+        warnings.append("Selecciona quien fue el looter para aplicar ese pago.")
+    if looter_user_id and looter_user_id not in set(occupied_user_ids):
+        warnings.append("El looter seleccionado no forma parte de esta party.")
+    if looter_user_id and REPORT_FORMATTER.split_participant_weight(looter_user_id, exclusions) < 1:
+        warnings.append("El looter tiene descuento de actividad y no recibira pago de looter.")
+        looter_user_id = 0
+        looter_payment = 0
+
+    split = REPORT_FORMATTER.calculate_split(
+        silver,
+        items,
+        mapa,
+        repa,
+        split_participant_count,
+        split_mode,
+        caller_percentage,
+        looter_payment,
+        looter_user_id,
+        tab_sale_percentage,
+        split_modifiers,
+    )
+    distribution = REPORT_FORMATTER.build_distribution(
+        slots,
+        state.get("caller_id"),
+        split,
+        adjustments,
+        exclusions,
+        split_modifiers,
+        build_loan_discounts,
+    )
+    _, available_silver, pp_required, pp_difference = REPORT_FORMATTER.evaluate_pp_distribution(split, distribution)
+    if pp_difference < 0:
+        warnings.append("El silver disponible no alcanza para cubrir los PP indicados.")
+
+    content = REPORT_FORMATTER.build_report_content(
+        title=str(state.get("title") or f"Ava {state.get('numero_ava', '')}"),
+        caller_id=state.get("caller_id"),
+        estimated=estimated_amount or str(body.get("estimated") or ""),
+        silver=silver,
+        items=items,
+        mapa=mapa,
+        repa=repa,
+        adjustments=adjustments,
+        split=split,
+        slots=slots,
+        exclusions=exclusions,
+        split_modifiers=split_modifiers,
+        build_loan_discounts=build_loan_discounts,
+    )
+    return {
+        "content": content,
+        "evaluation_content": REPORT_FORMATTER.build_final_report_text(
+            content=content,
+            fines=fines,
+            split=split,
+            distribution=distribution,
+            build_loan_discounts=build_loan_discounts,
+        ),
+        "warnings": warnings,
+        "split": {
+            "mode": split["mode"],
+            "label": split["label"],
+            "total": split["total"],
+            "item_per_user": split["item_per_user"],
+            "silver_per_user": split["silver_per_user"],
+            "split_participants": split["split_participants"],
+            "available_silver": available_silver,
+            "pp_required": pp_required,
+        },
+        "split_exclusions": exclusions,
+        "split_modifiers": split_modifiers,
+        "build_loan_discounts": build_loan_discounts,
+    }
+
+
+def parse_bool_option(value, default=True):
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "on", "si", "sí"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def report_request_idempotency_key(body, *, send_to_channel):
+    raw_fines = body.get("fines", [])
+    stable_fines = []
+    if isinstance(raw_fines, list):
+        for entry in raw_fines:
+            if not isinstance(entry, dict):
+                continue
+            stable_fines.append(
+                {
+                    "user_id": str(entry.get("user_id") or ""),
+                    "amount": str(entry.get("amount") or ""),
+                    "reason": str(entry.get("reason") or ""),
+                    "proof_name": str(entry.get("proof_name") or ""),
+                }
+            )
+    stable_payload = {
+        "guild_id": str(body.get("guild_id") or ""),
+        "caller_id": str(body.get("caller_id") or ""),
+        "numero_ava": str(body.get("numero_ava") or ""),
+        "split_mode": str(body.get("split_mode") or ""),
+        "send_to_channel": bool(send_to_channel),
+        "estimated": str(body.get("estimated") or ""),
+        "silver": str(body.get("silver") or ""),
+        "items": str(body.get("items") or ""),
+        "costs": str(body.get("costs") or ""),
+        "caller_percentage": str(body.get("caller_percentage") or ""),
+        "looter_payment": str(body.get("looter_payment") or ""),
+        "looter_user_id": str(body.get("looter_user_id") or ""),
+        "tab_sale_percentage": str(body.get("tab_sale_percentage") or ""),
+        "adjustments": str(body.get("adjustments") or ""),
+        "split_modifiers": [
+            {
+                "name": str(entry.get("name") or ""),
+                "operation": str(entry.get("operation") or ""),
+                "amount": str(entry.get("amount") or ""),
+                "description": str(entry.get("description") or ""),
+                "target_type": str(entry.get("target_type") or ""),
+                "user_id": str(entry.get("user_id") or ""),
+            }
+            for entry in body.get("split_modifiers", [])
+            if isinstance(entry, dict)
+        ],
+        "build_loan_discounts": [
+            {
+                "user_id": str(entry.get("user_id") or entry.get("player_id") or ""),
+                "amount": str(entry.get("amount") or ""),
+                "reason": str(entry.get("reason") or entry.get("description") or entry.get("motivo") or ""),
+                "collection_method": str(entry.get("collection_method") or entry.get("method") or entry.get("metodo_cobro") or ""),
+                "proof_name": str(entry.get("proof_name") or ""),
+                "proof_data_hash": hashlib.sha256(
+                    str(entry.get("proof_data_url") or "").encode("utf-8")
+                ).hexdigest()[:16] if entry.get("proof_data_url") else "",
+            }
+            for entry in body.get("build_loan_discounts", [])
+            if isinstance(entry, dict)
+        ],
+        "split_exclusions": [
+            {
+                "user_id": str(entry.get("user_id") or ""),
+                "reason": str(entry.get("reason") or ""),
+                "activity_percentage": str(entry.get("activity_percentage") or ""),
+            }
+            for entry in body.get("split_exclusions", [])
+            if isinstance(entry, dict)
+        ],
+        "fines": stable_fines,
+    }
+    return hashlib.sha256(
+        json.dumps(stable_payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()[:16]
 
 
 def get_bot_guild_ids():
     if not BOT_TOKEN:
         return None
 
-    now = time.time()
-    if BOT_GUILDS_CACHE["guild_ids"] is not None and BOT_GUILDS_CACHE["expires_at"] > now:
-        return BOT_GUILDS_CACHE["guild_ids"]
+    with BOT_GUILDS_CACHE_LOCK:
+        now = time.time()
+        if BOT_GUILDS_CACHE["guild_ids"] is not None and BOT_GUILDS_CACHE["expires_at"] > now:
+            return BOT_GUILDS_CACHE["guild_ids"]
 
-    guilds = discord_request("/users/@me/guilds", token=BOT_TOKEN, auth_scheme="Bot")
-    guild_ids = {str(guild.get("id")) for guild in guilds}
-    BOT_GUILDS_CACHE["guild_ids"] = guild_ids
-    BOT_GUILDS_CACHE["expires_at"] = now + 60
-    return guild_ids
+        guilds = discord_request("/users/@me/guilds", token=BOT_TOKEN, auth_scheme="Bot")
+        guild_ids = {str(guild.get("id")) for guild in guilds}
+        BOT_GUILDS_CACHE["guild_ids"] = guild_ids
+        BOT_GUILDS_CACHE["expires_at"] = time.time() + 300
+        return guild_ids
 
 
 def get_discord_member_role_ids(guild_id, user_id):
@@ -460,6 +852,58 @@ def get_discord_member_display_name(guild_id, user_id):
     return display_name
 
 
+def get_discord_member_status(guild_id, user_id):
+    guild_id = str(guild_id or "")
+    user_id = str(user_id or "")
+    if not guild_id or not user_id or not BOT_TOKEN:
+        return "Estado no verificado"
+
+    cache_key = (guild_id, user_id)
+    cached = MEMBER_STATUS_CACHE.get(cache_key)
+    now = time.time()
+    if cached and cached.get("expires_at", 0) > now:
+        return str(cached.get("status") or "Estado no verificado")
+
+    status = "Estado no verificado"
+    request = Request(
+        f"{DISCORD_API_BASE}/guilds/{guild_id}/members/{user_id}",
+        headers={
+            "Accept": "application/json",
+            "Authorization": f"Bot {BOT_TOKEN}",
+            "User-Agent": "Bot-Neox-Dashboard/1.0",
+        },
+        method="GET",
+    )
+    try:
+        with urlopen(request, timeout=10) as response:
+            response.read()
+        status = "En servidor"
+    except HTTPError as exc:
+        status = "Fuera del servidor" if exc.code == 404 else "Estado no verificado"
+    except URLError:
+        status = "Estado no verificado"
+
+    MEMBER_STATUS_CACHE[cache_key] = {
+        "status": status,
+        "expires_at": now + 300,
+    }
+    return status
+
+
+def resolve_dashboard_user_name(guild_id, user_id, user_name):
+    cleaned = clean_user_name(user_name, user_id)
+    fallback = f"Usuario {user_id}" if user_id else "Usuario"
+    if cleaned and cleaned != "Sin nombre":
+        return cleaned
+
+    display_name = get_discord_member_display_name(guild_id, user_id)
+    display_name = str(display_name or "").strip()
+    if display_name and display_name not in {str(user_id), fallback, "Usuario"}:
+        return display_name
+
+    return fallback
+
+
 def discord_json_request(path, *, token=None, auth_scheme="Bot", method="GET", payload=None):
     headers = {
         "Accept": "application/json",
@@ -531,6 +975,265 @@ def fetch_discord_guild_emojis(guild_id):
         token=BOT_TOKEN,
         auth_scheme="Bot",
     )
+
+
+def fetch_discord_bot_user():
+    if not BOT_TOKEN:
+        raise RuntimeError("Falta configurar ECONOMY_TOKEN o TOKEN en el archivo .env para leer metadata de Discord.")
+    return discord_json_request("/users/@me", token=BOT_TOKEN, auth_scheme="Bot")
+
+
+def fetch_discord_guild_member(guild_id, user_id):
+    if not BOT_TOKEN:
+        raise RuntimeError("Falta configurar ECONOMY_TOKEN o TOKEN en el archivo .env para leer metadata de Discord.")
+    return discord_json_request(
+        f"/guilds/{guild_id}/members/{user_id}",
+        token=BOT_TOKEN,
+        auth_scheme="Bot",
+    )
+
+
+def _permission_int(value):
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _apply_overwrite(permissions, overwrite):
+    permissions &= ~_permission_int(overwrite.get("deny"))
+    permissions |= _permission_int(overwrite.get("allow"))
+    return permissions
+
+
+def resolve_member_channel_permissions(guild_id, channel, *, member, roles):
+    guild_id = str(guild_id or "")
+    role_permissions = {
+        str(role.get("id")): _permission_int(role.get("permissions"))
+        for role in roles or []
+        if role.get("id")
+    }
+    role_ids = [str(role_id) for role_id in member.get("roles", [])]
+    member_id = str(member.get("user", {}).get("id") or "")
+
+    permissions = role_permissions.get(guild_id, 0)
+    for role_id in role_ids:
+        permissions |= role_permissions.get(role_id, 0)
+    if permissions & DISCORD_ADMINISTRATOR:
+        return permissions
+
+    overwrites = channel.get("permission_overwrites") or []
+    everyone = next(
+        (overwrite for overwrite in overwrites if str(overwrite.get("id")) == guild_id and int(overwrite.get("type", -1)) == 0),
+        None,
+    )
+    if everyone:
+        permissions = _apply_overwrite(permissions, everyone)
+
+    allow = 0
+    deny = 0
+    role_id_set = set(role_ids)
+    for overwrite in overwrites:
+        if int(overwrite.get("type", -1)) != 0 or str(overwrite.get("id")) not in role_id_set:
+            continue
+        allow |= _permission_int(overwrite.get("allow"))
+        deny |= _permission_int(overwrite.get("deny"))
+    permissions &= ~deny
+    permissions |= allow
+
+    member_overwrite = next(
+        (overwrite for overwrite in overwrites if str(overwrite.get("id")) == member_id and int(overwrite.get("type", -1)) == 1),
+        None,
+    )
+    if member_overwrite:
+        permissions = _apply_overwrite(permissions, member_overwrite)
+
+    return permissions
+
+
+def resolve_member_guild_permissions(guild_id, *, member, roles):
+    guild_id = str(guild_id or "")
+    role_permissions = {
+        str(role.get("id")): _permission_int(role.get("permissions"))
+        for role in roles or []
+    }
+    permissions = role_permissions.get(guild_id, 0)
+    for role_id in member.get("roles") or []:
+        permissions |= role_permissions.get(str(role_id), 0)
+    return permissions
+
+
+def bot_has_server_template_permissions(guild_id):
+    bot_user = fetch_discord_bot_user()
+    bot_user_id = str(bot_user.get("id") or "")
+    if not bot_user_id:
+        return False
+    roles = fetch_discord_guild_roles(guild_id)
+    member = fetch_discord_guild_member(guild_id, bot_user_id)
+    permissions = resolve_member_guild_permissions(guild_id, member=member, roles=roles)
+    return bool(
+        permissions & DISCORD_ADMINISTRATOR
+        or (
+            permissions & DISCORD_PERM_MANAGE_ROLES
+            and permissions & DISCORD_PERM_MANAGE_CHANNELS
+        )
+    )
+
+
+def build_server_template_preview_payload(backup_detail, *, target_guild_id, target_guild_name, options=None):
+    target_roles = fetch_discord_guild_roles(target_guild_id)
+    target_channels = fetch_discord_guild_channels(target_guild_id)
+    payload = ServerTemplateService().build_preview(
+        backup_detail,
+        target_guild_id=target_guild_id,
+        target_guild_name=target_guild_name,
+        target_roles=target_roles,
+        target_channels=target_channels,
+        options=options,
+    )
+    preview = payload.get("preview") or payload
+    preview["bot_permissions_ok"] = bot_has_server_template_permissions(target_guild_id)
+    if not preview["bot_permissions_ok"]:
+        preview.setdefault("warnings", []).append(
+            "El bot no tiene Gestionar roles y Gestionar canales en el servidor destino."
+        )
+    return preview
+
+
+def build_admin_bot_message_channels_payload(guild_id, *, force_refresh=False):
+    guild_id = str(guild_id or "")
+    cache_key = guild_id
+    now = time.time()
+    if not force_refresh:
+        with ADMIN_MESSAGE_CHANNELS_CACHE_LOCK:
+            cached = ADMIN_MESSAGE_CHANNELS_CACHE.get(cache_key)
+            if cached and now < float(cached.get("expires_at") or 0):
+                return {"channels": list(cached.get("channels") or []), "cached": True}
+
+    bot_user = fetch_discord_bot_user()
+    bot_user_id = str(bot_user.get("id") or "")
+    if not bot_user_id:
+        raise RuntimeError("No pude identificar el usuario del bot.")
+
+    raw_channels = fetch_discord_guild_channels(guild_id)
+    roles = fetch_discord_guild_roles(guild_id)
+    member = fetch_discord_guild_member(guild_id, bot_user_id)
+    allowed_channels = []
+    for channel in raw_channels or []:
+        channel_type = int(channel.get("type", -1))
+        if channel_type not in (0, 5):
+            continue
+
+        permissions = resolve_member_channel_permissions(
+            guild_id,
+            channel,
+            member=member,
+            roles=roles,
+        )
+        has_admin = bool(permissions & DISCORD_ADMINISTRATOR)
+        can_view = has_admin or bool(permissions & DISCORD_PERM_VIEW_CHANNEL)
+        can_send = has_admin or bool(permissions & DISCORD_PERM_SEND_MESSAGES)
+        can_history = has_admin or bool(permissions & DISCORD_PERM_READ_MESSAGE_HISTORY)
+        if not (can_view and can_send):
+            continue
+
+        allowed_channels.append({
+            "id": str(channel.get("id") or ""),
+            "name": str(channel.get("name") or channel.get("id") or ""),
+            "type": channel_type,
+            "can_read_history": can_history,
+            "can_manage_messages": has_admin or bool(permissions & DISCORD_PERM_MANAGE_MESSAGES),
+        })
+
+    allowed_channels.sort(key=lambda item: item.get("name", "").casefold())
+    if force_refresh:
+        get_discord_metadata_service().invalidate(str(guild_id), kinds=["channels", "categories"])
+    with ADMIN_MESSAGE_CHANNELS_CACHE_LOCK:
+        ADMIN_MESSAGE_CHANNELS_CACHE[cache_key] = {
+            "channels": list(allowed_channels),
+            "expires_at": now + ADMIN_MESSAGE_CHANNELS_CACHE_TTL_SECONDS,
+        }
+    return {"channels": allowed_channels, "cached": False}
+
+
+def validate_bot_message_request_payload(body):
+    action = str(body.get("action") or "").strip().lower()
+    if action not in BOT_MESSAGE_ACTIONS:
+        raise ValueError("Accion invalida.")
+
+    guild_id = str(body.get("guild_id") or "").strip()
+    channel_id = str(body.get("channel_id") or "").strip()
+    message_id = str(body.get("message_id") or "").strip()
+    content = str(body.get("content") or "")
+    if not guild_id:
+        raise ValueError("Debes elegir un servidor.")
+    if not channel_id:
+        raise ValueError("Debes elegir un canal.")
+
+    if action in {"send", "edit"}:
+        content = content.strip()
+        if not content:
+            raise ValueError("El mensaje no puede estar vacio.")
+        if len(content) > BOT_MESSAGE_MAX_LENGTH:
+            raise ValueError(f"El mensaje supera el maximo de {BOT_MESSAGE_MAX_LENGTH} caracteres.")
+    else:
+        content = ""
+
+    if action in {"edit", "delete"} and not message_id.isdigit():
+        raise ValueError("Debes indicar un ID de mensaje valido.")
+
+    return {
+        "action": action,
+        "action_type": BOT_MESSAGE_ACTIONS[action],
+        "guild_id": guild_id,
+        "channel_id": channel_id,
+        "message_id": message_id,
+        "content": content,
+    }
+
+
+def validate_bot_message_lookup_query(query):
+    guild_id = str(query.get("guild_id", [""])[0] or "").strip()
+    channel_id = str(query.get("channel_id", [""])[0] or "").strip()
+    message_id = str(query.get("message_id", [""])[0] or "").strip()
+    if not guild_id:
+        raise ValueError("Debes elegir un servidor.")
+    if not channel_id:
+        raise ValueError("Debes elegir un canal.")
+    if not message_id.isdigit():
+        raise ValueError("Debes indicar un ID de mensaje valido.")
+    return guild_id, channel_id, message_id
+
+
+def fetch_admin_bot_message_for_edit(guild_id, channel_id, message_id):
+    channels_payload = build_admin_bot_message_channels_payload(guild_id)
+    channels_by_id = {
+        str(channel.get("id")): channel
+        for channel in channels_payload.get("channels", [])
+    }
+    channel = channels_by_id.get(str(channel_id))
+    if not channel:
+        raise PermissionError("El bot no tiene permisos suficientes en ese canal.")
+    if not channel.get("can_read_history"):
+        raise PermissionError("Para editar mensajes el bot debe poder leer el historial del canal.")
+
+    bot_user = fetch_discord_bot_user()
+    bot_user_id = str(bot_user.get("id") or "")
+    message = discord_json_request(
+        f"/channels/{channel_id}/messages/{message_id}",
+        token=BOT_TOKEN,
+        auth_scheme="Bot",
+    )
+    author = message.get("author") if isinstance(message.get("author"), dict) else {}
+    if str(author.get("id") or "") != bot_user_id:
+        raise PermissionError("Solo se pueden editar mensajes enviados por este bot.")
+
+    return {
+        "id": str(message.get("id") or ""),
+        "channel_id": str(channel_id),
+        "content": str(message.get("content") or ""),
+        "created_at": discord_timestamp_to_display(message.get("timestamp")),
+    }
 
 
 def get_discord_metadata_service():
@@ -717,25 +1420,334 @@ def get_guild_ticket_records(guild_id):
     return records if isinstance(records, list) else []
 
 
+def ticket_record_identity(record):
+    for key in ("record_id", "channel_id", "fine_id", "number", "ticket_id", "id"):
+        value = str(record.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def truthy_record_flag(value):
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def ticket_record_status(record):
+    raw_status = str(record.get("status") or "open").strip().lower()
+    if raw_status == "deleted" or truthy_record_flag(record.get("is_deleted")) or record.get("deleted_at"):
+        return "deleted"
+    if raw_status in {"closed", "paid", "resolved"}:
+        return "closed"
+    if record.get("closed_at"):
+        return "closed"
+    return "open"
+
+
+def ticket_record_type(record):
+    if str(record.get("ticket_type") or "").strip().lower() == "fine":
+        return "fine"
+    if str(record.get("panel_id") or "") == "__fine__" or record.get("fine_id"):
+        return "fine"
+    return "normal"
+
+
+FINE_EXPORT_FIELDS = (
+    "id",
+    "guild_id",
+    "guild_name",
+    "report_ava",
+    "fined_user_id",
+    "fined_user_name",
+    "amount",
+    "reason",
+    "proof_path",
+    "proof_name",
+    "status",
+    "is_deleted",
+    "blocked_role_id",
+    "resolver_role_id",
+    "ticket_channel_id",
+    "ticket_message_id",
+    "announcement_channel_id",
+    "announcement_message_id",
+    "created_by_id",
+    "created_by_name",
+    "paid_by_id",
+    "paid_by_name",
+    "created_at",
+    "updated_at",
+    "paid_at",
+    "closed_at",
+    "deleted_at",
+)
+
+
+def fine_payload_from_record(record):
+    fine = record.get("fine") if isinstance(record.get("fine"), dict) else {}
+    payload = {key: fine.get(key) for key in FINE_EXPORT_FIELDS if key in fine}
+    aliases = {
+        "id": record.get("fine_id") or record.get("id") or record.get("number"),
+        "guild_id": record.get("guild_id"),
+        "report_ava": record.get("report_ava"),
+        "fined_user_id": record.get("fined_user_id") or record.get("owner_id"),
+        "fined_user_name": record.get("fined_user_name") or record.get("owner_name"),
+        "amount": record.get("amount"),
+        "reason": record.get("reason"),
+        "proof_path": record.get("proof_path"),
+        "proof_name": record.get("proof_name"),
+        "status": record.get("fine_status") or fine.get("status"),
+        "is_deleted": record.get("is_deleted"),
+        "blocked_role_id": record.get("blocked_role_id"),
+        "resolver_role_id": record.get("resolver_role_id"),
+        "ticket_channel_id": record.get("ticket_channel_id") or record.get("channel_id"),
+        "ticket_message_id": record.get("ticket_message_id"),
+        "announcement_channel_id": record.get("announcement_channel_id"),
+        "announcement_message_id": record.get("announcement_message_id"),
+        "created_by_id": record.get("created_by_id"),
+        "created_by_name": record.get("created_by_name"),
+        "paid_by_id": record.get("paid_by_id"),
+        "paid_by_name": record.get("paid_by_name"),
+        "created_at": record.get("created_at"),
+        "updated_at": record.get("updated_at"),
+        "paid_at": record.get("paid_at"),
+        "closed_at": record.get("fine_closed_at") or fine.get("closed_at"),
+        "deleted_at": record.get("deleted_at"),
+    }
+    for key, value in aliases.items():
+        if value not in (None, ""):
+            payload[key] = value
+    if "id" in payload:
+        payload["id"] = str(payload.get("id") or "")
+    if "amount" in payload:
+        try:
+            payload["amount"] = int(payload.get("amount") or 0)
+        except (TypeError, ValueError):
+            payload["amount"] = 0
+    payload["is_deleted"] = truthy_record_flag(payload.get("is_deleted"))
+    return payload
+
+
+def fine_to_ticket_record(fine):
+    fine_id = int(fine.get("id") or 0)
+    is_deleted = bool(int(fine.get("is_deleted") or 0)) or bool(fine.get("deleted_at"))
+    fine_status = str(fine.get("status") or "open").lower()
+    ticket_status = "deleted" if is_deleted else "closed" if fine_status == "paid" else "open"
+    fine_payload = fine_payload_from_record({**dict(fine), "fine_id": fine_id, "fine_status": fine_status})
+    return {
+        "number": fine_id,
+        "status": ticket_status,
+        "fine_status": fine_status,
+        "is_deleted": is_deleted,
+        "ticket_type": "fine",
+        "fine_id": str(fine_id),
+        "guild_id": str(fine.get("guild_id") or ""),
+        "channel_id": str(fine.get("ticket_channel_id") or ""),
+        "channel_name": f"multa-{fine_id:04d}" if fine_id else "",
+        "owner_id": str(fine.get("fined_user_id") or ""),
+        "owner_name": str(fine.get("fined_user_name") or ""),
+        "panel_id": "__fine__",
+        "panel_name": "Multa",
+        "option_id": "",
+        "option_label": "",
+        "claimed_by_id": "",
+        "claimed_by_name": "",
+        "created_at": str(fine.get("created_at") or ""),
+        "closed_at": str(fine.get("closed_at") or ""),
+        "deleted_at": str(fine.get("deleted_at") or ""),
+        "transcript": [],
+        "fine": fine_payload,
+    }
+
+
+def normalize_ticket_record(record):
+    normalized = dict(record)
+    ticket_type = ticket_record_type(normalized)
+    status = ticket_record_status(normalized)
+    transcript = normalized.get("transcript") if isinstance(normalized.get("transcript"), list) else []
+    normalized["status"] = status
+    normalized["ticket_type"] = ticket_type
+    normalized["type_label"] = "Multa" if ticket_type == "fine" else "Ticket"
+    normalized["record_id"] = ticket_record_identity(normalized)
+    normalized["user_id"] = str(normalized.get("owner_id") or normalized.get("fined_user_id") or "")
+    normalized["user_name"] = str(normalized.get("owner_name") or normalized.get("fined_user_name") or "")
+    normalized["has_transcript"] = bool(normalized.get("transcribed_at") or transcript)
+    normalized["transcript_count"] = len(transcript)
+    normalized["deleted_at"] = str(normalized.get("deleted_at") or "")
+    if ticket_type == "fine":
+        fine_payload = fine_payload_from_record(normalized)
+        normalized["fine"] = fine_payload
+        normalized["fine_id"] = str(normalized.get("fine_id") or fine_payload.get("id") or "")
+        normalized["fine_status"] = str(normalized.get("fine_status") or fine_payload.get("status") or "")
+        normalized["amount"] = fine_payload.get("amount", normalized.get("amount") or 0)
+        normalized["reason"] = fine_payload.get("reason", normalized.get("reason") or "")
+        normalized["report_ava"] = fine_payload.get("report_ava", normalized.get("report_ava") or "")
+        normalized["proof_name"] = fine_payload.get("proof_name", normalized.get("proof_name") or "")
+    return normalized
+
+
+def _ticket_record_search_blob(record):
+    values = [
+        record.get("record_id"),
+        record.get("number"),
+        record.get("ticket_type"),
+        record.get("type_label"),
+        record.get("channel_id"),
+        record.get("channel_name"),
+        record.get("user_id"),
+        record.get("user_name"),
+        record.get("panel_name"),
+        record.get("option_label"),
+        record.get("claimed_by_name"),
+        record.get("report_ava"),
+        record.get("reason"),
+        (record.get("fine") or {}).get("reason") if isinstance(record.get("fine"), dict) else "",
+        (record.get("fine") or {}).get("report_ava") if isinstance(record.get("fine"), dict) else "",
+    ]
+    return " ".join(str(value or "") for value in values).lower()
+
+
+def _parse_ticket_record_date(value):
+    text = str(value or "").strip()
+    if not text:
+        return None
+    for fmt in (
+        "%Y-%m-%dT%H:%M:%SZ",
+        "%Y-%m-%dT%H:%M:%S.%fZ",
+        "%Y-%m-%d",
+        "%d/%m/%Y | %H:%M:%S",
+        "%d/%m/%Y | %H:%M",
+        "%d/%m/%Y",
+    ):
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def _ticket_record_sort_key(record):
+    for field in ("created_at", "closed_at", "deleted_at", "transcribed_at"):
+        parsed = _parse_ticket_record_date(record.get(field))
+        if parsed:
+            return parsed
+    return datetime.min
+
+
+def ticket_record_matches_type(record, record_type):
+    record_type = str(record_type or "").strip().lower()
+    if not record_type:
+        return True
+    if record_type in {"fine", "normal"}:
+        return ticket_record_type(record) == record_type
+    if record_type.startswith("panel:"):
+        panel_id = record_type.split(":", 1)[1]
+        return str(record.get("panel_id") or "").strip().lower() == panel_id
+    return str(record.get("panel_name") or "").strip().lower() == record_type
+
+
+def _parse_date_filter(value):
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.strptime(text, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def merge_ticket_record(existing, incoming):
+    merged = dict(existing or {})
+    incoming = dict(incoming or {})
+    existing_status = ticket_record_status(merged)
+    incoming_status = ticket_record_status(incoming)
+
+    for key, value in incoming.items():
+        if key in {"transcript", "transcribed_at", "claimed_by_id", "claimed_by_name"} and merged.get(key):
+            continue
+        if key in {"status", "closed_at", "deleted_at", "is_deleted"}:
+            continue
+        if value not in (None, "", []):
+            merged[key] = value
+
+    if incoming.get("fine"):
+        merged["fine"] = {
+            **(merged.get("fine") if isinstance(merged.get("fine"), dict) else {}),
+            **incoming.get("fine"),
+        }
+
+    if existing_status == "deleted" or incoming_status == "deleted":
+        merged["status"] = "deleted"
+        merged["is_deleted"] = True
+        merged["deleted_at"] = merged.get("deleted_at") or incoming.get("deleted_at") or ""
+    elif existing_status == "closed" or incoming_status == "closed":
+        merged["status"] = "closed"
+    else:
+        merged["status"] = "open"
+
+    merged["closed_at"] = merged.get("closed_at") or incoming.get("closed_at") or ""
+    return normalize_ticket_record(merged)
+
+
+def get_all_guild_ticket_records(guild_id):
+    records = [normalize_ticket_record(record) for record in get_guild_ticket_records(guild_id)]
+    fine_indexes = {
+        str(record.get("fine_id") or ""): index
+        for index, record in enumerate(records)
+        if ticket_record_type(record) == "fine" and record.get("fine_id")
+    }
+    channel_indexes = {
+        str(record.get("channel_id") or ""): index
+        for index, record in enumerate(records)
+        if record.get("channel_id")
+    }
+    for fine in FineService().get_ticket_records(guild_id):
+        fine_record = normalize_ticket_record(fine_to_ticket_record(fine))
+        fine_id = str(fine_record.get("fine_id") or "")
+        channel_id = str(fine_record.get("channel_id") or "")
+        existing_index = fine_indexes.get(fine_id) if fine_id else None
+        if existing_index is None and channel_id:
+            existing_index = channel_indexes.get(channel_id)
+        if existing_index is not None:
+            records[existing_index] = merge_ticket_record(records[existing_index], fine_record)
+            continue
+        records.append(fine_record)
+        record_index = len(records) - 1
+        if fine_id:
+            fine_indexes[fine_id] = record_index
+        if channel_id:
+            channel_indexes[channel_id] = record_index
+    return records
+
+
 def ticket_records_summary(records):
     today = datetime.now(ARGENTINA_TZ).strftime("%d/%m/%Y")
     summary = {
         "open": 0,
+        "closed": 0,
         "claimed": 0,
         "closed_today": 0,
         "transcribed": 0,
         "deleted": 0,
+        "normal": 0,
+        "fine": 0,
         "total": len(records),
         "updated_at": datetime.now(ARGENTINA_TZ).strftime("%d/%m/%Y | %H:%M:%S"),
     }
     for record in records:
-        status = str(record.get("status") or "open").lower()
+        status = ticket_record_status(record)
+        ticket_type = ticket_record_type(record)
         if status == "open":
             summary["open"] += 1
+        if status == "closed":
+            summary["closed"] += 1
         if record.get("claimed_by_id"):
             summary["claimed"] += 1
         if status == "deleted":
             summary["deleted"] += 1
+        if ticket_type in {"normal", "fine"}:
+            summary[ticket_type] += 1
         if record.get("transcribed_at") or record.get("transcript"):
             summary["transcribed"] += 1
         if str(record.get("closed_at") or "").startswith(today):
@@ -744,21 +1756,50 @@ def ticket_records_summary(records):
 
 
 def get_guild_ticket_records_page(guild_id, params):
-    payload = DashboardJsonRepository(TICKET_RECORDS_FILE).list_guild_items_page(
-        guild_id,
-        page=params["page"],
-        page_size=params["page_size"],
-        search=params["search"],
-        status=params["status"],
-        record_type=params["record_type"],
-        date_from=params["date_from"],
-        date_to=params["date_to"],
-        candidate_date_fields=("created_at", "closed_at", "transcribed_at"),
+    records = get_all_guild_ticket_records(guild_id)
+    query = str(params["search"] or "").strip().lower()
+    status = str(params["status"] or "").strip().lower()
+    record_type = str(params["record_type"] or "").strip().lower()
+    sort_order = str(params.get("sort") or "newest").strip().lower()
+    date_from = str(params["date_from"] or "").strip()
+    date_to = str(params["date_to"] or "").strip()
+
+    filtered = []
+    for record in records:
+        if query and query not in _ticket_record_search_blob(record):
+            continue
+        if status and ticket_record_status(record) != status:
+            continue
+        if not ticket_record_matches_type(record, record_type):
+            continue
+        if date_from or date_to:
+            record_date = None
+            for field in ("created_at", "closed_at", "deleted_at", "transcribed_at"):
+                record_date = _parse_ticket_record_date(record.get(field))
+                if record_date:
+                    break
+            from_date = _parse_date_filter(date_from)
+            to_date = _parse_date_filter(date_to)
+            if not record_date:
+                continue
+            if from_date and record_date.date() < from_date:
+                continue
+            if to_date and record_date.date() > to_date:
+                continue
+        filtered.append(record)
+
+    filtered.sort(key=_ticket_record_sort_key, reverse=sort_order != "oldest")
+    total_items = len(filtered)
+    offset = (params["page"] - 1) * params["page_size"]
+    paged = filtered[offset:offset + params["page_size"]]
+    return page_response(
+        paged,
+        params["page"],
+        params["page_size"],
+        total_items,
         item_key="records",
+        extra={"summary": ticket_records_summary(records)},
     )
-    payload["summary"] = ticket_records_summary(get_guild_ticket_records(guild_id))
-    payload["records"] = payload["items"]
-    return payload
 
 
 def discord_timestamp_to_display(value):
@@ -802,15 +1843,115 @@ def serialize_discord_message(message):
 
 
 def get_ticket_record(guild_id, record_id):
-    for record in get_guild_ticket_records(guild_id):
-        if str(record.get("channel_id") or record.get("number") or "") == str(record_id):
+    for record in get_all_guild_ticket_records(guild_id):
+        if str(record.get("record_id") or record.get("channel_id") or record.get("number") or "") == str(record_id):
             return record
     return None
+
+
+def ticket_record_transcript(record):
+    transcript = record.get("transcript") if isinstance(record.get("transcript"), list) else []
+    return transcript
+
+
+def safe_export_filename(value, fallback="ticket"):
+    text = str(value or "").strip().lower()
+    text = re.sub(r"[^a-z0-9_.-]+", "-", text)
+    text = text.strip(".-")
+    return text or fallback
+
+
+def build_ticket_export_payload(guild_id, guild_name, record):
+    transcript = ticket_record_transcript(record)
+    if not transcript:
+        raise ValueError("Este ticket no tiene transcripcion disponible para exportar.")
+
+    record_id = record.get("record_id") or ticket_record_identity(record)
+    ticket_type = record.get("ticket_type") or ticket_record_type(record)
+    user_id = record.get("user_id") or record.get("owner_id") or record.get("fined_user_id") or ""
+    user_name = record.get("user_name") or record.get("owner_name") or record.get("fined_user_name") or ""
+    channel_name = record.get("channel_name") or f"ticket-{record.get('number', record_id)}"
+    return {
+        "guild_id": str(guild_id),
+        "guild_name": str(guild_name or f"Servidor {guild_id}"),
+        "exported_at": datetime.now(ARGENTINA_TZ).strftime("%d/%m/%Y | %H:%M:%S"),
+        "ticket": {
+            "record_id": str(record_id or ""),
+            "number": record.get("number"),
+            "server": {
+                "id": str(guild_id),
+                "name": str(guild_name or f"Servidor {guild_id}"),
+            },
+            "channel": {
+                "id": str(record.get("channel_id") or ""),
+                "name": str(channel_name or ""),
+            },
+            "user": {
+                "id": str(user_id or ""),
+                "name": str(user_name or ""),
+            },
+            "ticket_type": str(ticket_type or "normal"),
+            "type_label": record.get("type_label") or ("Multa" if ticket_type == "fine" else "Ticket"),
+            "panel_id": str(record.get("panel_id") or ""),
+            "panel_name": str(record.get("panel_name") or ""),
+            "option_id": str(record.get("option_id") or ""),
+            "option_label": str(record.get("option_label") or ""),
+            "status": ticket_record_status(record),
+            "created_at": str(record.get("created_at") or ""),
+            "closed_at": str(record.get("closed_at") or ""),
+            "deleted_at": str(record.get("deleted_at") or ""),
+            "transcribed_at": str(record.get("transcribed_at") or ""),
+            "fine_id": str(record.get("fine_id") or ""),
+            "fine": fine_payload_from_record(record) if ticket_record_type(record) == "fine" else None,
+        },
+        "transcript": {
+            "message_count": len(transcript),
+            "messages": transcript,
+            "content_text": "\n".join(
+                f"[{message.get('created_at', '')}] {message.get('author_name') or message.get('author') or 'Usuario'}: {message.get('content') or ''}"
+                for message in transcript
+                if isinstance(message, dict)
+            ),
+        },
+    }
 
 
 def delete_guild_ticket_record(guild_id, record_id):
     guild_id = str(guild_id)
     record_id = str(record_id)
+    current_record = get_ticket_record(guild_id, record_id)
+    if current_record and ticket_record_type(current_record) == "fine":
+        fine_id = str(current_record.get("fine_id") or current_record.get("number") or "").strip()
+        if not fine_id.isdigit():
+            LOGGER.warning("No pude aplicar borrado logico a multa sin fine_id guild=%s record=%s", guild_id, record_id)
+            return False
+
+        fine = FineRepository().soft_delete(int(fine_id))
+        if fine is None:
+            LOGGER.warning("No encontre multa para borrado logico guild=%s fine_id=%s record=%s", guild_id, fine_id, record_id)
+            return False
+
+        deleted_at = str(fine.get("deleted_at") or datetime.now(ARGENTINA_TZ).strftime("%d/%m/%Y | %H:%M"))
+
+        def mark_fine_record(data):
+            for record in data.get(guild_id, []) if isinstance(data, dict) else []:
+                identifiers = {
+                    str(record.get("record_id") or ""),
+                    str(record.get("channel_id") or ""),
+                    str(record.get("fine_id") or ""),
+                    str(record.get("number") or ""),
+                }
+                if record_id not in identifiers and fine_id not in identifiers:
+                    continue
+                record["status"] = "deleted"
+                record["is_deleted"] = True
+                record["deleted_at"] = deleted_at
+                record["fine"] = fine_payload_from_record({**record, **fine, "fine_id": fine_id})
+            return data
+
+        mutate_json_file_safe(TICKET_RECORDS_FILE, {}, mark_fine_record)
+        return True
+
     removed = {"record": None}
 
     def mutate(data):
@@ -1218,6 +2359,13 @@ def normalize_ticket_panel(panel):
             "label": str(option.get("label") or f"Opcion {index}")[:80],
             "emoji": str(option.get("emoji") or "")[:80],
             "description": str(option.get("description") or "")[:100],
+            "ticket_open_content": str(option.get("ticket_open_content") or "")[:2000],
+            "ticket_open_title": str(option.get("ticket_open_title") or "")[:256],
+            "ticket_open_description": str(option.get("ticket_open_description") or "")[:4000],
+            "ticket_open_color": str(option.get("ticket_open_color") or "")[:20],
+            "ticket_open_footer": str(option.get("ticket_open_footer") or "")[:2048],
+            "ticket_open_image_url": str(option.get("ticket_open_image_url") or "")[:500],
+            "ticket_open_thumbnail_url": str(option.get("ticket_open_thumbnail_url") or "")[:500],
         })
 
     if not normalized_options:
@@ -1251,6 +2399,9 @@ def normalize_ticket_panel(panel):
         "options": normalized_options,
         "permissions": {
             "ticket_role_permissions": normalize_ticket_role_permissions(permissions),
+            "owner_permissions": normalize_ticket_owner_permissions(permissions),
+            "add_member_roles": normalize_id_list(permissions.get("add_member_roles"))[:3],
+            "add_member_user_ids": normalize_digit_id_list(permissions.get("add_member_user_ids"))[:10],
             "claim_roles": normalize_id_list(permissions.get("claim_roles"))[:3],
             "close_roles": normalize_id_list(permissions.get("close_roles"))[:3],
             "reopen_roles": normalize_id_list(permissions.get("reopen_roles"))[:3],
@@ -1266,6 +2417,23 @@ def normalize_id_list(value):
     if isinstance(value, str):
         return [item.strip() for item in value.split(",") if item.strip()]
     return []
+
+
+def normalize_digit_id_list(value):
+    return [item for item in normalize_id_list(value) if str(item).isdigit()]
+
+
+def normalize_ticket_owner_permissions(permissions):
+    values = permissions.get("owner_permissions")
+    if not isinstance(values, list):
+        return list(DEFAULT_TICKET_OWNER_PERMISSIONS)
+
+    keys = [
+        str(value)
+        for value in values
+        if str(value) in TICKET_CHANNEL_PERMISSION_KEYS
+    ]
+    return keys
 
 
 def normalize_ticket_role_permissions(permissions):
@@ -1395,10 +2563,7 @@ def build_ticket_message_payload(panel):
 
 
 def get_connection():
-    init_database()
-    connection = sqlite3.connect(DATABASE_FILE)
-    connection.row_factory = sqlite3.Row
-    return connection
+    return database_connection()
 
 
 def row_to_dict(row):
@@ -1483,7 +2648,12 @@ def get_balances(connection, guild_id):
     for index, row in enumerate(rows, start=1):
         balance = row_to_dict(row)
         balance["rank"] = index
-        balance["user_name"] = clean_user_name(balance.get("user_name"), balance.get("user_id"))
+        balance["user_name"] = resolve_dashboard_user_name(
+            guild_id,
+            balance.get("user_id"),
+            balance.get("user_name"),
+        )
+        balance["member_status"] = get_discord_member_status(guild_id, balance.get("user_id"))
         balance["updated_at_display"] = format_argentina_datetime(balance.get("updated_at"))
         balances.append(balance)
 
@@ -1505,6 +2675,8 @@ def get_operations(connection, guild_id, limit=DEFAULT_LIMIT):
             amount,
             previous_balance,
             new_balance,
+            reason,
+            player_status,
             date,
             time,
             created_at
@@ -1555,14 +2727,23 @@ def query_pagination(query):
         "search": query_text(query, "q", query_text(query, "search", "")).strip(),
         "status": query_text(query, "status", "").strip(),
         "record_type": query_text(query, "type", "").strip(),
+        "sort": query_text(query, "sort", "newest").strip(),
         "date_from": query_text(query, "date_from", "").strip(),
         "date_to": query_text(query, "date_to", "").strip(),
     }
 
 
-def serialize_balance_item(item):
+def serialize_balance_item(item, guild_id=None):
     payload = dict(item)
-    payload["user_name"] = clean_user_name(payload.get("user_name"), payload.get("user_id"))
+    payload["user_name"] = resolve_dashboard_user_name(
+        guild_id or payload.get("guild_id"),
+        payload.get("user_id"),
+        payload.get("user_name"),
+    )
+    payload["member_status"] = get_discord_member_status(
+        guild_id or payload.get("guild_id"),
+        payload.get("user_id"),
+    )
     payload["updated_at_display"] = format_argentina_datetime(payload.get("updated_at"))
     return payload
 
@@ -1580,11 +2761,85 @@ def serialize_fine_item(fine):
         "amount": int(fine.get("amount") or 0),
         "reason": str(fine.get("reason") or ""),
         "status": str(fine.get("status") or "open"),
+        "is_deleted": bool(int(fine.get("is_deleted") or 0)),
         "created_by_name": str(fine.get("created_by_name") or ""),
         "paid_by_name": str(fine.get("paid_by_name") or ""),
         "created_at": str(fine.get("created_at") or ""),
         "paid_at": str(fine.get("paid_at") or ""),
+        "deleted_at": str(fine.get("deleted_at") or ""),
         "ticket_channel_id": str(fine.get("ticket_channel_id") or ""),
+    }
+
+
+def apply_dashboard_balance_change(guild_id, body, session):
+    identifier = str(body.get("user") or body.get("user_id") or body.get("identifier") or "").strip()
+    category = str(body.get("category") or "").strip().lower()
+    action = str(body.get("action") or "remove").strip().lower()
+    reason = str(body.get("reason") or "").strip()
+
+    if category not in {"items", "silver"}:
+        raise ValueError("Selecciona una categoria valida.")
+    if action not in {"add", "remove"}:
+        raise ValueError("Selecciona una accion valida.")
+    if not identifier:
+        raise ValueError("Debes indicar un usuario.")
+
+    try:
+        amount = int(str(body.get("amount") or "").strip())
+    except (TypeError, ValueError):
+        raise ValueError("La cantidad debe ser un numero entero.")
+    if amount <= 0:
+        raise ValueError("La cantidad debe ser mayor a 0.")
+
+    balance_repo = BalanceRepository()
+    resolved = balance_repo.resolve_existing_user(guild_id, identifier)
+    if not resolved:
+        raise LookupError("No encontre ese usuario en la base historica de economia.")
+
+    player_status = get_discord_member_status(guild_id, resolved["user_id"])
+    previous_balance, new_balance = balance_repo.modify_existing_balance(
+        guild_id,
+        resolved["user_id"],
+        amount,
+        category,
+        add=action == "add",
+    )
+    player_name = resolve_dashboard_user_name(guild_id, resolved["user_id"], resolved.get("user_name"))
+    balance_repo.update_user_name(guild_id, resolved["user_id"], player_name)
+    viewer = session.get("user", {}) if isinstance(session, dict) else {}
+    operator_name = str(viewer.get("global_name") or viewer.get("username") or "Dashboard")
+    operator_id = str(viewer.get("id") or "")
+    now = datetime.now(ARGENTINA_TZ)
+    OperationRepository().append(
+        guild_id,
+        {
+            "action": "Dashboard balance",
+            "operator": operator_name,
+            "operator_id": operator_id,
+            "player": player_name,
+            "player_id": str(resolved["user_id"]),
+            "type": "ADD" if action == "add" else "REMOVE",
+            "category": "Items" if category == "items" else "Silver",
+            "amount": amount,
+            "previous_balance": previous_balance,
+            "new_balance": new_balance,
+            "reason": reason,
+            "player_status": player_status,
+            "date": now.strftime("%d/%m/%Y"),
+            "time": now.strftime("%H:%M"),
+        },
+    )
+
+    updated = balance_repo.get_balance_record(guild_id, resolved["user_id"])
+    return {
+        "balance": serialize_balance_item(updated or resolved, guild_id),
+        "operation": {
+            "player": player_name,
+            "player_id": str(resolved["user_id"]),
+            "previous_balance": previous_balance,
+            "new_balance": new_balance,
+            "player_status": player_status,
+        },
     }
 
 
@@ -1604,6 +2859,162 @@ def get_discord_metadata_payload(guild_id, *, kinds=None, force_refresh=False):
     )
 
 
+def discord_guild_icon_url(guild_id, icon_hash):
+    guild_id = str(guild_id or "")
+    icon_hash = str(icon_hash or "")
+    if not guild_id or not icon_hash:
+        return ""
+    extension = "gif" if icon_hash.startswith("a_") else "png"
+    return f"https://cdn.discordapp.com/icons/{guild_id}/{icon_hash}.{extension}?size=128"
+
+
+def fetch_discord_guild_summary(guild_id):
+    if not BOT_TOKEN:
+        return {}
+    guild_id = str(guild_id or "")
+    now = time.time()
+    with GUILD_SUMMARY_CACHE_LOCK:
+        entry = GUILD_SUMMARY_CACHE.get(guild_id)
+        if entry and entry.get("expires_at", 0) > now:
+            return dict(entry.get("summary") or {})
+
+    try:
+        guild = discord_json_request(
+            f"/guilds/{guild_id}?with_counts=true",
+            token=BOT_TOKEN,
+            auth_scheme="Bot",
+        )
+        summary = guild if isinstance(guild, dict) else {}
+        with GUILD_SUMMARY_CACHE_LOCK:
+            GUILD_SUMMARY_CACHE[guild_id] = {
+                "expires_at": now + GUILD_SUMMARY_TTL_SECONDS,
+                "summary": summary,
+            }
+        return summary
+    except Exception as exc:
+        LOGGER.warning("No pude cargar resumen administrativo guild=%s: %s", guild_id, exc)
+        return {}
+
+
+def fetch_discord_guild_metadata_counts(guild_id):
+    try:
+        metadata = get_discord_metadata_payload(guild_id, kinds=["channels", "roles"], force_refresh=False)
+    except Exception as exc:
+        LOGGER.warning("No pude cargar metadata administrativa guild=%s: %s", guild_id, exc)
+        return {
+            "channel_count": None,
+            "role_count": None,
+            "metadata_available": False,
+        }
+
+    channels = metadata.get("channels", []) if isinstance(metadata, dict) else []
+    roles = metadata.get("roles", []) if isinstance(metadata, dict) else []
+    return {
+        "channel_count": len(channels) if isinstance(channels, list) else None,
+        "role_count": len(roles) if isinstance(roles, list) else None,
+        "metadata_available": bool(channels or roles),
+    }
+
+
+def has_saved_guild_config(guild_id):
+    guild_id = str(guild_id or "")
+    if not guild_id:
+        return False
+    init_database()
+    with get_connection() as connection:
+        row = connection.execute(
+            "SELECT 1 FROM guild_config WHERE guild_id = ? LIMIT 1",
+            (guild_id,),
+        ).fetchone()
+    if row:
+        return True
+
+    legacy_config = read_json_file(os.path.join(DATA_DIR, "config.json"), {})
+    return isinstance(legacy_config, dict) and bool(legacy_config.get(guild_id))
+
+
+def build_admin_guild_summary(guild_id, guild_name=None, icon_hash=None, bot_guild_ids=None):
+    guild_id = str(guild_id or "")
+    guild_summary = fetch_discord_guild_summary(guild_id)
+    counts = fetch_discord_guild_metadata_counts(guild_id)
+    bot_present = bot_guild_ids is None or guild_id in bot_guild_ids
+    resolved_icon = guild_summary.get("icon") or icon_hash or ""
+
+    return {
+        "id": guild_id,
+        "name": str(guild_summary.get("name") or guild_name or f"Servidor {guild_id}"),
+        "icon_url": discord_guild_icon_url(guild_id, resolved_icon),
+        "bot": {
+            "status": "connected" if bot_present else "not_in_server",
+            "present": bot_present,
+        },
+        "channel_count": counts["channel_count"],
+        "role_count": counts["role_count"],
+        "metadata_available": bool(counts["metadata_available"] or guild_summary),
+        "has_saved_config": has_saved_guild_config(guild_id),
+    }
+
+
+def get_admin_overview_payload(guild_id, guild_name=None):
+    guild_id = str(guild_id or "")
+    guild_summary = fetch_discord_guild_summary(guild_id)
+    counts = fetch_discord_guild_metadata_counts(guild_id)
+    bot_guild_ids = get_bot_guild_ids()
+    member_count = guild_summary.get("approximate_member_count")
+    if member_count is None:
+        member_count = guild_summary.get("member_count")
+    bot_present = bot_guild_ids is None or guild_id in bot_guild_ids
+
+    return {
+        "server": {
+            "id": guild_id,
+            "name": str(guild_summary.get("name") or guild_name or f"Servidor {guild_id}"),
+            "icon_url": discord_guild_icon_url(guild_id, guild_summary.get("icon")),
+            "member_count": member_count,
+            "channel_count": counts["channel_count"],
+            "role_count": counts["role_count"],
+            "bot_present": bot_present,
+            "has_saved_config": has_saved_guild_config(guild_id),
+        },
+        "bot": {
+            "status": "connected" if bot_present else "not_in_server",
+            "metadata_available": bool(counts["metadata_available"] or guild_summary),
+        },
+        "future_actions": [
+            {
+                "key": "multi_server",
+                "label": "Vista multi-servidor",
+                "status": "planned",
+                "description": "Base preparada para inventario y comparativas entre servidores autorizados.",
+            },
+            {
+                "key": "bot_messages",
+                "label": "Mensajes del bot",
+                "status": "planned",
+                "description": "Administracion centralizada de mensajes publicados por el bot.",
+            },
+            {
+                "key": "backups",
+                "label": "Backups",
+                "status": "planned",
+                "description": "Punto de entrada reservado para respaldos y restauracion controlada.",
+            },
+            {
+                "key": "templates",
+                "label": "Plantillas avanzadas",
+                "status": "planned",
+                "description": "Extension futura para plantillas globales y por servidor.",
+            },
+            {
+                "key": "advanced_config",
+                "label": "Configuracion avanzada",
+                "status": "planned",
+                "description": "Configuraciones sensibles con auditoria y permisos estrictos.",
+            },
+        ],
+    }
+
+
 def get_economy_list_payload(guild_id, tab, params):
     tab = str(tab or "balances")
     if tab == "balances":
@@ -1613,7 +3024,7 @@ def get_economy_list_payload(guild_id, tab, params):
             page_size=params["page_size"],
             search=params["search"],
         )
-        items = [serialize_balance_item(item) for item in payload.pop("items", [])]
+        items = [serialize_balance_item(item, guild_id) for item in payload.pop("items", [])]
     elif tab == "operations":
         payload = OperationRepository().list_operations_page(
             guild_id,
@@ -1676,6 +3087,7 @@ def get_economy_list_payload(guild_id, tab, params):
 
 
 def build_dashboard_data(guild_id=None, allowed_guilds=None, bot_guild_ids=None, viewer=None):
+    init_database()
     with get_connection() as connection:
         guilds, selected_guild_id = select_dashboard_guilds(
             get_guilds(connection),
@@ -1773,6 +3185,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def permission_service(self):
         return PermissionService()
 
+    def server_backup_service(self):
+        return ServerBackupService(
+            fetch_guild_summary=fetch_discord_guild_summary,
+            fetch_roles=fetch_discord_guild_roles,
+            fetch_channels=fetch_discord_guild_channels,
+        )
+
+    def server_template_service(self):
+        return ServerTemplateService()
+
     def can_access_guild(self, session, guild_id):
         allowed_guilds = {guild["id"] for guild in session.get("admin_guilds", [])}
         bot_guild_ids = get_bot_guild_ids()
@@ -1800,6 +3222,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
         return get_discord_member_role_ids(guild_id, session.get("user", {}).get("id"))
 
     def can_access_module(self, session, guild_id, module_key):
+        guild_id = str(guild_id or "")
+        if not guild_id:
+            return False
+        bot_guild_ids = get_bot_guild_ids()
+        if bot_guild_ids is not None and guild_id not in bot_guild_ids:
+            return False
+        if guild_id not in self.session_member_guild_ids(session):
+            return False
         if self.is_guild_admin(session, guild_id):
             return True
         role_ids = self.session_role_ids(session, guild_id)
@@ -1816,6 +3246,22 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return True
         role_ids = self.session_role_ids(session, guild_id)
         return self.permission_service().has_any_dashboard_access(guild_id, role_ids=role_ids)
+
+    def can_access_admin_panel(self, session, guild_id):
+        return self.can_access_module(session, guild_id, MODULE_ADMIN_PANEL)
+
+    def session_guild_map(self, session):
+        guilds = {}
+        for guild in (session.get("guilds") or []) + (session.get("admin_guilds") or []):
+            guild_id = str(guild.get("id") or "")
+            if not guild_id or guild_id in guilds:
+                continue
+            guilds[guild_id] = {
+                "id": guild_id,
+                "name": str(guild.get("name") or f"Servidor {guild_id}"),
+                "icon": str(guild.get("icon") or ""),
+            }
+        return guilds
 
     def dashboard_allowed_guilds(self, session):
         bot_guild_ids = get_bot_guild_ids()
@@ -1836,6 +3282,30 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 allowed[guild_id] = str(guild.get("name") or f"Servidor {guild_id}")
         return allowed
 
+    def admin_panel_guilds_payload(self, session):
+        bot_guild_ids = get_bot_guild_ids()
+        guilds_by_id = self.session_guild_map(session)
+        allowed_guilds = self.dashboard_allowed_guilds(session)
+        summaries = []
+        for guild_id, guild_name in allowed_guilds.items():
+            if not self.can_access_admin_panel(session, guild_id):
+                continue
+            if bot_guild_ids is not None and guild_id not in bot_guild_ids:
+                continue
+            session_guild = guilds_by_id.get(guild_id, {})
+            summaries.append(build_admin_guild_summary(
+                guild_id,
+                guild_name=session_guild.get("name") or guild_name,
+                icon_hash=session_guild.get("icon"),
+                bot_guild_ids=bot_guild_ids,
+            ))
+
+        summaries.sort(key=lambda guild: str(guild.get("name") or "").casefold())
+        return {
+            "guilds": summaries,
+            "selectedGuildId": str(session.get("last_admin_panel_guild_id") or ""),
+        }
+
     def dashboard_access_payload(self, session, guild_id):
         guild_id = str(guild_id or "")
         if not guild_id:
@@ -1843,9 +3313,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "admin": False,
                 "economy": False,
                 "tickets": False,
+                "fines": False,
                 "audit": False,
                 "templates": False,
                 "permissions": False,
+                "adminPanel": False,
                 "registration": False,
             }
         admin = self.is_guild_admin(session, guild_id)
@@ -1853,23 +3325,65 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "admin": admin,
             "economy": self.can_access_module(session, guild_id, MODULE_ECONOMY),
             "tickets": self.can_access_module(session, guild_id, MODULE_TICKETS),
+            "fines": self.can_access_module(session, guild_id, MODULE_FINES),
             "audit": self.can_access_module(session, guild_id, MODULE_AUDIT),
             "templates": self.can_access_module(session, guild_id, MODULE_TEMPLATES),
             "permissions": self.can_access_module(session, guild_id, MODULE_PERMISSIONS),
+            "adminPanel": self.can_access_admin_panel(session, guild_id),
             "registration": self.can_access_module(session, guild_id, MODULE_ALBION_REGISTRATION),
         }
 
     def can_access_report_calculator(self, session, guild_id, caller_id):
+        guild_id = str(guild_id or "")
         member_guilds = {
-            guild["id"]
+            str(guild["id"])
             for guild in (session.get("guilds") or session.get("admin_guilds", []))
+            if guild.get("id")
         }
         bot_guild_ids = get_bot_guild_ids()
+        if (
+            not guild_id
+            or guild_id not in member_guilds
+            or (bot_guild_ids is not None and guild_id not in bot_guild_ids)
+        ):
+            return False
+        if self.is_guild_admin(session, guild_id):
+            return True
         return (
             str(session.get("user", {}).get("id") or "") == str(caller_id)
-            and str(guild_id) in member_guilds
-            and (bot_guild_ids is None or str(guild_id) in bot_guild_ids)
         )
+
+    def can_access_chest_tables(self, session, guild_id):
+        guild_id = str(guild_id or "")
+        if not guild_id:
+            return False
+        if self.can_access_module(session, guild_id, MODULE_REPORTS):
+            return True
+        bot_guild_ids = get_bot_guild_ids()
+        return (
+            guild_id in self.session_member_guild_ids(session)
+            and (bot_guild_ids is None or guild_id in bot_guild_ids)
+        )
+
+    def guild_id_for_chest_image(self, session, image_id):
+        try:
+            init_database()
+            with database_connection() as connection:
+                row = connection.execute(
+                    """
+                    SELECT image.guild_id
+                    FROM chest_table_images image
+                    JOIN chest_tables table_record ON table_record.id = image.table_id
+                    WHERE image.id = ? AND table_record.is_deleted = 0
+                    """,
+                    (int(image_id),),
+                ).fetchone()
+            guild_id = str(row["guild_id"] or "") if row else ""
+            if guild_id and self.can_access_chest_tables(session, guild_id):
+                return guild_id
+        except Exception as exc:
+            log_event(f"DASHBOARD CHEST IMAGE LOOKUP ERROR | image={image_id} | {type(exc).__name__}: {exc}")
+        return ""
 
     def can_access_dashboard_action_request(self, session, request):
         if not isinstance(request, dict):
@@ -1884,6 +3398,19 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 session,
                 payload.get("guild_id") or guild_id,
                 payload.get("caller_id"),
+            )
+
+        if action_type in {BOT_MESSAGE_ACTION_SEND, BOT_MESSAGE_ACTION_EDIT, BOT_MESSAGE_ACTION_DELETE}:
+            return bool(guild_id) and self.can_access_admin_panel(session, guild_id)
+
+        if action_type == SERVER_TEMPLATE_ACTION_APPLY:
+            target_guild_id = str((payload or {}).get("target_guild_id") or guild_id)
+            source_guild_id = str((payload or {}).get("source_guild_id") or "")
+            return (
+                bool(target_guild_id)
+                and self.can_access_admin_panel(session, target_guild_id)
+                and bool(source_guild_id)
+                and self.is_guild_admin(session, source_guild_id)
             )
 
         return bool(guild_id) and self.can_access_guild_or_tickets(session, guild_id)
@@ -2143,6 +3670,33 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_ticket_media(parsed.path.removeprefix("/ticket-media/"))
             return
 
+        if parsed.path.startswith("/chest-table-image/"):
+            session = get_session_from_request(self)
+            if not session:
+                self.send_text(401, "Inicia sesion.", "text/plain")
+                return
+            image_id = parsed.path.removeprefix("/chest-table-image/").strip("/")
+            if not image_id.isdigit():
+                self.send_text(404, "No encontrado", "text/plain")
+                return
+            query = parse_qs(parsed.query)
+            guild_id = query.get("guild_id", [""])[0]
+            if not guild_id:
+                guild_id = self.guild_id_for_chest_image(session, image_id)
+            if not guild_id or not self.can_access_chest_tables(session, guild_id):
+                self.send_text(403, "No tienes acceso a ese servidor.", "text/plain")
+                return
+            image = ChestTableService().get_image_file(guild_id, image_id)
+            if not image:
+                self.send_text(404, "No encontrado", "text/plain")
+                return
+            try:
+                with open(image["path"], "rb") as handle:
+                    self.send_bytes(200, handle.read(), image["content_type"])
+            except OSError:
+                self.send_text(404, "No encontrado", "text/plain")
+            return
+
         if parsed.path == "/login":
             try:
                 self.handle_login()
@@ -2181,6 +3735,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             requested_guild_id = query.get("guild_id", [""])[0]
             try:
                 allowed_guilds = self.dashboard_allowed_guilds(session)
+                init_database()
                 with get_connection() as connection:
                     guilds, selected_guild_id = select_dashboard_guilds(
                         get_guilds(connection),
@@ -2205,6 +3760,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             requested_guild_id = query.get("guild_id", [""])[0]
             try:
                 allowed_guilds = self.dashboard_allowed_guilds(session)
+                init_database()
                 with get_connection() as connection:
                     _, selected_guild_id = select_dashboard_guilds(
                         get_guilds(connection),
@@ -2328,7 +3884,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 if not guild_id or not self.can_access_report_calculator(session, guild_id, caller_id):
                     self.send_json(403, {"error": "No tienes acceso a ese servidor."})
                     return
-                self.send_json(200, {"calculators": get_active_report_calculators_for_user(guild_id, caller_id)})
+                calculators = (
+                    get_active_report_calculators(guild_id)
+                    if self.is_guild_admin(session, guild_id)
+                    else get_active_report_calculators_for_user(guild_id, caller_id)
+                )
+                self.send_json(200, {"calculators": calculators})
                 return
             if request_id:
                 request = ReportDashboardRepository().get(request_id)
@@ -2347,6 +3908,35 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.send_json(404, {"error": "Esta Ava ya no esta activa o ya fue cerrada. Abrela de nuevo desde Discord."})
                 return
             self.send_json(200, {"calculator": serialize_report_calculator_state(state)})
+            return
+
+        if parsed.path == "/api/chest-tables":
+            session = self.get_authenticated_session()
+            if not session:
+                return
+
+            query = parse_qs(parsed.query)
+            guild_id = query.get("guild_id", [""])[0]
+            if not guild_id or not self.can_access_chest_tables(session, guild_id):
+                self.send_json(403, {"error": "No tienes acceso a ese servidor."})
+                return
+            try:
+                init_database()
+                table_id = str(query.get("table_id", [""])[0] or "").strip()
+                service = ChestTableService()
+                if table_id:
+                    if not table_id.isdigit():
+                        self.send_json(400, {"error": "Tabla invalida."})
+                        return
+                    table = service.get_table(guild_id, table_id)
+                    if not table:
+                        self.send_json(404, {"error": "No encontre esa tabla de cofres."})
+                        return
+                    self.send_json(200, {"table": table})
+                    return
+                self.send_json(200, service.list_tables(guild_id))
+            except Exception as exc:
+                self.send_internal_json_error("/api/chest-tables GET", exc)
             return
 
         if parsed.path == "/api/fine-config":
@@ -2422,6 +4012,47 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     "records": get_guild_ticket_records(guild_id),
                 }
                 file_name = f"tickets_{guild_id}.json"
+            self.send_bytes(
+                200,
+                json.dumps(export_data, ensure_ascii=False, indent=2).encode("utf-8"),
+                "application/json",
+                headers={"Content-Disposition": f'attachment; filename="{file_name}"'},
+            )
+            return
+
+        if parsed.path == "/api/export/ticket":
+            session = self.get_authenticated_session()
+            if not session:
+                return
+
+            query = parse_qs(parsed.query)
+            guild_id = query.get("guild_id", [""])[0]
+            record_id = query.get("record_id", [""])[0]
+            if not guild_id or not self.can_access_tickets(session, guild_id):
+                self.send_json(403, {"error": "No tienes acceso a ese servidor."})
+                return
+            if not record_id:
+                self.send_json(400, {"error": "Falta indicar el ticket a exportar."})
+                return
+
+            record = get_ticket_record(guild_id, record_id)
+            if not record:
+                self.send_json(404, {"error": "No encontre ese ticket."})
+                return
+
+            guild_name = next(
+                (guild.get("name") for guild in session.get("guilds", []) if str(guild.get("id")) == str(guild_id)),
+                f"Servidor {guild_id}",
+            )
+            try:
+                export_data = build_ticket_export_payload(guild_id, guild_name, record)
+            except ValueError as exc:
+                self.send_json(409, {"error": str(exc)})
+                return
+
+            ticket = export_data["ticket"]
+            ticket_name = ticket.get("channel", {}).get("name") or ticket.get("record_id") or record_id
+            file_name = f"ticket_{safe_export_filename(guild_id)}_{safe_export_filename(ticket_name)}.json"
             self.send_bytes(
                 200,
                 json.dumps(export_data, ensure_ascii=False, indent=2).encode("utf-8"),
@@ -2601,6 +4232,45 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_json(200, get_guild_ticket_records_page(guild_id, query_pagination(query)))
             return
 
+        if parsed.path == "/api/ticket-transcript":
+            session = self.get_authenticated_session()
+            if not session:
+                return
+
+            query = parse_qs(parsed.query)
+            guild_id = query.get("guild_id", [""])[0]
+            record_id = query.get("record_id", [""])[0]
+            if not guild_id or not self.can_access_tickets(session, guild_id):
+                self.send_json(403, {"error": "No tienes acceso a ese servidor."})
+                return
+            record = get_ticket_record(guild_id, record_id)
+            if not record:
+                self.send_json(404, {"error": "No encontre esa transcripcion."})
+                return
+            transcript = record.get("transcript") if isinstance(record.get("transcript"), list) else []
+            self.send_json(200, {
+                "record": {
+                    "record_id": record.get("record_id") or ticket_record_identity(record),
+                    "number": record.get("number"),
+                    "ticket_type": record.get("ticket_type") or ticket_record_type(record),
+                    "type_label": record.get("type_label") or ("Multa" if ticket_record_type(record) == "fine" else "Ticket"),
+                    "panel_name": record.get("panel_name") or "",
+                    "channel_id": record.get("channel_id") or "",
+                    "channel_name": record.get("channel_name") or "",
+                    "user_id": record.get("user_id") or record.get("owner_id") or "",
+                    "user_name": record.get("user_name") or record.get("owner_name") or "",
+                    "status": ticket_record_status(record),
+                    "created_at": record.get("created_at") or "",
+                    "closed_at": record.get("closed_at") or "",
+                    "deleted_at": record.get("deleted_at") or "",
+                    "transcribed_at": record.get("transcribed_at") or "",
+                    "fine": fine_payload_from_record(record) if ticket_record_type(record) == "fine" else None,
+                },
+                "messages": transcript,
+                "message_count": len(transcript),
+            })
+            return
+
         if parsed.path == "/api/ticket-live":
             session = self.get_authenticated_session()
             if not session:
@@ -2674,10 +4344,255 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_json(200, get_guild_bot_permissions(guild_id))
             return
 
+        if parsed.path == "/api/admin/guilds":
+            session = self.get_authenticated_session()
+            if not session:
+                return
+
+            try:
+                self.send_json(200, self.admin_panel_guilds_payload(session))
+            except Exception as exc:
+                self.send_internal_json_error("/api/admin/guilds", exc)
+            return
+
+        if parsed.path == "/api/admin/overview":
+            session = self.get_authenticated_session()
+            if not session:
+                return
+
+            query = parse_qs(parsed.query)
+            guild_id = query.get("guild_id", [""])[0]
+            if not guild_id or not self.can_access_admin_panel(session, guild_id):
+                self.send_json(403, {"error": "No tienes acceso administrativo a ese servidor."})
+                return
+
+            guild_name = next(
+                (guild.get("name") for guild in session.get("guilds", []) if str(guild.get("id")) == str(guild_id)),
+                f"Servidor {guild_id}",
+            )
+            try:
+                audit_key = f"admin_overview:{guild_id}"
+                session.setdefault("admin_audit_seen", [])
+                if audit_key not in session["admin_audit_seen"]:
+                    self.record_dashboard_admin_change(
+                        session,
+                        guild_id,
+                        category="server",
+                        title="Panel administrativo abierto",
+                        description="Se consulto la vista general administrativa del servidor desde el dashboard.",
+                    )
+                    session["admin_audit_seen"].append(audit_key)
+                session["last_admin_panel_guild_id"] = str(guild_id)
+                self.send_json(200, get_admin_overview_payload(guild_id, guild_name=guild_name))
+            except Exception as exc:
+                self.send_internal_json_error("/api/admin/overview", exc)
+            return
+
+        if parsed.path == "/api/admin/message-channels":
+            session = self.get_authenticated_session()
+            if not session:
+                return
+
+            query = parse_qs(parsed.query)
+            guild_id = query.get("guild_id", [""])[0]
+            if not guild_id or not self.can_access_admin_panel(session, guild_id):
+                self.send_json(403, {"error": "No tienes acceso administrativo a ese servidor."})
+                return
+
+            try:
+                self.send_json(
+                    200,
+                    build_admin_bot_message_channels_payload(
+                        guild_id,
+                        force_refresh=query_bool(query, "refresh"),
+                    ),
+                )
+            except Exception as exc:
+                self.send_internal_json_error("/api/admin/message-channels", exc)
+            return
+
+        if parsed.path == "/api/admin/bot-message":
+            session = self.get_authenticated_session()
+            if not session:
+                return
+
+            try:
+                query = parse_qs(parsed.query)
+                guild_id, channel_id, message_id = validate_bot_message_lookup_query(query)
+                if not self.can_access_admin_panel(session, guild_id):
+                    self.send_json(403, {"error": "No tienes acceso administrativo a ese servidor."})
+                    return
+
+                message = fetch_admin_bot_message_for_edit(guild_id, channel_id, message_id)
+                self.send_json(200, {"message": message})
+            except PermissionError as exc:
+                self.send_json(403, {"error": str(exc)})
+            except ValueError as exc:
+                self.send_json(400, {"error": str(exc)})
+            except RuntimeError as exc:
+                status = 404 if "Discord respondio 404" in str(exc) else 502
+                self.send_json(status, {"error": "No pude cargar ese mensaje desde Discord."})
+            except Exception as exc:
+                self.send_internal_json_error("/api/admin/bot-message GET", exc)
+            return
+
+        if parsed.path == "/api/admin/server-backups":
+            session = self.get_authenticated_session()
+            if not session:
+                return
+
+            query = parse_qs(parsed.query)
+            guild_id = query.get("guild_id", [""])[0]
+            if not guild_id or not self.can_access_admin_panel(session, guild_id):
+                self.send_json(403, {"error": "No tienes acceso administrativo a ese servidor."})
+                return
+
+            try:
+                backup_id = str(query.get("backup_id", [""])[0] or "").strip()
+                service = self.server_backup_service()
+                if backup_id:
+                    if not backup_id.isdigit():
+                        self.send_json(400, {"error": "Backup invalido."})
+                        return
+                    backup = service.get_backup(backup_id, guild_id=guild_id)
+                    if not backup:
+                        self.send_json(404, {"error": "No encontre ese backup para este servidor."})
+                        return
+                    self.send_json(200, {"backup": backup})
+                    return
+
+                self.send_json(200, {
+                    "backups": service.list_backups(guild_id),
+                    "max_backups": 2,
+                })
+            except Exception as exc:
+                self.send_internal_json_error("/api/admin/server-backups GET", exc)
+            return
+
         self.send_text(404, "No encontrado", "text/plain")
 
     def do_POST(self):
         parsed = urlparse(self.path)
+        if parsed.path == "/api/loot/normalize":
+            session = self.get_authenticated_session()
+            if not session:
+                return
+            if not self.validate_csrf(session):
+                return
+
+            try:
+                body = self.read_json_body()
+                guild_id = str(body.get("guild_id") or "")
+                if not guild_id or not self.can_access_any_dashboard_module(session, guild_id):
+                    self.send_json(403, {"error": "No tienes acceso a ese servidor."})
+                    return
+
+                result = LootNormalizationService().normalize_payload(body)
+                loot_payload = result.to_dict()
+                price_service = AlbionMarketPriceService()
+                if parse_bool_option(body.get("include_prices"), default=True):
+                    loot_payload = price_service.enrich_loot(
+                        loot_payload,
+                        force_refresh=parse_bool_option(body.get("refresh_prices"), default=False),
+                        server=body.get("market_server"),
+                        locations=body.get("market_locations"),
+                        quality=body.get("market_quality"),
+                    )
+                else:
+                    loot_payload = price_service.normalize_loot_without_prices(
+                        loot_payload,
+                        server=body.get("market_server"),
+                        locations=body.get("market_locations"),
+                        quality=body.get("market_quality"),
+                    )
+                self.send_json(200, {"loot": loot_payload})
+            except LootNormalizationError as exc:
+                self.send_json(400, {"error": str(exc)})
+            except Exception as exc:
+                self.send_internal_json_error("/api/loot/normalize", exc)
+            return
+
+        if parsed.path == "/api/economy/balance":
+            session = self.get_authenticated_session()
+            if not session:
+                return
+            if not self.validate_csrf(session):
+                return
+
+            try:
+                body = self.read_json_body()
+                guild_id = str(body.get("guild_id") or "")
+                if not guild_id or not self.can_access_module(session, guild_id, MODULE_ECONOMY):
+                    self.send_json(403, {"error": "No tienes acceso a ese servidor."})
+                    return
+
+                payload = apply_dashboard_balance_change(guild_id, body, session)
+                operation = payload.get("operation", {})
+                self.record_dashboard_admin_change(
+                    session,
+                    guild_id,
+                    category="server",
+                    title="Balance modificado desde dashboard",
+                    description=(
+                        f"Se modifico el balance de {operation.get('player', '')} "
+                        f"({operation.get('player_id', '')}). Estado: {operation.get('player_status', '')}."
+                    ),
+                )
+                self.send_json(200, {
+                    **payload,
+                    **get_economy_summary_payload(guild_id),
+                })
+            except LookupError as exc:
+                self.send_json(404, {"error": str(exc)})
+            except ValueError as exc:
+                self.send_json(400, {"error": str(exc)})
+            except Exception as exc:
+                self.send_internal_json_error("/api/economy/balance", exc)
+            return
+
+        if parsed.path == "/api/report-calculator/preview":
+            session = self.get_authenticated_session()
+            if not session:
+                return
+            if not self.validate_csrf(session):
+                return
+
+            try:
+                body = self.read_json_body()
+                guild_id = str(body.get("guild_id") or "")
+                caller_id = str(body.get("caller_id") or "")
+                numero_ava = str(body.get("numero_ava") or "")
+                if parse_bool_option(body.get("manual"), default=False):
+                    if not guild_id or not (
+                        guild_id in self.session_member_guild_ids(session)
+                        or self.can_access_guild(session, guild_id)
+                        or self.can_access_any_dashboard_module(session, guild_id)
+                    ):
+                        self.send_json(403, {"error": "No tienes acceso a ese servidor."})
+                        return
+
+                    preview = build_report_calculator_preview(
+                        build_manual_report_calculator_state(body, session),
+                        body,
+                    )
+                    self.send_json(200, {"preview": preview})
+                    return
+
+                if not self.can_access_report_calculator(session, guild_id, caller_id):
+                    self.send_json(403, {"error": "Solo el caller puede previsualizar este informe."})
+                    return
+
+                state = get_active_avalonian_state(guild_id, caller_id, numero_ava)
+                if not state:
+                    self.send_json(404, {"error": "Esta Ava ya no esta activa o ya fue cerrada. Abrela de nuevo desde Discord."})
+                    return
+
+                preview = build_report_calculator_preview(state, body)
+                self.send_json(200, {"preview": preview})
+            except Exception as exc:
+                self.send_internal_json_error("/api/report-calculator/preview", exc)
+            return
+
         if parsed.path == "/api/report-calculator":
             session = self.get_authenticated_session()
             if not session:
@@ -2698,7 +4613,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 if not state:
                     self.send_json(404, {"error": "Esta Ava ya no esta activa o ya fue cerrada. Abrela de nuevo desde Discord."})
                     return
-                if not state.get("finalized") or state.get("cancelled") or state.get("report_sent"):
+                report_already_generated = (
+                    (state.get("report_sent") or state.get("report_generated"))
+                    and not state.get("report_rejected")
+                )
+                if not state.get("finalized") or state.get("cancelled") or report_already_generated:
                     self.send_json(400, {"error": "Esta Ava no esta disponible para enviar informe."})
                     return
 
@@ -2706,6 +4625,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 if split_mode not in {"items", "silver", "items_silver"}:
                     self.send_json(400, {"error": "Selecciona un modo de reparto valido."})
                     return
+                send_to_channel = parse_bool_option(body.get("send_to_channel"), default=True)
+                idempotency_key = report_request_idempotency_key(
+                    body,
+                    send_to_channel=send_to_channel,
+                )
 
                 fines = []
                 raw_fines = body.get("fines", [])
@@ -2732,6 +4656,134 @@ class DashboardHandler(BaseHTTPRequestHandler):
                             }
                         )
 
+                slots = report_formatter_slots_from_state(state)
+                raw_exclusions = body.get("split_exclusions", [])
+                if raw_exclusions and not isinstance(raw_exclusions, list):
+                    self.send_json(400, {"error": "Las exclusiones del split no tienen un formato valido."})
+                    return
+                requested_excluded_user_ids = set()
+                for entry in raw_exclusions or []:
+                    if not isinstance(entry, dict) or not entry.get("user_id"):
+                        continue
+                    try:
+                        requested_excluded_user_ids.add(int(entry.get("user_id") or 0))
+                    except (TypeError, ValueError):
+                        requested_excluded_user_ids.add(0)
+                split_exclusions = REPORT_FORMATTER.normalize_split_exclusions(
+                    raw_exclusions,
+                    slots,
+                )
+                normalized_excluded_user_ids = {
+                    int(entry.get("user_id") or 0)
+                    for entry in split_exclusions
+                }
+                if requested_excluded_user_ids != normalized_excluded_user_ids:
+                    self.send_json(400, {"error": "Solo puedes excluir jugadores que pertenecen a este informe."})
+                    return
+                raw_modifiers = body.get("split_modifiers", [])
+                if raw_modifiers and not isinstance(raw_modifiers, list):
+                    self.send_json(400, {"error": "Los modificadores del split no tienen un formato valido."})
+                    return
+                requested_modifier_player_ids = set()
+                requested_modifier_count = 0
+                for entry in raw_modifiers or []:
+                    if not isinstance(entry, dict):
+                        continue
+                    if any(str(entry.get(key) or "").strip() for key in ("name", "amount", "description")):
+                        requested_modifier_count += 1
+                    if str(entry.get("target_type") or "total").strip().lower() != "player":
+                        continue
+                    try:
+                        requested_modifier_player_ids.add(int(entry.get("user_id") or 0))
+                    except (TypeError, ValueError):
+                        requested_modifier_player_ids.add(0)
+                split_modifiers = REPORT_FORMATTER.normalize_split_modifiers(
+                    raw_modifiers,
+                    slots,
+                )
+                normalized_modifier_player_ids = {
+                    int(entry.get("user_id") or 0)
+                    for entry in split_modifiers
+                    if entry.get("target_type") == "player"
+                }
+                if requested_modifier_player_ids != normalized_modifier_player_ids:
+                    self.send_json(400, {"error": "Los modificadores por jugador solo pueden apuntar a integrantes del informe."})
+                    return
+                if requested_modifier_count != len(split_modifiers):
+                    self.send_json(400, {"error": "Revisa los modificadores: concepto, operacion y monto deben ser validos."})
+                    return
+                raw_build_loan_discounts = body.get("build_loan_discounts", [])
+                if raw_build_loan_discounts and not isinstance(raw_build_loan_discounts, list):
+                    self.send_json(400, {"error": "Los descuentos por prestamo de build no tienen un formato valido."})
+                    return
+                requested_build_loan_player_ids = set()
+                requested_build_loan_count = 0
+                requested_build_loan_entries = []
+                for entry in raw_build_loan_discounts or []:
+                    if not isinstance(entry, dict):
+                        continue
+                    has_build_loan_data = any(
+                        str(entry.get(key) or "").strip()
+                        for key in ("user_id", "player_id", "amount", "reason", "description", "motivo")
+                    )
+                    if not has_build_loan_data:
+                        continue
+                    requested_build_loan_entries.append(entry)
+                    requested_build_loan_count += 1
+                    try:
+                        requested_build_loan_player_ids.add(int(entry.get("user_id") or entry.get("player_id") or 0))
+                    except (TypeError, ValueError):
+                        requested_build_loan_player_ids.add(0)
+                build_loan_discounts = REPORT_FORMATTER.normalize_build_loan_discounts(
+                    raw_build_loan_discounts,
+                    slots,
+                )
+                normalized_build_loan_player_ids = {
+                    int(entry.get("user_id") or 0)
+                    for entry in build_loan_discounts
+                }
+                if requested_build_loan_player_ids != normalized_build_loan_player_ids:
+                    self.send_json(400, {"error": "Los prestamos de build solo pueden descontarse a integrantes del informe."})
+                    return
+                if requested_build_loan_count != len(build_loan_discounts):
+                    self.send_json(400, {"error": "Revisa los prestamos de build: jugador, motivo y metodo de cobro son obligatorios. El monto solo es obligatorio si no es pago al momento."})
+                    return
+
+                chest_table_id = str(body.get("chest_table_id") or "").strip()
+                if chest_table_id:
+                    if not chest_table_id.isdigit():
+                        self.send_json(400, {"error": "Tabla de cofres invalida."})
+                        return
+                    init_database()
+                    if not ChestTableService().get_table(guild_id, chest_table_id):
+                        self.send_json(404, {"error": "No encontre esa tabla de cofres para este servidor."})
+                        return
+
+                for index, discount in enumerate(build_loan_discounts):
+                    raw_entry = requested_build_loan_entries[index] if index < len(requested_build_loan_entries) else {}
+                    proof_path = ""
+                    proof_name = ""
+                    if isinstance(raw_entry, dict) and raw_entry.get("proof_data_url"):
+                        proof_path, proof_name = store_embedded_image(
+                            raw_entry.get("proof_data_url"),
+                            prefix=f"{guild_id}_{caller_id}_{numero_ava}_build_loan_{index + 1}_{int(time.time())}",
+                        )
+                        log_event(
+                            "REPORT BUILD LOAN PROOF STORE | "
+                            f"guild={guild_id} ava={numero_ava} index={index + 1} "
+                            f"name={proof_name or str(raw_entry.get('proof_name') or '')[:120]} "
+                            f"stored={bool(proof_path)} path={proof_path or '-'}"
+                        )
+                    if isinstance(raw_entry, dict) and not proof_name:
+                        proof_name = str(raw_entry.get("proof_name") or "")[:120]
+                        if proof_name:
+                            log_event(
+                                "REPORT BUILD LOAN PROOF MISSING DATA | "
+                                f"guild={guild_id} ava={numero_ava} index={index + 1} name={proof_name}"
+                            )
+                    discount["proof_path"] = proof_path
+                    discount["proof_name"] = proof_name
+
                 request = ReportDashboardRepository().create(
                     {
                         "guild_id": guild_id,
@@ -2747,13 +4799,114 @@ class DashboardHandler(BaseHTTPRequestHandler):
                         "tab_sale_percentage": str(body.get("tab_sale_percentage") or "")[:20],
                         "adjustments": str(body.get("adjustments") or "")[:500],
                         "fines": fines,
+                        "split_exclusions": split_exclusions,
+                        "split_modifiers": split_modifiers,
+                        "build_loan_discounts": build_loan_discounts,
+                        "chest_table_id": chest_table_id,
                         "split_mode": split_mode,
+                        "send_to_channel": send_to_channel,
                     },
                     requested_by=str(session.get("user", {}).get("id") or ""),
+                    idempotency_key=idempotency_key,
                 )
                 self.send_json(202, {"request": request})
             except Exception as exc:
                 self.send_internal_json_error("/api/report-calculator", exc)
+            return
+
+        if parsed.path == "/api/chest-tables":
+            session = self.get_authenticated_session()
+            if not session:
+                return
+            if not self.validate_csrf(session):
+                return
+
+            try:
+                body = self.read_json_body()
+                guild_id = str(body.get("guild_id") or "").strip()
+                if not guild_id or not self.can_access_chest_tables(session, guild_id):
+                    self.send_json(403, {"error": "No tienes acceso a ese servidor."})
+                    return
+                init_database()
+                table_id = str(body.get("table_id") or "").strip()
+                service = ChestTableService()
+                if table_id:
+                    if not table_id.isdigit():
+                        self.send_json(400, {"error": "Tabla invalida."})
+                        return
+                    table = service.save_table(guild_id, table_id, body.get("table") or body, session.get("user", {}))
+                    if not table:
+                        self.send_json(404, {"error": "No encontre esa tabla de cofres."})
+                        return
+                    self.record_dashboard_admin_change(
+                        session,
+                        guild_id,
+                        category="server",
+                        title="Tabla de cofres actualizada",
+                        description=f"Se guardo la tabla de cofres #{table_id}.",
+                    )
+                    self.send_json(200, {"table": table, **service.list_tables(guild_id)})
+                    return
+
+                table = service.create_table(guild_id, body.get("name"), session.get("user", {}))
+                self.record_dashboard_admin_change(
+                    session,
+                    guild_id,
+                    category="server",
+                    title="Tabla de cofres creada",
+                    description=f"Se creo la tabla de cofres #{table.get('id')}.",
+                )
+                self.send_json(201, {"table": table, **service.list_tables(guild_id)})
+            except ValueError as exc:
+                self.send_json(400, {"error": str(exc)})
+            except Exception as exc:
+                self.send_internal_json_error("/api/chest-tables POST", exc)
+            return
+
+        if parsed.path == "/api/chest-table-image":
+            session = self.get_authenticated_session()
+            if not session:
+                return
+            if not self.validate_csrf(session):
+                return
+
+            try:
+                body = self.read_json_body()
+                guild_id = str(body.get("guild_id") or "").strip()
+                table_id = str(body.get("table_id") or "").strip()
+                if not guild_id or not self.can_access_chest_tables(session, guild_id):
+                    self.send_json(403, {"error": "No tienes acceso a ese servidor."})
+                    return
+                if not table_id.isdigit():
+                    self.send_json(400, {"error": "Tabla invalida."})
+                    return
+                init_database()
+                service = ChestTableService()
+                image = service.add_image_from_data_url(
+                    guild_id,
+                    table_id,
+                    str(body.get("row_id") or ""),
+                    filename=str(body.get("filename") or "evidencia.png"),
+                    data_url=str(body.get("data_url") or ""),
+                    image_type=str(body.get("image_type") or ""),
+                    actor=session.get("user", {}),
+                )
+                if not image:
+                    self.send_json(404, {"error": "No encontre esa tabla de cofres."})
+                    return
+                table = service.get_table(guild_id, table_id)
+                self.record_dashboard_admin_change(
+                    session,
+                    guild_id,
+                    category="server",
+                    title="Evidencia de cofres subida",
+                    description=f"Se subio una imagen para la tabla de cofres #{table_id}.",
+                )
+                self.send_json(201, {"image": image, "table": table})
+            except ValueError as exc:
+                self.send_json(400, {"error": str(exc)})
+            except Exception as exc:
+                self.send_internal_json_error("/api/chest-table-image", exc)
             return
 
         if parsed.path == "/api/fine-config":
@@ -2879,6 +5032,276 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.send_json(200, {"message_id": str(result.get("id", "")), "channel_id": channel_id})
             except Exception as exc:
                 self.send_internal_json_error("/api/publish-ticket-panel", exc)
+            return
+
+        if parsed.path == "/api/admin/bot-message":
+            session = self.get_authenticated_session()
+            if not session:
+                return
+            if not self.validate_csrf(session):
+                return
+
+            try:
+                body = self.read_json_body()
+                payload = validate_bot_message_request_payload(body)
+                guild_id = payload["guild_id"]
+                if not self.can_access_admin_panel(session, guild_id):
+                    self.send_json(403, {"error": "No tienes acceso administrativo a ese servidor."})
+                    return
+
+                channels_payload = build_admin_bot_message_channels_payload(guild_id)
+                channels_by_id = {
+                    str(channel.get("id")): channel
+                    for channel in channels_payload.get("channels", [])
+                }
+                channel = channels_by_id.get(payload["channel_id"])
+                if not channel:
+                    self.send_json(403, {"error": "El bot no tiene permisos suficientes en ese canal."})
+                    return
+                if payload["action"] in {"edit", "delete"} and not channel.get("can_read_history"):
+                    self.send_json(403, {"error": "Para editar o eliminar mensajes el bot debe poder leer el historial del canal."})
+                    return
+                if payload["action"] == "delete" and not channel.get("can_manage_messages"):
+                    self.send_json(403, {"error": "Para eliminar mensajes el bot debe tener Gestionar mensajes en el canal."})
+                    return
+
+                operator = session.get("user", {}) if isinstance(session, dict) else {}
+                audit_repo = BotMessageAuditRepository()
+                audit_id = audit_repo.create(
+                    operator_id=operator.get("id", ""),
+                    operator_name=operator.get("username", ""),
+                    guild_id=guild_id,
+                    channel_id=payload["channel_id"],
+                    action=payload["action"],
+                    message_id=payload["message_id"],
+                    new_content=payload["content"],
+                    status="queued",
+                )
+                payload["audit_id"] = audit_id
+                request = DashboardActionService().create_request(
+                    guild_id=guild_id,
+                    action_type=payload["action_type"],
+                    payload=payload,
+                    requested_by=self.dashboard_actor_label(session),
+                    max_retries=2,
+                )
+                audit_repo.attach_request(audit_id, request.get("id", ""))
+                self.record_dashboard_admin_change(
+                    session,
+                    guild_id,
+                    category="messages",
+                    title="Solicitud de mensaje del bot",
+                    description=(
+                        f"Se encolo la accion {payload['action']} para el canal "
+                        f"{payload['channel_id']} con solicitud {request.get('id', '')}."
+                    ),
+                )
+                self.send_json(202, {"request": request, "audit_id": audit_id})
+            except ValueError as exc:
+                self.send_json(400, {"error": str(exc)})
+            except Exception as exc:
+                self.send_internal_json_error("/api/admin/bot-message", exc)
+            return
+
+        if parsed.path == "/api/admin/server-template/preview":
+            session = self.get_authenticated_session()
+            if not session:
+                return
+            if not self.validate_csrf(session):
+                return
+
+            try:
+                body = self.read_json_body()
+                source_guild_id = str(body.get("source_guild_id") or body.get("guild_id") or "").strip()
+                target_guild_id = str(body.get("target_guild_id") or "").strip()
+                backup_id = str(body.get("backup_id") or "").strip()
+                options = body.get("options") if isinstance(body.get("options"), dict) else {}
+                if not source_guild_id or not target_guild_id or not backup_id.isdigit():
+                    self.send_json(400, {"error": "Debes seleccionar backup de origen y servidor destino."})
+                    return
+                if not self.can_access_admin_panel(session, source_guild_id) or not self.can_access_admin_panel(session, target_guild_id):
+                    self.send_json(403, {"error": "Necesitas permisos administrativos en origen y destino."})
+                    return
+                bot_guild_ids = get_bot_guild_ids()
+                if bot_guild_ids is not None and target_guild_id not in bot_guild_ids:
+                    self.send_json(403, {"error": "El bot no esta conectado al servidor destino."})
+                    return
+
+                backup = self.server_backup_service().get_backup(backup_id, guild_id=source_guild_id)
+                if not backup:
+                    self.send_json(404, {"error": "No encontre ese backup para el servidor de origen."})
+                    return
+                target_guild_name = next(
+                    (guild.get("name") for guild in session.get("guilds", []) if str(guild.get("id")) == target_guild_id),
+                    f"Servidor {target_guild_id}",
+                )
+                preview = build_server_template_preview_payload(
+                    backup,
+                    target_guild_id=target_guild_id,
+                    target_guild_name=target_guild_name,
+                    options=options,
+                )
+                self.record_dashboard_admin_change(
+                    session,
+                    target_guild_id,
+                    category="server",
+                    title="Plantilla de servidor previsualizada",
+                    description=f"Se previsualizo el backup #{backup_id} del servidor {source_guild_id} sobre este servidor.",
+                )
+                self.send_json(200, {"preview": preview})
+            except RuntimeError as exc:
+                message = str(exc)
+                if "Discord respondio 403" in message:
+                    self.send_json(403, {"error": "El bot no tiene permisos suficientes para inspeccionar el servidor destino."})
+                elif "Discord respondio 404" in message:
+                    self.send_json(404, {"error": "No encontre el servidor destino o el bot ya no esta conectado."})
+                else:
+                    self.send_json(502, {"error": "No pude validar el servidor destino desde Discord."})
+            except Exception as exc:
+                self.send_internal_json_error("/api/admin/server-template/preview", exc)
+            return
+
+        if parsed.path == "/api/admin/server-template/apply":
+            session = self.get_authenticated_session()
+            if not session:
+                return
+            if not self.validate_csrf(session):
+                return
+
+            try:
+                body = self.read_json_body()
+                source_guild_id = str(body.get("source_guild_id") or body.get("guild_id") or "").strip()
+                target_guild_id = str(body.get("target_guild_id") or "").strip()
+                backup_id = str(body.get("backup_id") or "").strip()
+                options = body.get("options") if isinstance(body.get("options"), dict) else {}
+                confirmation = str(body.get("confirmation") or "").strip().upper()
+                if not parse_bool_option(body.get("confirmed"), default=False) or confirmation != "APLICAR":
+                    self.send_json(400, {"error": "Debes confirmar escribiendo APLICAR antes de ejecutar la plantilla."})
+                    return
+                if not source_guild_id or not target_guild_id or not backup_id.isdigit():
+                    self.send_json(400, {"error": "Debes seleccionar backup de origen y servidor destino."})
+                    return
+                if not self.can_access_admin_panel(session, source_guild_id) or not self.can_access_admin_panel(session, target_guild_id):
+                    self.send_json(403, {"error": "Necesitas permisos administrativos en origen y destino."})
+                    return
+                bot_guild_ids = get_bot_guild_ids()
+                if bot_guild_ids is not None and target_guild_id not in bot_guild_ids:
+                    self.send_json(403, {"error": "El bot no esta conectado al servidor destino."})
+                    return
+
+                backup = self.server_backup_service().get_backup(backup_id, guild_id=source_guild_id)
+                if not backup:
+                    self.send_json(404, {"error": "No encontre ese backup para el servidor de origen."})
+                    return
+                target_guild_name = next(
+                    (guild.get("name") for guild in session.get("guilds", []) if str(guild.get("id")) == target_guild_id),
+                    f"Servidor {target_guild_id}",
+                )
+                preview = build_server_template_preview_payload(
+                    backup,
+                    target_guild_id=target_guild_id,
+                    target_guild_name=target_guild_name,
+                    options=options,
+                )
+                if not preview.get("bot_permissions_ok"):
+                    self.send_json(403, {"error": "El bot no tiene permisos suficientes en el servidor destino."})
+                    return
+                request_payload = {
+                    "source_guild_id": source_guild_id,
+                    "target_guild_id": target_guild_id,
+                    "backup_id": int(backup_id),
+                    "backup": backup.get("backup") or {},
+                    "preview": preview,
+                    "options": {
+                        "update_existing": parse_bool_option(options.get("update_existing"), default=False),
+                        "include_bot_config": parse_bool_option(options.get("include_bot_config"), default=True),
+                        "clear_target": parse_bool_option(options.get("clear_target"), default=False),
+                    },
+                    "requested_by_user_id": str((session.get("user") or {}).get("id") or ""),
+                }
+                request = DashboardActionService().create_request(
+                    guild_id=target_guild_id,
+                    action_type=SERVER_TEMPLATE_ACTION_APPLY,
+                    payload=request_payload,
+                    requested_by=self.dashboard_actor_label(session),
+                    max_retries=1,
+                )
+                self.record_dashboard_admin_change(
+                    session,
+                    target_guild_id,
+                    category="server",
+                    title="Aplicacion de plantilla encolada",
+                    description=f"Se encolo la aplicacion del backup #{backup_id} desde {source_guild_id}. Solicitud {request.get('id', '')}.",
+                )
+                self.record_dashboard_admin_change(
+                    session,
+                    source_guild_id,
+                    category="server",
+                    title="Backup usado como plantilla",
+                    description=f"El backup #{backup_id} se encolo como plantilla hacia el servidor {target_guild_id}. Solicitud {request.get('id', '')}.",
+                )
+                self.send_json(202, {"request": request, "preview": preview})
+            except RuntimeError as exc:
+                message = str(exc)
+                if "Discord respondio 403" in message:
+                    self.send_json(403, {"error": "El bot no tiene permisos suficientes para validar el servidor destino."})
+                elif "Discord respondio 404" in message:
+                    self.send_json(404, {"error": "No encontre el servidor destino o el bot ya no esta conectado."})
+                else:
+                    self.send_json(502, {"error": "No pude validar el servidor destino desde Discord."})
+            except Exception as exc:
+                self.send_internal_json_error("/api/admin/server-template/apply", exc)
+            return
+
+        if parsed.path == "/api/admin/server-backups":
+            session = self.get_authenticated_session()
+            if not session:
+                return
+            if not self.validate_csrf(session):
+                return
+
+            try:
+                body = self.read_json_body()
+                guild_id = str(body.get("guild_id") or "").strip()
+                if not guild_id or not self.can_access_admin_panel(session, guild_id):
+                    self.send_json(403, {"error": "No tienes acceso administrativo a ese servidor."})
+                    return
+
+                guild_name = next(
+                    (guild.get("name") for guild in session.get("guilds", []) if str(guild.get("id")) == str(guild_id)),
+                    f"Servidor {guild_id}",
+                )
+                backup = self.server_backup_service().create_backup(
+                    guild_id=guild_id,
+                    guild_name=guild_name,
+                    created_by=session.get("user", {}),
+                    replace_oldest=parse_bool_option(body.get("replace_oldest"), default=False),
+                    replace_backup_id=str(body.get("replace_backup_id") or "").strip(),
+                )
+                self.record_dashboard_admin_change(
+                    session,
+                    guild_id,
+                    category="server",
+                    title="Backup de servidor creado",
+                    description=f"Se creo el backup estructurado #{backup.get('id')} desde el panel administrativo.",
+                )
+                self.send_json(201, {"backup": backup})
+            except ServerBackupLimitError as exc:
+                self.send_json(409, {
+                    "error": "Este servidor ya tiene 2 backups. Elige cual quieres reemplazar.",
+                    "requires_replacement_choice": True,
+                    "backups": exc.backups,
+                })
+            except RuntimeError as exc:
+                message = str(exc)
+                if "Discord respondio 403" in message:
+                    self.send_json(403, {"error": "El bot no tiene permisos suficientes para leer la estructura de este servidor."})
+                elif "Discord respondio 404" in message:
+                    self.send_json(404, {"error": "No encontre el servidor en Discord o el bot ya no esta conectado."})
+                else:
+                    self.send_json(502, {"error": "No pude leer la estructura del servidor desde Discord."})
+            except Exception as exc:
+                self.send_internal_json_error("/api/admin/server-backups", exc)
             return
 
         if parsed.path == "/api/ticket-live-message":
@@ -3049,13 +5472,47 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     self.send_json(404, {"error": "No pude eliminar el registro del ticket."})
                     return
 
-                records = get_guild_ticket_records(guild_id)
+                records = get_all_guild_ticket_records(guild_id)
                 self.send_json(200, {
                     "records": records,
                     "summary": ticket_records_summary(records),
                 })
             except Exception as exc:
                 self.send_internal_json_error("/api/ticket-record", exc)
+            return
+
+        if parsed.path == "/api/chest-tables":
+            session = self.get_authenticated_session()
+            if not session:
+                return
+            if not self.validate_csrf(session):
+                return
+
+            try:
+                body = self.read_json_body()
+                guild_id = str(body.get("guild_id") or "").strip()
+                table_id = str(body.get("table_id") or "").strip()
+                if not guild_id or not self.can_access_chest_tables(session, guild_id):
+                    self.send_json(403, {"error": "No tienes acceso a ese servidor."})
+                    return
+                if not table_id.isdigit():
+                    self.send_json(400, {"error": "Tabla invalida."})
+                    return
+                init_database()
+                service = ChestTableService()
+                if not service.delete_table(guild_id, table_id, actor=session.get("user", {})):
+                    self.send_json(404, {"error": "No encontre esa tabla de cofres."})
+                    return
+                self.record_dashboard_admin_change(
+                    session,
+                    guild_id,
+                    category="server",
+                    title="Tabla de cofres eliminada",
+                    description=f"Se desactivo la tabla de cofres #{table_id}.",
+                )
+                self.send_json(200, service.list_tables(guild_id))
+            except Exception as exc:
+                self.send_internal_json_error("/api/chest-tables DELETE", exc)
             return
 
         if parsed.path == "/api/ping-templates":

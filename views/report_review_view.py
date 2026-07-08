@@ -2,8 +2,10 @@ from datetime import datetime
 
 import discord
 
+from utils.interaction_safety import SafeModal, SafeView
 
-class RejectReportModal(discord.ui.Modal, title="Rechazar informe"):
+
+class RejectReportModal(SafeModal, title="Rechazar informe"):
     reason = discord.ui.TextInput(
         label="Motivo del rechazo",
         style=discord.TextStyle.paragraph,
@@ -19,7 +21,7 @@ class RejectReportModal(discord.ui.Modal, title="Rechazar informe"):
         await self.review_view.reject(interaction, str(self.reason.value))
 
 
-class ApprovedReportBalanceView(discord.ui.View):
+class ApprovedReportBalanceView(SafeView):
     def __init__(
         self,
         *,
@@ -119,8 +121,9 @@ class ApprovedReportBalanceView(discord.ui.View):
             )
 
             suffix = f" {note}" if note else ""
+            amount_prefix = "+" if amount >= 0 else "-"
             summary_lines.append(
-                f"- {slot_name}: <@{user_id}> -> +{self.format_full_amount(amount)} [{'Silver' if category == 'silver' else 'Items'}]{suffix}"
+                f"- {slot_name}: <@{user_id}> -> {amount_prefix}{self.format_full_amount(abs(amount))} [{'Silver' if category == 'silver' else 'Items'}]{suffix}"
             )
 
         return summary_lines
@@ -186,7 +189,7 @@ class ApprovedReportBalanceView(discord.ui.View):
         await interaction.response.send_message("Informe publicado sin agregar balance.", ephemeral=True)
 
 
-class ReportReviewView(discord.ui.View):
+class ReportReviewView(SafeView):
     def __init__(
         self,
         *,
@@ -242,6 +245,9 @@ class ReportReviewView(discord.ui.View):
                 "reason": reason or "-",
                 "date": now.strftime("%d/%m/%Y"),
                 "time": now.strftime("%H:%M"),
+                "sent_to_channel": True,
+                "send_to_channel": True,
+                "status": "reviewed",
             },
         )
 

@@ -1,5 +1,7 @@
 import asyncio
 from datetime import datetime
+from io import BytesIO
+import os
 import re
 from types import SimpleNamespace
 from urllib.parse import urlencode
@@ -9,6 +11,10 @@ import discord
 from repositories.ping_template_repository import DEFAULT_PING_TEMPLATE
 from config.settings import DASHBOARD_PUBLIC_URL
 from services.config_service import CONFIG_REPORT_APPROVED_CHANNEL, CONFIG_REPORT_REVIEW_CHANNEL
+from services.chest_table_service import ChestTableService
+from services.report_service import ReportFormatService
+from utils.console_logger import log_event, log_exception
+from utils.interaction_safety import SafeModal, SafeView
 from views.report_review_view import ReportReviewView
 
 AVALONIAN_SLOTS = list(DEFAULT_PING_TEMPLATE["roles"])
@@ -20,6 +26,7 @@ REPORT_SPLIT_LABELS = {
     REPORT_SPLIT_SILVER: "Solo silver",
     REPORT_SPLIT_BOTH: "Items + silver",
 }
+REPORT_FORMATTER = ReportFormatService()
 
 SLOT_STYLES = {
     "OffTank": discord.ButtonStyle.secondary,
@@ -39,7 +46,7 @@ class SafeFormatDict(dict):
         return "{" + key + "}"
 
 
-class LeaveReasonModal(discord.ui.Modal, title="Justificacion de salida"):
+class LeaveReasonModal(SafeModal, title="Justificacion de salida"):
     reason = discord.ui.TextInput(
         label="Indica por que te retiras",
         style=discord.TextStyle.paragraph,
@@ -53,6 +60,13 @@ class LeaveReasonModal(discord.ui.Modal, title="Justificacion de salida"):
         self.user_id = user_id
 
     async def on_submit(self, interaction: discord.Interaction):
+        if self.signup_view.cancelled:
+            await interaction.response.send_message(
+                "Este ping fue cancelado y ya no admite cambios.",
+                ephemeral=True,
+            )
+            return
+
         if self.signup_view.finalized:
             await interaction.response.send_message(
                 "Este ping ya fue finalizado y ya no admite cambios.",
@@ -75,7 +89,7 @@ class LeaveReasonModal(discord.ui.Modal, title="Justificacion de salida"):
         )
 
 
-class LeaveSignupView(discord.ui.View):
+class LeaveSignupView(SafeView):
     def __init__(self, signup_view, user_id):
         super().__init__(timeout=None)
         self.signup_view = signup_view
@@ -94,10 +108,17 @@ class LeaveSignupView(discord.ui.View):
             )
             return
 
+        if self.signup_view.cancelled:
+            await interaction.response.send_message(
+                "Este ping fue cancelado y ya no admite cambios.",
+                ephemeral=True,
+            )
+            return
+
         await interaction.response.send_modal(LeaveReasonModal(self.signup_view, self.user_id))
 
 
-class AvalonSignupView(discord.ui.View):
+class AvalonSignupView(SafeView):
     def __init__(
         self,
         *,
@@ -116,6 +137,8 @@ class AvalonSignupView(discord.ui.View):
         fine_service=None,
         persist_callback=None,
         remove_persisted_callback=None,
+        deactivate_persisted_callback=None,
+        close_callback=None,
         caller_id=None,
         caller_name=None,
         template=None,
@@ -124,6 +147,7 @@ class AvalonSignupView(discord.ui.View):
         slots=None,
         finalized=False,
         report_sent=False,
+        report_generated=False,
         report_rejected=False,
         cancelled=False,
         cancelled_at=None,
@@ -163,6 +187,8 @@ class AvalonSignupView(discord.ui.View):
         self.fine_service = fine_service
         self.persist_callback = persist_callback
         self.remove_persisted_callback = remove_persisted_callback
+        self.deactivate_persisted_callback = deactivate_persisted_callback
+        self.close_callback = close_callback
         self.slots = {slot_key: None for slot_key in self.slot_keys}
         if slots:
             used_legacy_labels = set()
@@ -185,6 +211,7 @@ class AvalonSignupView(discord.ui.View):
         self.message_id = message_id
         self.finalized = finalized
         self.report_sent = report_sent
+        self.report_generated = report_generated or report_sent
         self.report_rejected = report_rejected
         self.cancelled = cancelled
         self.cancelled_at = cancelled_at
@@ -334,6 +361,7 @@ class AvalonSignupView(discord.ui.View):
             slots=state.get("slots", {}),
             finalized=bool(state.get("finalized")),
             report_sent=bool(state.get("report_sent")),
+            report_generated=bool(state.get("report_generated", state.get("report_sent"))),
             report_rejected=bool(state.get("report_rejected")),
             cancelled=bool(state.get("cancelled")),
             cancelled_at=state.get("cancelled_at"),
@@ -357,6 +385,7 @@ class AvalonSignupView(discord.ui.View):
             "slots": self.slots,
             "finalized": self.finalized,
             "report_sent": self.report_sent,
+            "report_generated": self.report_generated,
             "report_rejected": self.report_rejected,
             "cancelled": self.cancelled,
             "cancelled_at": self.cancelled_at,
@@ -371,6 +400,10 @@ class AvalonSignupView(discord.ui.View):
     def remove_persisted_state(self, caller_id=None):
         if self.remove_persisted_callback:
             self.remove_persisted_callback(self.guild_id, caller_id or self.caller_id, self.numero_ava)
+
+    def deactivate_persisted_state(self, status):
+        if self.deactivate_persisted_callback:
+            self.deactivate_persisted_callback(self.guild_id, self.caller_id, self.numero_ava, status)
 
     def attach_message(self, message):
         self.message = message
@@ -418,10 +451,28 @@ class AvalonSignupView(discord.ui.View):
         except discord.HTTPException:
             return
 
+    def normalize_user_id(self, user_id):
+        try:
+            return int(user_id)
+        except (TypeError, ValueError):
+            return None
+
+    def slot_matches_user(self, signed_user_id, user_id):
+        signed_user_id = self.normalize_user_id(signed_user_id)
+        user_id = self.normalize_user_id(user_id)
+        return signed_user_id is not None and user_id is not None and signed_user_id == user_id
+
+    def find_user_slot_keys(self, user_id):
+        return [
+            slot_key
+            for slot_key, signed_user_id in self.slots.items()
+            if self.slot_matches_user(signed_user_id, user_id)
+        ]
+
     def find_user_slot_key(self, user_id):
-        for slot_name, signed_user_id in self.slots.items():
-            if signed_user_id == user_id:
-                return slot_name
+        slot_keys = self.find_user_slot_keys(user_id)
+        if slot_keys:
+            return slot_keys[0]
         return None
 
     def find_user_slot(self, user_id):
@@ -429,12 +480,17 @@ class AvalonSignupView(discord.ui.View):
         return self.get_slot_label(slot_key) if slot_key else None
 
     def remove_user(self, user_id):
-        slot_key = self.find_user_slot_key(user_id)
-        if not slot_key or slot_key == self.caller_slot_key:
+        slot_keys = [
+            slot_key
+            for slot_key in self.find_user_slot_keys(user_id)
+            if slot_key != self.caller_slot_key
+        ]
+        if not slot_keys:
             return None
 
-        slot_label = self.get_slot_label(slot_key)
-        self.slots[slot_key] = None
+        slot_label = self.get_slot_label(slot_keys[0])
+        for slot_key in slot_keys:
+            self.slots[slot_key] = None
         self.rebuild_buttons()
         self.persist_state()
         return slot_label
@@ -503,6 +559,13 @@ class AvalonSignupView(discord.ui.View):
 
     def is_caller(self, user_id):
         return user_id == self.caller_id
+
+    def can_manage_ping(self, member):
+        return self.is_caller(getattr(member, "id", None)) or (
+            self.permission_service is not None
+            and self.guild_id
+            and self.permission_service.can_manage_ping(self.guild_id, member)
+        )
 
     def signup_block_reason(self, user):
         guild_id = int(self.guild_id or 0)
@@ -676,221 +739,78 @@ class AvalonSignupView(discord.ui.View):
         looter_payment=0,
         looter_user_id=0,
         tab_sale_percentage=0.0,
+        split_modifiers=None,
     ):
-        split_mode = split_mode if split_mode in REPORT_SPLIT_LABELS else REPORT_SPLIT_ITEMS
-        net_items = max(int(items or 0), 0)
-        raw_silver = max(int(silver or 0), 0)
-        caller_percentage = self.parse_percentage(caller_percentage) if split_mode == REPORT_SPLIT_BOTH else 0.0
-        looter_payment = max(int(looter_payment or 0), 0) if split_mode == REPORT_SPLIT_BOTH else 0
-        looter_user_id = int(looter_user_id or 0) if split_mode == REPORT_SPLIT_BOTH else 0
-        tab_sale_percentage = self.parse_percentage(tab_sale_percentage) if split_mode == REPORT_SPLIT_BOTH else 0.0
-        caller_amount = int(raw_silver * (caller_percentage / 100.0)) if caller_percentage else 0
-        net_silver = max(raw_silver - caller_amount - looter_payment - int(mapa or 0) - int(repa or 0), 0)
-        tab_sale_active = split_mode == REPORT_SPLIT_BOTH and tab_sale_percentage > 0
-        sold_tab_value = int(net_items * ((100.0 - tab_sale_percentage) / 100.0)) if tab_sale_active else 0
-        effective_mode = split_mode
-        split_participants = max(int(participant_count or 0) - (1 if looter_payment and looter_user_id else 0), 0)
-
-        if split_mode == REPORT_SPLIT_ITEMS:
-            item_pool = net_items + net_silver
-            silver_pool = 0
-        elif split_mode == REPORT_SPLIT_SILVER:
-            item_pool = 0
-            silver_pool = net_items + net_silver
-        elif tab_sale_active:
-            item_pool = 0
-            silver_pool = max(net_silver - caller_amount, 0) + sold_tab_value
-            effective_mode = REPORT_SPLIT_SILVER
-        else:
-            item_pool = net_items
-            silver_pool = net_silver
-
-        return {
-            "mode": effective_mode,
-            "label": REPORT_SPLIT_LABELS[effective_mode],
-            "requested_mode": split_mode,
-            "item_pool": item_pool,
-            "silver_pool": silver_pool,
-            "item_per_user": item_pool // split_participants if split_participants else 0,
-            "silver_per_user": silver_pool // split_participants if split_participants else 0,
-            "total": item_pool + silver_pool,
-            "net_silver": net_silver,
-            "caller_percentage": caller_percentage,
-            "caller_amount": caller_amount,
-            "looter_payment": looter_payment,
-            "looter_user_id": looter_user_id,
-            "tab_sale_percentage": tab_sale_percentage,
-            "tab_sale_active": tab_sale_active,
-            "sold_tab_value": sold_tab_value,
-            "split_participants": split_participants,
-        }
-
-    def build_report_distribution(self, split, adjustments):
-        distribution = []
-        for index, _, slot_name, user_id in self.iter_slots():
-            if not user_id:
-                continue
-
-            if split.get("looter_payment") and int(split.get("looter_user_id", 0) or 0) == int(user_id):
-                distribution.append(
-                    {
-                        "index": index,
-                        "slot": slot_name,
-                        "user_id": user_id,
-                        "note": "Looter",
-                        "category": "silver",
-                        "amount": int(split["looter_payment"]),
-                        "is_pp": False,
-                    }
-                )
-                if int(split.get("caller_amount", 0) or 0) and self.is_caller(user_id):
-                    distribution.append(
-                        {
-                            "index": index,
-                            "slot": slot_name,
-                            "user_id": user_id,
-                            "note": "Caller",
-                            "category": "silver",
-                            "amount": int(split["caller_amount"]),
-                            "is_pp": False,
-                        }
-                    )
-                continue
-
-            note = adjustments.get(slot_name, "")
-            discount = self.parse_percentage_discount(note)
-            multiplier = max(0.0, (100.0 - discount)) / 100.0
-            categories = []
-            if split["item_per_user"]:
-                categories.append(("items", split["item_per_user"]))
-            if split["silver_per_user"]:
-                categories.append(("silver", split["silver_per_user"]))
-
-            if split["mode"] == REPORT_SPLIT_ITEMS and self.is_pp_note(note):
-                categories = [("silver", split["item_per_user"])]
-
-            for category, base_amount in categories:
-                distribution.append(
-                    {
-                        "index": index,
-                        "slot": slot_name,
-                        "user_id": user_id,
-                        "note": note,
-                        "category": category,
-                        "amount": int(base_amount * multiplier),
-                        "is_pp": self.is_pp_note(note),
-                    }
-                )
-
-            if int(split.get("caller_amount", 0) or 0) and self.is_caller(user_id):
-                distribution.append(
-                    {
-                        "index": index,
-                        "slot": slot_name,
-                        "user_id": user_id,
-                        "note": "Caller",
-                        "category": "silver",
-                        "amount": int(split["caller_amount"]),
-                        "is_pp": False,
-                    }
-                )
-
-        return distribution
-
-    def build_player_report_suffix(self, slot_name, user_id, adjustments, split):
-        if not user_id:
-            return ""
-
-        parts = []
-        note = adjustments.get(slot_name, "")
-        is_looter = (
-            split.get("looter_payment")
-            and int(split.get("looter_user_id", 0) or 0) == int(user_id)
+        return REPORT_FORMATTER.calculate_split(
+            silver,
+            items,
+            mapa,
+            repa,
+            participant_count,
+            split_mode,
+            self.parse_percentage(caller_percentage),
+            looter_payment,
+            looter_user_id,
+            self.parse_percentage(tab_sale_percentage),
+            split_modifiers,
         )
-        if note and not (
-            is_looter and note.strip().lower() == "looter"
-        ):
-            parts.append(note)
 
-        if is_looter:
-            parts.append("Looter")
-            parts.append(f"+{self.format_full_amount(split['looter_payment'])}")
+    def build_report_distribution(self, split, adjustments, exclusions=None, split_modifiers=None, build_loan_discounts=None):
+        return REPORT_FORMATTER.build_distribution(
+            self.report_formatter_slots(),
+            getattr(self, "caller_id", 0),
+            split,
+            adjustments,
+            exclusions,
+            split_modifiers,
+            build_loan_discounts,
+        )
 
-        if int(split.get("caller_amount", 0) or 0) and self.is_caller(user_id):
-            parts.append(f"+ {self.format_full_amount(split['caller_amount'])}")
-
-        return f" {' '.join(parts)}" if parts else ""
+    def build_player_report_suffix(self, slot_name, user_id, adjustments, split, exclusions=None, split_modifiers=None, build_loan_discounts=None):
+        return REPORT_FORMATTER.build_player_suffix(
+            slot_name,
+            user_id,
+            getattr(self, "caller_id", 0),
+            adjustments,
+            split,
+            exclusions,
+            split_modifiers,
+            build_loan_discounts,
+        )
 
     def evaluate_pp_distribution(self, split, distribution):
-        pp_entries = [
-            entry
-            for entry in distribution
-            if entry.get("is_pp") and entry["category"] == "silver"
-        ]
-        if split["mode"] == REPORT_SPLIT_ITEMS:
-            available_silver = int(split.get("net_silver", 0) or 0)
-        else:
-            available_silver = int(split.get("silver_pool", 0) or 0)
-        pp_required = sum(entry["amount"] for entry in pp_entries)
-        difference = available_silver - pp_required
-        return pp_entries, available_silver, pp_required, difference
+        return REPORT_FORMATTER.evaluate_pp_distribution(split, distribution)
 
     def build_pp_evaluation_block(self, split, distribution):
-        pp_entries, available_silver, pp_required, difference = self.evaluate_pp_distribution(split, distribution)
-        if not pp_entries:
-            return ""
+        return REPORT_FORMATTER.build_pp_evaluation_block(split, distribution)
 
-        lines = [
-            "",
-            "## Revision PP",
-            f"**PP:** {len(pp_entries)}",
-            f"**Silver total:** {self.format_amount(available_silver)}",
-            f"**Silver requerido para PP:** {self.format_amount(pp_required)}",
+    def report_formatter_slots(self):
+        return [
+            {
+                "index": index,
+                "slot": slot_name,
+                "user_id": user_id,
+            }
+            for index, _, slot_name, user_id in self.iter_slots()
         ]
 
-        if difference > 0:
-            lines.append(f"**Silver sobrante:** {self.format_amount(difference)}")
-        elif difference < 0:
-            lines.append(f"**Silver faltante:** {self.format_amount(abs(difference))}")
-        else:
-            lines.append("**Silver exacto para PP:** 0")
-
-        return "\n".join(lines)
-
-    def build_report_content(self, estimated, silver, items, mapa, repa, adjustments, split):
+    def build_report_content(self, estimated, silver, items, mapa, repa, adjustments, split, exclusions=None, split_modifiers=None, build_loan_discounts=None):
         estimated_amount = self.parse_amount(estimated)
-        estimated_value = self.format_amount(estimated_amount) if estimated_amount else estimated
-
-        lines = [
-            f"# {self.title}",
-            "",
-            f"**Modo de reparto:** {split['label']}",
-            f"**Estimado:** {estimated_value}",
-            f"**Silver:** {self.format_amount(silver)}",
-            f"**Items:** {self.format_amount(items)}",
-        ]
-
-        if mapa:
-            lines.append(f"**Mapa:** {self.format_amount(-mapa)}")
-        if repa:
-            lines.append(f"**Repa:** {self.format_amount(-repa)}")
-
-        lines.extend([
-            f"**Total neto:** {self.format_amount(split['total'])}",
-            "",
-        ])
-        if split["item_per_user"]:
-            lines.append(f"# {self.format_full_amount(split['item_per_user'])} Items C/U")
-        if split["silver_per_user"]:
-            lines.append(f"# {self.format_full_amount(split['silver_per_user'])} Silver C/U")
-        lines.append("")
-
-        for index, _, slot_name, user_id in self.iter_slots():
-            value = f"<@{user_id}>" if user_id else ""
-            suffix = self.build_player_report_suffix(slot_name, user_id, adjustments, split)
-            lines.append(f"> {index}.{slot_name}: {value}{suffix}")
-
-        return "\n".join(lines)
+        return REPORT_FORMATTER.build_report_content(
+            title=self.title,
+            caller_id=getattr(self, "caller_id", 0),
+            estimated=estimated_amount or estimated,
+            silver=silver,
+            items=items,
+            mapa=mapa,
+            repa=repa,
+            adjustments=adjustments,
+            split=split,
+            slots=self.report_formatter_slots(),
+            exclusions=exclusions,
+            split_modifiers=split_modifiers,
+            build_loan_discounts=build_loan_discounts,
+        )
 
     async def get_configured_channel(self, interaction, channel_type):
         return await self.get_configured_channel_for(
@@ -918,9 +838,111 @@ class AvalonSignupView(discord.ui.View):
 
     async def create_report_thread(self, message):
         try:
-            await message.create_thread(name=f"Evaluacion {self.title}")
+            return await message.create_thread(name=f"Evaluacion {self.title}")
         except discord.HTTPException:
+            return None
+
+    async def send_build_loan_proof_to_thread(self, target, proof_path, proof_name):
+        proof_path = str(proof_path or "")
+        if not target or not proof_path or not os.path.isfile(proof_path):
+            log_event(
+                "REPORT BUILD LOAN PROOF SKIP | "
+                f"ava={self.numero_ava} target={bool(target)} path={proof_path or '-'} "
+                f"exists={os.path.isfile(proof_path) if proof_path else False}"
+            )
             return
+        filename = str(proof_name or os.path.basename(proof_path))
+        with open(proof_path, "rb") as handle:
+            file = discord.File(BytesIO(handle.read()), filename=filename)
+        try:
+            await target.send("Imagen adjunta del prestamo de guild.", file=file)
+        except discord.HTTPException as exc:
+            log_exception(
+                "REPORT BUILD LOAN PROOF SEND FAILED | "
+                f"ava={self.numero_ava} target_id={getattr(target, 'id', '')} filename={filename}",
+                exc,
+            )
+            raise
+        log_event(
+            "REPORT BUILD LOAN PROOF SENT | "
+            f"ava={self.numero_ava} target_id={getattr(target, 'id', '')} filename={filename}"
+        )
+
+    async def send_build_loan_proofs_to_thread(self, target, discounts):
+        proof_count = sum(
+            1
+            for discount in discounts or []
+            if isinstance(discount, dict) and str(discount.get("proof_path") or "").strip()
+        )
+        log_event(
+            "REPORT BUILD LOAN PROOFS START | "
+            f"ava={self.numero_ava} target_id={getattr(target, 'id', '') if target else ''} proofs={proof_count}"
+        )
+        for discount in discounts or []:
+            if not isinstance(discount, dict):
+                continue
+            await self.send_build_loan_proof_to_thread(
+                target,
+                discount.get("proof_path", ""),
+                discount.get("proof_name", ""),
+            )
+
+    async def send_chest_evidences_to_thread(self, target, guild_id, chest_table_id):
+        if not target or not str(chest_table_id or "").isdigit():
+            log_event(
+                "REPORT CHEST EVIDENCE SKIP | "
+                f"ava={self.numero_ava} guild={guild_id} table={chest_table_id or '-'} "
+                f"target={bool(target)} reason=invalid_table_id"
+            )
+            return
+        service = ChestTableService()
+        table = service.get_table(str(guild_id), str(chest_table_id))
+        if not table:
+            log_event(
+                "REPORT CHEST EVIDENCE SKIP | "
+                f"ava={self.numero_ava} guild={guild_id} table={chest_table_id} reason=missing_table"
+            )
+            return
+
+        images_by_row = {}
+        for image in table.get("images") or []:
+            row_id = str(image.get("row_id") or "")
+            image_type = str(image.get("image_type") or "").lower()
+            if image_type not in {"lqs", "lqq"} or not row_id:
+                continue
+            images_by_row.setdefault(row_id, {})
+            images_by_row[row_id].setdefault(image_type, image)
+
+        sent = 0
+        for index, row in enumerate(table.get("rows") or [], start=1):
+            row_images = images_by_row.get(str(row.get("id") or ""), {})
+            files = []
+            labels = []
+            for image_type, label in (("lqs", "LQS"), ("lqq", "LQQ")):
+                image = row_images.get(image_type)
+                if not image:
+                    continue
+                image_file = service.get_image_file(str(guild_id), image.get("id"))
+                if not image_file:
+                    continue
+                path = image_file.get("path", "")
+                if not path or not os.path.isfile(path):
+                    continue
+                extension = os.path.splitext(str(image_file.get("original_name") or path))[1] or ".png"
+                filename = f"cofre_{index}_{label.lower()}{extension}"
+                with open(path, "rb") as handle:
+                    files.append(discord.File(BytesIO(handle.read()), filename=filename))
+                labels.append(f"Imagen {label}")
+            if not files:
+                continue
+            await target.send(f"**Cofre {index}**\n" + " | ".join(labels), files=files)
+            sent += 1
+
+        log_event(
+            "REPORT CHEST EVIDENCES SENT | "
+            f"ava={self.numero_ava} guild={guild_id} table={chest_table_id} rows={sent} "
+            f"target_id={getattr(target, 'id', '')}"
+        )
 
     async def mark_report_rejected(self):
         self.report_sent = False
@@ -945,7 +967,6 @@ class AvalonSignupView(discord.ui.View):
 
         try:
             await self.message.delete()
-            self.remove_persisted_state()
         except discord.HTTPException:
             return
 
@@ -976,6 +997,9 @@ class AvalonSignupView(discord.ui.View):
         if self.report_sent:
             await interaction.response.send_message("Este informe ya fue enviado a evaluacion.", ephemeral=True)
             return
+        if self.report_generated and not self.report_rejected:
+            await interaction.response.send_message("Este informe ya fue generado.", ephemeral=True)
+            return
 
         try:
             await self.publish_report(
@@ -993,6 +1017,7 @@ class AvalonSignupView(discord.ui.View):
                 adjustments_text=adjustments_text,
                 fine_entries=fine_entries,
                 split_mode=split_mode,
+                send_to_channel=True,
             )
         except ValueError as exc:
             await interaction.response.send_message(str(exc), ephemeral=True)
@@ -1000,12 +1025,10 @@ class AvalonSignupView(discord.ui.View):
 
         await interaction.response.send_message("Informe enviado a evaluacion.", ephemeral=True)
 
-    async def publish_report(
+    def build_report_payload(
         self,
         *,
-        guild,
         caller,
-        client,
         estimated,
         silver_text,
         items_text,
@@ -1017,31 +1040,11 @@ class AvalonSignupView(discord.ui.View):
         looter_user_id="",
         tab_sale_percentage_text="",
         split_mode=REPORT_SPLIT_ITEMS,
+        split_exclusions=None,
+        split_modifiers=None,
+        build_loan_discounts=None,
+        chest_table_id="",
     ):
-        if not self.is_caller(caller.id):
-            raise ValueError("Solo el caller puede enviar este informe.")
-        if not self.finalized:
-            raise ValueError("Primero debes finalizar el ping.")
-        if self.cancelled:
-            raise ValueError("Esta Ava fue cancelada y ya no puede enviar informe.")
-        if self.report_sent:
-            raise ValueError("Este informe ya fue enviado a evaluacion.")
-
-        review_channel = await self.get_configured_channel_for(
-            guild.id,
-            client,
-            CONFIG_REPORT_REVIEW_CHANNEL,
-        )
-        approved_channel_id = self.config_service.get_channel_id(
-            guild.id,
-            CONFIG_REPORT_APPROVED_CHANNEL,
-        ) if self.config_service else 0
-
-        if not review_channel:
-            raise ValueError(
-                "No hay canal de evaluacion de informes configurado. Usa /config canal."
-            )
-
         silver = self.parse_amount(silver_text)
         items = self.parse_amount(items_text)
         mapa, repa = self.parse_costs(costs_text)
@@ -1051,12 +1054,20 @@ class AvalonSignupView(discord.ui.View):
         tab_sale_percentage = self.parse_percentage(tab_sale_percentage_text)
         adjustments = self.parse_adjustments(adjustments_text)
         fines = self.normalize_report_fines(fine_entries)
-        participant_count = self.occupied_count()
+        slots = self.report_formatter_slots()
+        exclusions = REPORT_FORMATTER.normalize_split_exclusions(split_exclusions, slots)
+        modifiers = REPORT_FORMATTER.normalize_split_modifiers(split_modifiers, slots)
+        build_loan_discounts = REPORT_FORMATTER.normalize_build_loan_discounts(build_loan_discounts, slots)
+        occupied_user_ids = self.occupied_user_ids()
+        participant_count = REPORT_FORMATTER.split_participant_count(occupied_user_ids, exclusions)
         if looter_payment:
             if not looter_user_id:
                 raise ValueError("Selecciona quien fue el looter para aplicar ese pago.")
             if looter_user_id not in self.occupied_user_ids():
                 raise ValueError("El looter seleccionado no forma parte de esta party.")
+            if REPORT_FORMATTER.split_participant_weight(looter_user_id, exclusions) < 1:
+                looter_payment = 0
+                looter_user_id = 0
         split = self.calculate_report_split(
             silver,
             items,
@@ -1068,6 +1079,7 @@ class AvalonSignupView(discord.ui.View):
             looter_payment,
             looter_user_id,
             tab_sale_percentage,
+            modifiers,
         )
         content = self.build_report_content(
             estimated,
@@ -1077,19 +1089,29 @@ class AvalonSignupView(discord.ui.View):
             repa,
             adjustments,
             split,
+            exclusions=exclusions,
+            split_modifiers=modifiers,
+            build_loan_discounts=build_loan_discounts,
         )
-        distribution = self.build_report_distribution(split, adjustments)
+        distribution = self.build_report_distribution(
+            split,
+            adjustments,
+            exclusions=exclusions,
+            split_modifiers=modifiers,
+            build_loan_discounts=build_loan_discounts,
+        )
         _, available_silver, pp_required, pp_difference = self.evaluate_pp_distribution(split, distribution)
         if pp_difference < 0:
             raise ValueError(
                 "El informe no es valido: el silver disponible no alcanza para cubrir los PP indicados."
             )
 
-        evaluation_content = (
-            "## Informe en evaluacion\n\n"
-            f"{content}"
-            f"{self.build_report_fines_block(fines)}"
-            f"{self.build_pp_evaluation_block(split, distribution)}"
+        evaluation_content = REPORT_FORMATTER.build_final_report_text(
+            content=content,
+            fines=fines,
+            split=split,
+            distribution=distribution,
+            build_loan_discounts=build_loan_discounts,
         )
 
         report_data = {
@@ -1109,7 +1131,126 @@ class AvalonSignupView(discord.ui.View):
             "available_silver": available_silver,
             "pp_required": pp_required,
             "fines": fines,
+            "split_exclusions": exclusions,
+            "split_modifiers": modifiers,
+            "build_loan_discounts": build_loan_discounts,
+            "chest_table_id": str(chest_table_id or ""),
         }
+        return report_data
+
+    def log_report_generation(self, guild, caller, report_data, *, send_to_channel, channel=None, message=None):
+        if not self.report_service:
+            return
+        now = datetime.now()
+        self.report_service.log_generation(
+            guild.id,
+            {
+                "ava": self.numero_ava,
+                "caller": getattr(caller, "display_name", "") or getattr(caller, "name", ""),
+                "caller_id": str(getattr(caller, "id", "")),
+                "reviewer": "",
+                "reviewer_id": "",
+                "decision": "enviado" if send_to_channel else "vista_previa",
+                "reason": "Informe enviado a evaluacion" if send_to_channel else "Informe generado sin enviar a Discord",
+                "date": now.strftime("%d/%m/%Y"),
+                "time": now.strftime("%H:%M"),
+                "sent_to_channel": bool(send_to_channel),
+                "send_to_channel": bool(send_to_channel),
+                "channel_id": str(getattr(channel, "id", "") or ""),
+                "message_id": str(getattr(message, "id", "") or ""),
+                "status": "sent" if send_to_channel else "preview",
+                "split_mode": report_data.get("split_mode", ""),
+                "split_modifiers": report_data.get("split_modifiers", []),
+                "build_loan_discounts": report_data.get("build_loan_discounts", []),
+            },
+        )
+
+    async def publish_report(
+        self,
+        *,
+        guild,
+        caller,
+        client,
+        estimated,
+        silver_text,
+        items_text,
+        costs_text,
+        adjustments_text,
+        fine_entries=None,
+        caller_percentage_text="",
+        looter_payment_text="",
+        looter_user_id="",
+        tab_sale_percentage_text="",
+        split_mode=REPORT_SPLIT_ITEMS,
+        send_to_channel=True,
+        split_exclusions=None,
+        split_modifiers=None,
+        build_loan_discounts=None,
+        chest_table_id="",
+    ):
+        if not self.is_caller(caller.id):
+            raise ValueError("Solo el caller puede enviar este informe.")
+        if not self.finalized:
+            raise ValueError("Primero debes finalizar el ping.")
+        if self.cancelled:
+            raise ValueError("Esta Ava fue cancelada y ya no puede enviar informe.")
+        if self.report_sent:
+            raise ValueError("Este informe ya fue enviado a evaluacion.")
+        if self.report_generated and not self.report_rejected:
+            raise ValueError("Este informe ya fue generado.")
+
+        review_channel = None
+        approved_channel_id = 0
+        if send_to_channel:
+            review_channel = await self.get_configured_channel_for(
+                guild.id,
+                client,
+                CONFIG_REPORT_REVIEW_CHANNEL,
+            )
+            approved_channel_id = self.config_service.get_channel_id(
+                guild.id,
+                CONFIG_REPORT_APPROVED_CHANNEL,
+            ) if self.config_service else 0
+
+            if not review_channel:
+                raise ValueError(
+                    "No hay canal de evaluacion de informes configurado. Configuralo desde el dashboard antes de enviar."
+                )
+
+        report_data = self.build_report_payload(
+            caller=caller,
+            estimated=estimated,
+            silver_text=silver_text,
+            items_text=items_text,
+            costs_text=costs_text,
+            caller_percentage_text=caller_percentage_text,
+            looter_payment_text=looter_payment_text,
+            looter_user_id=looter_user_id,
+            tab_sale_percentage_text=tab_sale_percentage_text,
+            adjustments_text=adjustments_text,
+            fine_entries=fine_entries,
+            split_mode=split_mode,
+            split_exclusions=split_exclusions,
+            split_modifiers=split_modifiers,
+            build_loan_discounts=build_loan_discounts,
+            chest_table_id=chest_table_id,
+        )
+        message = None
+        if not send_to_channel:
+            self.log_report_generation(
+                guild,
+                caller,
+                report_data,
+                send_to_channel=False,
+            )
+            self.report_sent = False
+            self.report_generated = True
+            self.report_rejected = False
+            self.rebuild_buttons()
+            self.persist_state()
+            await self.refresh_message()
+            return report_data
+
         review_view = ReportReviewView(
             report_data=report_data,
             approved_channel_id=approved_channel_id,
@@ -1122,7 +1263,7 @@ class AvalonSignupView(discord.ui.View):
             guild_id=guild.id,
         )
         message = await review_channel.send(
-            evaluation_content,
+            report_data["evaluation_content"],
             view=review_view,
         )
         review_view.message = message
@@ -1137,9 +1278,46 @@ class AvalonSignupView(discord.ui.View):
                     "report_data": report_data,
                 }
             )
-        await self.create_report_thread(message)
+        report_thread = await self.create_report_thread(message)
+        try:
+            await self.send_build_loan_proofs_to_thread(
+                report_thread or review_channel,
+                report_data.get("build_loan_discounts", []),
+            )
+        except discord.HTTPException:
+            if report_thread:
+                await self.send_build_loan_proofs_to_thread(
+                    review_channel,
+                    report_data.get("build_loan_discounts", []),
+                )
+            else:
+                raise
+        try:
+            await self.send_chest_evidences_to_thread(
+                report_thread or review_channel,
+                guild.id,
+                chest_table_id,
+            )
+        except discord.HTTPException:
+            if report_thread:
+                await self.send_chest_evidences_to_thread(
+                    review_channel,
+                    guild.id,
+                    chest_table_id,
+                )
+            else:
+                raise
+        self.log_report_generation(
+            guild,
+            caller,
+            report_data,
+            send_to_channel=True,
+            channel=review_channel,
+            message=message,
+        )
 
         self.report_sent = True
+        self.report_generated = True
         self.report_rejected = False
         self.rebuild_buttons()
         self.persist_state()
@@ -1256,8 +1434,9 @@ class AvalonSignupView(discord.ui.View):
         if self.cancelled:
             status = "\n\n**Estado:** Cancelada"
 
+        template_content = self.template.get("content", DEFAULT_PING_TEMPLATE["content"])
         rendered_content = self.format_template_text(
-            self.template.get("content", DEFAULT_PING_TEMPLATE["content"]),
+            template_content,
             mention=self.template.get("mention", ""),
             join_command=self.join_command,
             caller=self.caller_name or f"Usuario {self.caller_id}",
@@ -1267,6 +1446,9 @@ class AvalonSignupView(discord.ui.View):
             total=len(self.slot_keys),
             status=status,
         )
+        if "{slots}" in str(template_content or ""):
+            return rendered_content.replace("{user}", "")
+
         return self.inject_slot_users(rendered_content)
 
     def rebuild_buttons(self):
@@ -1304,7 +1486,13 @@ class AvalonSignupView(discord.ui.View):
             self.add_item(finish_button)
 
         if self.finalized and not self.cancelled and self.template.get("report_enabled", True):
-            report_label = "Reenviar informe" if self.report_rejected and not self.report_sent else "Enviar informe"
+            report_already_generated = self.report_generated and not self.report_rejected
+            if self.report_rejected and not self.report_sent:
+                report_label = "Reenviar informe"
+            elif report_already_generated:
+                report_label = "Informe generado"
+            else:
+                report_label = "Enviar informe"
             report_url = (
                 f"{DASHBOARD_PUBLIC_URL}/dashboard?"
                 + urlencode(
@@ -1321,13 +1509,13 @@ class AvalonSignupView(discord.ui.View):
                 style=discord.ButtonStyle.link,
                 url=report_url,
                 row=4,
-                disabled=not self.finalized or self.report_sent,
+                disabled=not self.finalized or self.report_sent or report_already_generated,
             )
             self.add_item(report_button)
 
     async def cancel_ping_callback(self, interaction: discord.Interaction):
-        if not self.is_caller(interaction.user.id):
-            await interaction.response.send_message("Solo el caller puede cancelar esta Ava.", ephemeral=True)
+        if not self.can_manage_ping(interaction.user):
+            await interaction.response.send_message("Solo el caller o un rol autorizado puede cancelar esta Ava.", ephemeral=True)
             return
 
         if self.report_sent:
@@ -1337,39 +1525,52 @@ class AvalonSignupView(discord.ui.View):
             )
             return
 
-        self.cancelled = True
-        self.cancelled_at = datetime.now().isoformat()
-        self.rebuild_buttons()
-        self.persist_state()
+        await self.cancel_ping()
         await interaction.response.edit_message(content=self.build_content(), view=None)
-        if self.delete_task is None or self.delete_task.done():
-            self.delete_task = asyncio.create_task(self.delete_cancelled_message_later())
         await interaction.followup.send(
             "Ava cancelada. Ya puedes volver a usar ese numero. El anuncio se eliminara automaticamente en 10 minutos.",
             ephemeral=True,
         )
 
     async def finish_ping_callback(self, interaction: discord.Interaction):
-        if not self.is_caller(interaction.user.id):
-            await interaction.response.send_message("Solo el caller puede finalizar este ping.", ephemeral=True)
+        if not self.can_manage_ping(interaction.user):
+            await interaction.response.send_message("Solo el caller o un rol autorizado puede finalizar este ping.", ephemeral=True)
             return
 
-        if self.cancelled:
-            await interaction.response.send_message("Esta Ava ya fue cancelada.", ephemeral=True)
+        error = await self.finish_ping()
+        if error:
+            await interaction.response.send_message(error, ephemeral=True)
             return
 
-        if self.finalized:
-            await interaction.response.send_message("Este ping ya fue finalizado.", ephemeral=True)
-            return
-
-        self.finalized = True
-        self.rebuild_buttons()
-        self.persist_state()
         await interaction.response.edit_message(content=self.build_content(), view=self)
         await interaction.followup.send(
             "Ping finalizado. Ahora puedes enviar el informe con base en las personas anotadas.",
             ephemeral=True,
         )
+
+    async def cancel_ping(self):
+        self.cancelled = True
+        self.cancelled_at = datetime.now().isoformat()
+        self.rebuild_buttons()
+        self.persist_state()
+        self.deactivate_persisted_state("cancelled")
+        if self.close_callback:
+            self.close_callback(self.guild_id, self.caller_id, self.numero_ava)
+        if self.delete_task is None or self.delete_task.done():
+            self.delete_task = asyncio.create_task(self.delete_cancelled_message_later())
+            self.delete_task.add_done_callback(self.log_background_task_result)
+
+    async def finish_ping(self):
+        if self.cancelled:
+            return "Esta Ava ya fue cancelada."
+
+        if self.finalized:
+            return "Este ping ya fue finalizado."
+
+        self.finalized = True
+        self.rebuild_buttons()
+        self.persist_state()
+        return None
 
     def create_signup_callback(self, slot_name):
         async def callback(interaction: discord.Interaction):
@@ -1431,3 +1632,10 @@ class AvalonSignupView(discord.ui.View):
         if self.message:
             view = None if self.cancelled else self
             await self.message.edit(content=self.build_content(), view=view)
+
+    def log_background_task_result(self, task):
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc:
+            log_exception(f"Error en tarea de borrado automatico de Ava {self.numero_ava}", exc)

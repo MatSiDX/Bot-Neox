@@ -1,7 +1,8 @@
 import discord
+from utils.interaction_safety import SafeView
 
 
-class TopView(discord.ui.View):
+class TopView(SafeView):
     def __init__(self, embeds, owner_id):
         super().__init__(timeout=None)
         self.embeds = embeds

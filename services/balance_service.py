@@ -27,6 +27,18 @@ class BalanceService:
         guild_id, guild_name = self.get_guild_parts(guild)
         self.repo.modify_balance(guild_id, user_id, amount, key, add, guild_name)
 
+    def resolve_existing_user(self, guild, identifier):
+        guild_id, _ = self.get_guild_parts(guild)
+        return self.repo.resolve_existing_user(guild_id, identifier)
+
+    def search_existing_users(self, guild, query, limit=25):
+        guild_id, _ = self.get_guild_parts(guild)
+        return self.repo.search_existing_users(guild_id, query, limit)
+
+    def modify_existing(self, guild, user_id, amount, key, add=True):
+        guild_id, _ = self.get_guild_parts(guild)
+        return self.repo.modify_existing_balance(guild_id, user_id, amount, key, add)
+
     def get_ranking(self, guild):
         guild_id, guild_name = self.get_guild_parts(guild)
         return self.repo.get_ranking(guild_id, guild_name)
