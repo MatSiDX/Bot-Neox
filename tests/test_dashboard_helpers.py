@@ -247,12 +247,98 @@ class DashboardHelperTests(unittest.TestCase):
         template = load_dashboard_template("login.html")
         self.assertIn("<!doctype html>", template)
         self.assertIn("<!--DASHBOARD_NEXT_INPUT-->", template)
+        self.assertIn('rel="icon"', template)
+
+    def test_load_dashboard_template_reads_landing_template(self):
+        template = load_dashboard_template("landing.html")
+        self.assertIn("<!doctype html>", template)
+        self.assertIn("AvalonBot", template)
+        self.assertIn("/static/css/landing.css", template)
+        self.assertIn("<!--BOT_INVITE_URL-->", template)
+        self.assertIn('rel="icon"', template)
+
+    def test_build_bot_invite_url_uses_dashboard_client_id(self):
+        original_client_id = web_dashboard.DASHBOARD_CLIENT_ID
+        web_dashboard.DASHBOARD_CLIENT_ID = "1234567890"
+        try:
+            invite_url = web_dashboard.build_bot_invite_url()
+        finally:
+            web_dashboard.DASHBOARD_CLIENT_ID = original_client_id
+
+        self.assertIn("https://discord.com/oauth2/authorize?", invite_url)
+        self.assertIn("client_id=1234567890", invite_url)
+        self.assertIn("scope=bot+applications.commands", invite_url)
+        self.assertIn("permissions=8", invite_url)
+
+    def test_render_landing_html_injects_bot_invite_url(self):
+        original_builder = web_dashboard.build_bot_invite_url
+        web_dashboard.build_bot_invite_url = lambda: "https://discord.com/oauth2/authorize?client_id=test"
+        try:
+            rendered = web_dashboard.render_landing_html()
+        finally:
+            web_dashboard.build_bot_invite_url = original_builder
+
+        self.assertIn("Invitar bot", rendered)
+        self.assertIn("client_id=test", rendered)
+        self.assertNotIn("<!--BOT_INVITE_URL-->", rendered)
 
     def test_resolve_dashboard_static_path_blocks_traversal(self):
         static_path = resolve_dashboard_static_path("css/login.css")
         self.assertIsNotNone(static_path)
         self.assertTrue(str(static_path).endswith("login.css"))
         self.assertIsNone(resolve_dashboard_static_path("../web_dashboard.py"))
+
+    def test_resolve_dashboard_static_path_reads_landing_assets(self):
+        css_path = resolve_dashboard_static_path("css/landing.css")
+        js_path = resolve_dashboard_static_path("js/landing.js")
+        self.assertIsNotNone(css_path)
+        self.assertTrue(str(css_path).endswith("landing.css"))
+        self.assertIsNotNone(js_path)
+        self.assertTrue(str(js_path).endswith("landing.js"))
+
+    def test_root_route_serves_public_landing(self):
+        original_get_session = web_dashboard.get_session_from_request
+        web_dashboard.get_session_from_request = lambda handler: None
+        try:
+            handler = web_dashboard.DashboardHandler.__new__(web_dashboard.DashboardHandler)
+            handler.path = "/"
+            captured = {}
+
+            def fake_send_text(status, content, content_type, headers=None):
+                captured["status"] = status
+                captured["content"] = content
+                captured["content_type"] = content_type
+
+            handler.send_text = fake_send_text
+            handler.send_redirect = lambda *args, **kwargs: captured.setdefault("redirected", True)
+            handler.do_GET()
+        finally:
+            web_dashboard.get_session_from_request = original_get_session
+
+        self.assertEqual(captured["status"], 200)
+        self.assertEqual(captured["content_type"], "text/html")
+        self.assertIn("Dashboard para Discord", captured["content"])
+        self.assertIn("Invitar bot", captured["content"])
+        self.assertNotIn("redirected", captured)
+
+    def test_dashboard_redirects_to_login_with_next_when_session_missing(self):
+        original_get_session = web_dashboard.get_session_from_request
+        web_dashboard.get_session_from_request = lambda handler: None
+        try:
+            handler = web_dashboard.DashboardHandler.__new__(web_dashboard.DashboardHandler)
+            handler.path = "/dashboard?tab=balances"
+            captured = {}
+
+            handler.send_text = lambda *args, **kwargs: captured.setdefault("text_called", True)
+            handler.send_redirect = lambda location, headers=None: captured.update({"location": location})
+            handler.do_GET()
+        finally:
+            web_dashboard.get_session_from_request = original_get_session
+
+        self.assertEqual(
+            captured["location"],
+            "/login?remember=1&next=%2Fdashboard%3Ftab%3Dbalances",
+        )
 
     def test_select_dashboard_guilds_prefers_requested_guild(self):
         guilds, selected = select_dashboard_guilds(

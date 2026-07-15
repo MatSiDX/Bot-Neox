@@ -16,7 +16,11 @@
       if (!response.ok) throw new Error(payload.error || "No pude cargar los permisos.");
 
       state.botPermissions = payload.permissions || {};
+      state.botSystemPermissions = payload.system_permissions || {};
       state.botPermissionOptions = payload.options || [];
+      state.manageablePermissions = payload.manageable_permissions || [];
+      state.permissionReadOnlyRoleIds = payload.read_only_role_ids || [];
+      state.canEditPermissions = Boolean(payload.can_edit);
       state.permissionsGuildId = state.guildId;
       ctx.clearSectionMessage("permissions");
       ctx.renderSection("permissions");

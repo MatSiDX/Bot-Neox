@@ -5,13 +5,21 @@ import threading
 import time
 from datetime import datetime
 
+try:
+    from config.settings import DASHBOARD_PUBLIC_URL as CONFIGURED_DASHBOARD_PUBLIC_URL
+except Exception:
+    CONFIGURED_DASHBOARD_PUBLIC_URL = None
+
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 BOT_SCRIPT = os.path.join(ROOT_DIR, "bot.py")
 DASHBOARD_SCRIPT = os.path.join(ROOT_DIR, "web_dashboard.py")
 DASHBOARD_HOST = "127.0.0.1"
 DASHBOARD_PORT = "8000"
-DASHBOARD_URL = f"http://localhost:{DASHBOARD_PORT}"
+DASHBOARD_URL = (
+    str(CONFIGURED_DASHBOARD_PUBLIC_URL or "").rstrip("/")
+    or f"http://{DASHBOARD_HOST}:{DASHBOARD_PORT}"
+)
 
 
 class BotManager:
