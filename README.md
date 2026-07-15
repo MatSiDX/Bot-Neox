@@ -16,6 +16,19 @@ Bot de Discord en Python + `discord.py` con dashboard web liviano, persistencia 
 Python 3.11 o superior
 ```
 
+Si usaras el modulo de musica, tambien necesitas FFmpeg disponible en `PATH`.
+Verificalo con:
+
+```bash
+ffmpeg -version
+```
+
+En Ubuntu/Debian:
+
+```bash
+sudo apt update && sudo apt install -y ffmpeg
+```
+
 Instalacion local:
 
 ```bat
@@ -35,6 +48,10 @@ Bot + consola de control + dashboard:
 run.bat
 ```
 
+> `bot_manager.py` y `run.bat` estan pensados para entorno local/manual. En una
+> VPS de produccion, usa `systemd` con servicios separados para el bot y el
+> dashboard.
+
 Solo bot:
 
 ```bat
@@ -53,11 +70,53 @@ o:
 python web_dashboard.py --host 127.0.0.1 --port 8000
 ```
 
+El dashboard tambien acepta `DASHBOARD_HOST` y `DASHBOARD_PORT` desde `.env`.
+Si no se definen, usa el default seguro `127.0.0.1:8000`.
+
 Dashboard local:
 
 ```text
 http://127.0.0.1:8000/dashboard
 ```
+
+## Despliegue En Produccion
+
+En produccion el dashboard no debe exponerse directamente a Internet. Ejecutalo
+ligado a localhost y publicalo mediante un reverse proxy en los puertos 80/443:
+
+```bash
+python web_dashboard.py --host 127.0.0.1 --port 8000
+```
+
+Flujo recomendado:
+
+```text
+Internet -> Caddy/Nginx :80/:443 -> 127.0.0.1:8000
+```
+
+Si no tienes una preferencia previa, usa Caddy: es la opcion mas simple porque
+gestiona HTTPS automaticamente. Los ejemplos de proxy estan en:
+
+- [deploy/caddy/Caddyfile.example](deploy/caddy/Caddyfile.example)
+- [deploy/nginx/bot-neox-dashboard.conf.example](deploy/nginx/bot-neox-dashboard.conf.example)
+
+Configura la URL publica con HTTPS para que OAuth y redirecciones funcionen
+detras del proxy:
+
+```env
+DASHBOARD_PUBLIC_URL=https://dashboard.tudominio.com
+DASHBOARD_REDIRECT_URI=https://dashboard.tudominio.com/oauth/callback
+DASHBOARD_COOKIE_SECURE=true
+```
+
+En VPS, marca el entorno como produccion con `DASHBOARD_ENV=production`. Si el
+dashboard se inicia en `0.0.0.0`/`::` con ese modo activo, emitira una
+advertencia porque el puerto interno no debe quedar publico. No uses `0.0.0.0`
+en ejemplos ni servicios productivos.
+
+No abras el puerto `8000/tcp` en el firewall publico. Solo deben quedar
+publicados `80/tcp` y `443/tcp`. La guia completa esta en
+[docs/DEPLOYMENT_VPS.md](docs/DEPLOYMENT_VPS.md).
 
 ## Variables De Entorno
 
@@ -65,6 +124,11 @@ Variables principales:
 
 - `TOKEN`: token principal del bot
 - `ECONOMY_TOKEN`: alias compatible del token del bot
+- `MUSIC_ENABLED`: `true` carga el modulo de musica; `false` lo omite sin romper el bot
+- `FFMPEG_PATH`: ruta opcional al ejecutable FFmpeg si no esta en `PATH`
+- `DASHBOARD_ENV`: usa `production` en VPS para activar advertencias de hardening
+- `DASHBOARD_HOST`: host interno del dashboard; default seguro `127.0.0.1`
+- `DASHBOARD_PORT`: puerto interno del dashboard; default `8000`
 - `DASHBOARD_SESSION_SECRET`: secreto obligatorio para sesiones del dashboard
 - `DASHBOARD_ADMIN_PASSWORD_HASH`: hash Argon2id de la clave secundaria del panel administrativo
 - `DASHBOARD_ADMIN_PASSWORD_PEPPER`: pepper obligatoria para verificar la clave secundaria
@@ -73,6 +137,7 @@ Variables principales:
 - `DASHBOARD_CLIENT_SECRET`: secreto OAuth del dashboard
 - `DASHBOARD_REDIRECT_URI`: callback OAuth
 - `DASHBOARD_PUBLIC_URL`: URL publica base del dashboard
+- `DASHBOARD_COOKIE_SECURE`: `true` en produccion HTTPS para emitir cookies con `Secure`; `false` en desarrollo local HTTP
 
 Variables adicionales y TTL de metadata estan documentadas en:
 
@@ -159,6 +224,7 @@ Estado actual:
 Documentacion operativa:
 
 - [docs/operations.md](docs/operations.md)
+- [docs/DEPLOYMENT_VPS.md](docs/DEPLOYMENT_VPS.md)
 - [docs/smoke-test-checklist.md](docs/smoke-test-checklist.md)
 - [docs/release-checklist.md](docs/release-checklist.md)
 

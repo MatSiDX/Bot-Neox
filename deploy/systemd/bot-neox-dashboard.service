@@ -1,0 +1,32 @@
+[Unit]
+Description=Bot-Neox web dashboard
+Documentation=file:/opt/bot-neox/docs/DEPLOYMENT_VPS.md
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=botneox
+Group=botneox
+WorkingDirectory=/opt/bot-neox
+EnvironmentFile=/opt/bot-neox/.env
+Environment=APP_ENV=production
+Environment=DASHBOARD_ENV=production
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/bot-neox/.venv/bin/python /opt/bot-neox/web_dashboard.py --host 127.0.0.1 --port 8000
+Restart=on-failure
+RestartSec=10
+StartLimitIntervalSec=300
+StartLimitBurst=5
+KillSignal=SIGTERM
+TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/opt/bot-neox/data
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

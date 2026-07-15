@@ -1,8 +1,11 @@
+import logging
+
 import discord
 from discord import app_commands
 from discord.ext import commands
 
-from services.music_service import MusicError, MusicService, QueueFullError
+from config.settings import BOT_SETTINGS
+from services.music_service import FFmpegNotFoundError, MusicError, MusicService, QueueFullError
 
 
 SAME_CHANNEL_REQUIRED_MESSAGE = (
@@ -16,7 +19,7 @@ class MusicCog(commands.Cog):
 
     def __init__(self, bot):
         self.bot = bot
-        self.service = MusicService(bot)
+        self.service = MusicService(bot, ffmpeg_path=BOT_SETTINGS.ffmpeg_path)
 
     def cog_unload(self):
         self.bot.loop.create_task(self.service.close())
@@ -233,4 +236,16 @@ class MusicCog(commands.Cog):
 
 
 async def setup(bot):
-    await bot.add_cog(MusicCog(bot))
+    if not BOT_SETTINGS.music_enabled:
+        logging.getLogger("bot.music").info("Modulo de musica desactivado por MUSIC_ENABLED=false")
+        return
+    try:
+        cog = MusicCog(bot)
+    except FFmpegNotFoundError as exc:
+        logging.getLogger("bot.music").error(
+            "Modulo de musica desactivado: %s. En Ubuntu/Debian instala FFmpeg con: "
+            "sudo apt update && sudo apt install -y ffmpeg",
+            exc,
+        )
+        return
+    await bot.add_cog(cog)

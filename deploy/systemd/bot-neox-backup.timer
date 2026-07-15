@@ -1,0 +1,12 @@
+[Unit]
+Description=Daily Bot-Neox runtime backup
+Documentation=file:/opt/bot-neox/docs/DEPLOYMENT_VPS.md
+
+[Timer]
+OnCalendar=*-*-* 04:20:00
+RandomizedDelaySec=15m
+Persistent=true
+Unit=bot-neox-backup.service
+
+[Install]
+WantedBy=timers.target

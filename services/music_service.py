@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import itertools
 import logging
+import shutil
 from collections import deque
 from dataclasses import dataclass
 from typing import Deque
@@ -47,8 +48,29 @@ class MusicError(Exception):
     pass
 
 
+class FFmpegNotFoundError(MusicError):
+    pass
+
+
 class QueueFullError(MusicError):
     pass
+
+
+def resolve_ffmpeg_executable(ffmpeg_path: str | None = None):
+    candidate = (ffmpeg_path or "ffmpeg").strip()
+    executable = shutil.which(candidate)
+    if executable:
+        return executable
+
+    if ffmpeg_path:
+        raise FFmpegNotFoundError(
+            "FFmpeg no esta disponible en la ruta configurada por FFMPEG_PATH. "
+            f"Valor recibido: {ffmpeg_path!r}. Verifica que el archivo exista y sea ejecutable."
+        )
+
+    raise FFmpegNotFoundError(
+        "FFmpeg no esta disponible en PATH. Instala FFmpeg o configura FFMPEG_PATH con la ruta del ejecutable."
+    )
 
 
 @dataclass(frozen=True)
@@ -128,7 +150,11 @@ class GuildMusicPlayer:
                     await self.stop(clear_queue=True, disconnect=False)
                     break
 
-                source = discord.FFmpegPCMAudio(track.stream_url, **FFMPEG_OPTIONS)
+                source = discord.FFmpegPCMAudio(
+                    track.stream_url,
+                    executable=self.service.ffmpeg_executable,
+                    **FFMPEG_OPTIONS,
+                )
                 self.voice_client.play(source, after=self._after_playback)
                 await self._send_text(f"Reproduciendo ahora: **{track.title}** ({track.duration_label})")
                 await self.next_track.wait()
@@ -227,9 +253,10 @@ class GuildMusicPlayer:
 
 
 class MusicService:
-    def __init__(self, bot):
+    def __init__(self, bot, *, ffmpeg_path: str | None = None):
         self.bot = bot
         self.players: dict[int, GuildMusicPlayer] = {}
+        self.ffmpeg_executable = resolve_ffmpeg_executable(ffmpeg_path)
         self.ytdlp = yt_dlp.YoutubeDL(YTDLP_OPTIONS)
 
     def get_player(self, guild_id: int):

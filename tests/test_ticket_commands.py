@@ -205,6 +205,44 @@ class TicketCommandTests(unittest.IsolatedAsyncioTestCase):
             required_permissions=("tickets.records.close",),
         )
 
+    def test_bot_ticket_permission_can_delete_without_panel_role(self):
+        cog = TicketRuntimeCog.__new__(TicketRuntimeCog)
+        cog.permission_service = Mock()
+        cog.permission_service.has_module_access.return_value = True
+        member = SimpleNamespace(
+            id=99,
+            guild=SimpleNamespace(id=10),
+            roles=[],
+            guild_permissions=SimpleNamespace(administrator=False),
+        )
+
+        self.assertTrue(cog.can_delete(member, {"permissions": {"delete_roles": ["55"]}}))
+        cog.permission_service.has_module_access.assert_called_once_with(
+            10,
+            "tickets",
+            member=member,
+            required_permissions=("tickets.records.delete",),
+        )
+
+    def test_bot_ticket_permission_can_reopen_without_panel_role(self):
+        cog = TicketRuntimeCog.__new__(TicketRuntimeCog)
+        cog.permission_service = Mock()
+        cog.permission_service.has_module_access.return_value = True
+        member = SimpleNamespace(
+            id=99,
+            guild=SimpleNamespace(id=10),
+            roles=[],
+            guild_permissions=SimpleNamespace(administrator=False),
+        )
+
+        self.assertTrue(cog.can_reopen(member, {"permissions": {"reopen_roles": ["55"]}}))
+        cog.permission_service.has_module_access.assert_called_once_with(
+            10,
+            "tickets",
+            member=member,
+            required_permissions=("tickets.records.reopen",),
+        )
+
     def test_fine_ticket_is_resolved_from_fine_channel(self):
         cog = TicketRuntimeCog.__new__(TicketRuntimeCog)
         records = []
