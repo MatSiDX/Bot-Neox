@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>AvalonBot</title>
+  <link rel="icon" type="image/png" href="/assets/AvalonBot.png">
   <link rel="stylesheet" href="/static/css/dashboard.css">
 </head>
 <body>
@@ -1127,7 +1128,7 @@
         <div class="module-header">
           <div>
             <h2 id="permissionsSectionTitle">Permisos</h2>
-            <p>Configura que roles pueden usar cada parte del bot. Los comandos de Discord siguen funcionando y usan esta misma configuracion.</p>
+            <p>Configura accesos granulares por vista y por accion. Los permisos ocultos del sistema se preservan y los comandos de Discord usan esta misma fuente de verdad.</p>
           </div>
           <div class="ticket-actions">
             <button id="refreshPermissionsButton" class="action-button" type="button">Recargar</button>
@@ -1173,6 +1174,27 @@
           <div class="ticket-stat"><span>Canales</span><strong id="adminChannelCount">0</strong></div>
           <div class="ticket-stat"><span>Roles</span><strong id="adminRoleCount">0</strong></div>
         </section>
+        <section id="adminElevationShell" class="editor-section admin-elevation-card" aria-label="Validacion administrativa">
+          <div class="editor-section-header">
+            <div>
+              <strong>Acceso reforzado</strong>
+              <span>Antes de cargar datos sensibles, valida la clave secundaria del panel administrativo.</span>
+            </div>
+            <button id="adminElevationLogoutButton" class="action-button" type="button" hidden>Cerrar acceso elevado</button>
+          </div>
+          <form id="adminElevationForm" class="form-grid admin-elevation-form" autocomplete="off">
+            <div class="field full">
+              <label for="adminElevationPassword">Clave secundaria</label>
+              <input id="adminElevationPassword" type="password" autocomplete="current-password" placeholder="Ingresa la clave secundaria">
+            </div>
+            <div class="publish-row full">
+              <button id="adminElevationSubmit" class="action-button primary" type="submit">Desbloquear panel</button>
+              <div id="adminElevationMessage" class="status" role="status" aria-live="polite"></div>
+            </div>
+          </form>
+          <div id="adminElevationMeta" class="field-hint"></div>
+        </section>
+        <div id="adminPanelWorkspaceShell" hidden>
         <div class="admin-workspace">
           <section class="editor-section admin-backups-panel">
             <div class="editor-section-header">
@@ -1295,6 +1317,7 @@
             </div>
             <div id="adminFutureActions" class="admin-action-grid"></div>
           </section>
+        </div>
         </div>
         <div id="adminPanelStatus" class="status" role="status" aria-live="polite"></div>
       </section>

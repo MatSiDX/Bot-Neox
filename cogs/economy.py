@@ -16,14 +16,7 @@ from services.fine_service import FineService
 from services.ping_template_service import MAX_TEMPLATES_PER_GUILD, PingTemplateService
 from services.server_template_service import SERVER_TEMPLATE_ACTION_APPLY, SERVER_TEMPLATE_ACTION_TYPES, ServerTemplateService
 from services.permission_service import (
-    BOT_PERMISSION_DEFINITIONS,
     BOT_PERMISSION_LABELS,
-    PERMISSION_ECONOMY,
-    PERMISSION_GLOBAL,
-    PERMISSION_PERMISSIONS,
-    PERMISSION_PING,
-    PERMISSION_REPORTS,
-    PERMISSION_TEMPLATES,
     PermissionService,
 )
 from services.report_service import ReportService
@@ -41,11 +34,6 @@ ACCENT_COLOR = discord.Color.from_rgb(0, 184, 255)
 CATEGORY_CHOICES = [
     app_commands.Choice(name="Items", value="items"),
     app_commands.Choice(name="Silver", value="silver"),
-]
-
-PERMISSION_CHOICES = [
-    app_commands.Choice(name=label, value=key)
-    for key, label, _ in BOT_PERMISSION_DEFINITIONS
 ]
 
 PERMISSION_LABELS = dict(BOT_PERMISSION_LABELS)
@@ -172,11 +160,59 @@ class EconomyCog(commands.Cog):
     def has_template_permission(self, interaction):
         return self.permission_service.can_manage_templates(interaction.guild.id, interaction.user)
 
+    def has_template_view_permission(self, interaction):
+        return self.permission_service.can_view_templates(interaction.guild.id, interaction.user)
+
     def can_manage_permissions(self, interaction):
-        return (
-            self.permission_service.is_administrator(interaction.user)
-            or self.permission_service.can_manage_permissions(interaction.guild.id, interaction.user)
+        return self.permission_service.can_edit_role_permissions(interaction.guild.id, interaction.user)
+
+    def can_view_permissions(self, interaction):
+        return self.permission_service.can_view_role_permissions(interaction.guild.id, interaction.user)
+
+    async def permission_autocomplete(self, interaction: discord.Interaction, current: str):
+        term = str(current or "").strip().lower()
+        is_remove_command = getattr(getattr(interaction, "command", None), "name", "") == "remove-permission"
+        existing_permissions = {}
+        if is_remove_command and interaction.namespace.rol:
+            existing_permissions = self.permission_service.get_role_permissions(interaction.guild.id)
+        manageable_permissions = self.permission_service.manageable_permission_keys(
+            interaction.guild.id,
+            member=interaction.user,
         )
+
+        choices = []
+        for definition in self.permission_service.list_assignable_permissions():
+            if definition.key not in manageable_permissions:
+                continue
+            if is_remove_command:
+                role_id = str(getattr(interaction.namespace.rol, "id", "") or "")
+                if definition.key not in set(existing_permissions.get(role_id, [])):
+                    continue
+            search_blob = " ".join([
+                definition.key,
+                definition.label,
+                definition.category,
+                definition.description,
+            ]).lower()
+            if term and term not in search_blob:
+                continue
+            label = f"{definition.category}: {definition.label}"[:100]
+            choices.append(app_commands.Choice(name=label, value=definition.key))
+            if len(choices) >= 25:
+                break
+        return choices
+
+    async def validate_permission_role_operation(self, interaction, role, permission_key):
+        error = self.permission_service.validate_role_permission_update(
+            interaction.guild.id,
+            interaction.user,
+            role.id,
+            [permission_key],
+        )
+        if error:
+            await interaction.response.send_message(error, ephemeral=True)
+            return False
+        return True
 
     def clean_player_name(self, display_name):
         name = re.sub(r"\[[^\]]*\]", "", display_name)
@@ -1363,9 +1399,9 @@ class EconomyCog(commands.Cog):
         nombre="Nombre visible de la plantilla",
     )
     async def add_ping_template(self, interaction: discord.Interaction, clave: str, nombre: str = None):
-        if not self.has_template_permission(interaction):
+        if not self.permission_service.can_create_templates(interaction.guild.id, interaction.user):
             await interaction.response.send_message(
-                "No tienes permisos para gestionar plantillas.",
+                "No tienes permisos para crear plantillas.",
                 ephemeral=True,
             )
             return
@@ -1404,9 +1440,9 @@ class EconomyCog(commands.Cog):
     @app_commands.describe(plantilla="Plantilla que quieres eliminar")
     @app_commands.autocomplete(plantilla=saved_ping_template_autocomplete)
     async def delete_ping_template(self, interaction: discord.Interaction, plantilla: str):
-        if not self.has_template_permission(interaction):
+        if not self.permission_service.can_delete_templates(interaction.guild.id, interaction.user):
             await interaction.response.send_message(
-                "No tienes permisos para gestionar plantillas.",
+                "No tienes permisos para eliminar plantillas.",
                 ephemeral=True,
             )
             return
@@ -1426,7 +1462,7 @@ class EconomyCog(commands.Cog):
 
     @template_group.command(name="listar")
     async def list_ping_templates(self, interaction: discord.Interaction):
-        if not self.has_template_permission(interaction):
+        if not self.has_template_view_permission(interaction):
             await interaction.response.send_message(
                 "No tienes permisos para ver plantillas.",
                 ephemeral=True,
@@ -1457,7 +1493,7 @@ class EconomyCog(commands.Cog):
 
     @template_group.command(name="ayuda")
     async def ping_template_help(self, interaction: discord.Interaction):
-        if not self.has_template_permission(interaction):
+        if not self.has_template_view_permission(interaction):
             await interaction.response.send_message(
                 "No tienes permisos para ver ayuda de plantillas.",
                 ephemeral=True,
@@ -1744,14 +1780,14 @@ class EconomyCog(commands.Cog):
     @app_commands.command(name="add-permission")
     @app_commands.describe(
         rol="Rol que recibira permisos",
-        permisos="Conjunto de permisos que recibira el rol",
+        permiso="Permiso granular que recibira el rol",
     )
-    @app_commands.choices(permisos=PERMISSION_CHOICES)
+    @app_commands.autocomplete(permiso=permission_autocomplete)
     async def add_permission(
         self,
         interaction: discord.Interaction,
         rol: discord.Role,
-        permisos: app_commands.Choice[str],
+        permiso: str,
     ):
         if not self.can_manage_permissions(interaction):
             await interaction.response.send_message(
@@ -1760,29 +1796,33 @@ class EconomyCog(commands.Cog):
             )
             return
 
-        created = self.permission_service.add_permission(interaction.guild.id, rol.id, permisos.value)
+        if not await self.validate_permission_role_operation(interaction, rol, permiso):
+            return
+
+        created = self.permission_service.add_permission(interaction.guild.id, rol.id, permiso)
         if not created:
             await interaction.response.send_message(
-                f"El rol {rol.mention} ya tiene el permiso {permisos.name}.",
+                f"El rol {rol.mention} ya tiene el permiso {PERMISSION_LABELS.get(permiso, permiso)}.",
                 ephemeral=True,
             )
             return
 
         await interaction.response.send_message(
-            f"Se agrego el permiso {permisos.name} al rol {rol.mention}."
+            f"Se agrego el permiso {PERMISSION_LABELS.get(permiso, permiso)} al rol {rol.mention}.",
+            ephemeral=True,
         )
 
     @app_commands.command(name="remove-permission")
     @app_commands.describe(
         rol="Rol al que se le quitaran permisos",
-        permisos="Conjunto de permisos que se quitara",
+        permiso="Permiso granular que se quitara",
     )
-    @app_commands.choices(permisos=PERMISSION_CHOICES)
+    @app_commands.autocomplete(permiso=permission_autocomplete)
     async def remove_permission(
         self,
         interaction: discord.Interaction,
         rol: discord.Role,
-        permisos: app_commands.Choice[str],
+        permiso: str,
     ):
         if not self.can_manage_permissions(interaction):
             await interaction.response.send_message(
@@ -1791,16 +1831,20 @@ class EconomyCog(commands.Cog):
             )
             return
 
-        removed = self.permission_service.remove_permission(interaction.guild.id, rol.id, permisos.value)
+        if not await self.validate_permission_role_operation(interaction, rol, permiso):
+            return
+
+        removed = self.permission_service.remove_permission(interaction.guild.id, rol.id, permiso)
         if not removed:
             await interaction.response.send_message(
-                f"El rol {rol.mention} no tenia el permiso {permisos.name}.",
+                f"El rol {rol.mention} no tenia el permiso {PERMISSION_LABELS.get(permiso, permiso)}.",
                 ephemeral=True,
             )
             return
 
         await interaction.response.send_message(
-            f"Se quito el permiso {permisos.name} al rol {rol.mention}."
+            f"Se quito el permiso {PERMISSION_LABELS.get(permiso, permiso)} al rol {rol.mention}.",
+            ephemeral=True,
         )
 
     @config_group.command(name="canal")
@@ -1830,14 +1874,17 @@ class EconomyCog(commands.Cog):
 
     @app_commands.command(name="permissions")
     async def permissions(self, interaction: discord.Interaction):
-        if not self.can_manage_permissions(interaction):
+        if not self.can_view_permissions(interaction):
             await interaction.response.send_message(
                 "No tienes permisos para ver los permisos del bot.",
                 ephemeral=True,
             )
             return
 
-        role_permissions = self.permission_service.get_role_permissions(interaction.guild.id)
+        role_permissions = self.permission_service.get_role_permissions(
+            interaction.guild.id,
+            include_system_permissions=False,
+        )
         if not role_permissions:
             await interaction.response.send_message(
                 "No hay roles con permisos configurados en este servidor.",

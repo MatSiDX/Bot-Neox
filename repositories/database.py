@@ -314,6 +314,28 @@ def init_database():
                 FOREIGN KEY (row_id) REFERENCES chest_table_rows(id) ON DELETE SET NULL
             );
 
+            CREATE TABLE IF NOT EXISTS dashboard_admin_auth_attempts (
+                subject_type TEXT NOT NULL,
+                subject_key TEXT NOT NULL,
+                failures INTEGER NOT NULL DEFAULT 0,
+                first_failure_at TEXT NOT NULL DEFAULT '',
+                last_failure_at TEXT NOT NULL DEFAULT '',
+                locked_until TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (subject_type, subject_key)
+            );
+
+            CREATE TABLE IF NOT EXISTS dashboard_admin_audit_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_type TEXT NOT NULL,
+                actor_user_id TEXT NOT NULL DEFAULT '',
+                actor_name TEXT NOT NULL DEFAULT '',
+                ip_address TEXT NOT NULL DEFAULT '',
+                details_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL
+            );
+
             """
         )
         _ensure_guild_name_column(connection)
@@ -426,6 +448,15 @@ def init_database():
 
             CREATE INDEX IF NOT EXISTS idx_chest_images_table
                 ON chest_table_images (table_id, row_id, id DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_dashboard_admin_attempts_lock
+                ON dashboard_admin_auth_attempts (locked_until, updated_at);
+
+            CREATE INDEX IF NOT EXISTS idx_dashboard_admin_audit_created_at
+                ON dashboard_admin_audit_events (created_at DESC, id DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_dashboard_admin_audit_event_type
+                ON dashboard_admin_audit_events (event_type, created_at DESC, id DESC);
 
             """
         )

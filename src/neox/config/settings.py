@@ -5,11 +5,8 @@ from pathlib import Path
 try:
     from dotenv import load_dotenv
 except ImportError:
-    def load_dotenv():
+    def load_dotenv(*args, **kwargs):
         return False
-
-
-load_dotenv()
 
 TRUE_VALUES = ("1", "true", "yes", "on")
 
@@ -40,6 +37,11 @@ def _read_env_int(name: str, default: int):
 _PROJECT_ROOT_PATH = Path(__file__).resolve().parents[3]
 _DATA_DIR_PATH = _PROJECT_ROOT_PATH / "data"
 _ASSETS_DIR_PATH = _PROJECT_ROOT_PATH / "assets"
+_ENV_FILE_PATH = _PROJECT_ROOT_PATH / ".env"
+
+# Solo se carga el archivo .env real del proyecto.
+# .env.example queda exclusivamente como referencia editable.
+load_dotenv(dotenv_path=_ENV_FILE_PATH, override=False)
 
 PROJECT_ROOT = str(_PROJECT_ROOT_PATH)
 DATA_DIR = str(_DATA_DIR_PATH)
@@ -57,6 +59,31 @@ DASHBOARD_CLIENT_ID = _read_env_value("DASHBOARD_CLIENT_ID") or _read_env_value(
 DASHBOARD_CLIENT_SECRET = _read_env_value("DASHBOARD_CLIENT_SECRET") or _read_env_value("DISCORD_CLIENT_SECRET")
 DASHBOARD_REDIRECT_URI = _read_env_value("DASHBOARD_REDIRECT_URI")
 DASHBOARD_SESSION_SECRET = _read_env_value("DASHBOARD_SESSION_SECRET")
+DASHBOARD_ADMIN_PASSWORD_HASH = _read_env_value("DASHBOARD_ADMIN_PASSWORD_HASH")
+DASHBOARD_ADMIN_PASSWORD_PEPPER = _read_env_value("DASHBOARD_ADMIN_PASSWORD_PEPPER")
+DASHBOARD_ADMIN_DEVELOPER_IDS = tuple(
+    dict.fromkeys(
+        value
+        for value in (
+            item.strip()
+            for item in (_read_env_value("DASHBOARD_ADMIN_DEVELOPER_IDS") or "").split(",")
+        )
+        if value
+    )
+)
+DASHBOARD_ADMIN_ELEVATED_TTL_SECONDS = max(
+    600,
+    min(900, _read_env_int("DASHBOARD_ADMIN_ELEVATED_TTL_SECONDS", 900)),
+)
+DASHBOARD_ADMIN_MAX_ATTEMPTS = max(1, _read_env_int("DASHBOARD_ADMIN_MAX_ATTEMPTS", 5))
+DASHBOARD_ADMIN_ATTEMPT_WINDOW_SECONDS = max(
+    60,
+    _read_env_int("DASHBOARD_ADMIN_ATTEMPT_WINDOW_SECONDS", 900),
+)
+DASHBOARD_ADMIN_LOCKOUT_SECONDS = max(
+    60,
+    _read_env_int("DASHBOARD_ADMIN_LOCKOUT_SECONDS", 900),
+)
 DASHBOARD_PUBLIC_URL = (
     _read_env_value("DASHBOARD_PUBLIC_URL")
     or (
@@ -66,7 +93,6 @@ DASHBOARD_PUBLIC_URL = (
     )
     or "http://localhost:8000"
 ).rstrip("/")
-
 ALLOWED_ROLE_ID = _read_env_int("ALLOWED_ROLE_ID", 0)
 AVALONIAN_LOG_CHANNEL_ID = _read_env_int("AVALONIAN_LOG_CHANNEL_ID", 0)
 ENABLE_MEMBER_INTENT = _read_env_bool("ENABLE_MEMBER_INTENT", default=False)
@@ -119,6 +145,13 @@ class DashboardSettings:
     redirect_uri: str | None
     public_url: str
     session_secret: str | None
+    admin_password_hash: str | None
+    admin_password_pepper: str | None
+    admin_developer_ids: tuple[str, ...]
+    admin_elevated_ttl_seconds: int
+    admin_max_attempts: int
+    admin_attempt_window_seconds: int
+    admin_lockout_seconds: int
 
     def oauth_configured(self):
         return bool(self.client_id and self.client_secret)
@@ -135,6 +168,11 @@ class DashboardSettings:
             raise RuntimeError(
                 "Configura DASHBOARD_CLIENT_ID y DASHBOARD_CLIENT_SECRET juntos, "
                 "o deja ambos vacios si todavia no habilitaras el login de Discord."
+            )
+        if self.admin_password_hash and not self.admin_password_pepper:
+            raise RuntimeError(
+                "Configura DASHBOARD_ADMIN_PASSWORD_PEPPER cuando uses "
+                "DASHBOARD_ADMIN_PASSWORD_HASH para el panel administrativo."
             )
         return self
 
@@ -156,6 +194,13 @@ DASHBOARD_SETTINGS = DashboardSettings(
     redirect_uri=DASHBOARD_REDIRECT_URI,
     public_url=DASHBOARD_PUBLIC_URL,
     session_secret=DASHBOARD_SESSION_SECRET,
+    admin_password_hash=DASHBOARD_ADMIN_PASSWORD_HASH,
+    admin_password_pepper=DASHBOARD_ADMIN_PASSWORD_PEPPER,
+    admin_developer_ids=DASHBOARD_ADMIN_DEVELOPER_IDS,
+    admin_elevated_ttl_seconds=DASHBOARD_ADMIN_ELEVATED_TTL_SECONDS,
+    admin_max_attempts=DASHBOARD_ADMIN_MAX_ATTEMPTS,
+    admin_attempt_window_seconds=DASHBOARD_ADMIN_ATTEMPT_WINDOW_SECONDS,
+    admin_lockout_seconds=DASHBOARD_ADMIN_LOCKOUT_SECONDS,
 )
 
 

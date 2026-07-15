@@ -61,6 +61,10 @@
       botPermissionOptions: [],
       adminGuilds: [],
       adminOverview: null,
+      adminElevation: null,
+      adminElevationGuildId: "",
+      adminElevationSubmitting: false,
+      adminElevationUiMessage: "",
       adminMessageChannels: [],
       adminMessageChannelsCache: {},
       adminMessageChannelsStatus: "idle",
@@ -103,6 +107,12 @@
       fineConfig: null,
       csrfToken: "",
       permissionSearch: "",
+      botPermissions: {},
+      botSystemPermissions: {},
+      botPermissionOptions: [],
+      manageablePermissions: [],
+      permissionReadOnlyRoleIds: [],
+      canEditPermissions: false,
       loot: {
         data: null,
         fileName: "",
@@ -355,6 +365,15 @@
         hour: "2-digit",
         minute: "2-digit"
       });
+    }
+
+    function formatDurationSeconds(value) {
+      const seconds = Math.max(0, Number(value || 0));
+      if (!Number.isFinite(seconds) || seconds <= 0) return "0 min";
+      if (seconds < 60) return `${Math.ceil(seconds)} s`;
+      const minutes = Math.floor(seconds / 60);
+      const remainingSeconds = seconds % 60;
+      return remainingSeconds ? `${minutes} min ${remainingSeconds} s` : `${minutes} min`;
     }
 
     function escapeHtml(value) {
@@ -1333,6 +1352,15 @@
       return Array.isArray(values) ? values.map(String) : [];
     }
 
+    function systemPermissionValuesForRole(roleId) {
+      const values = state.botSystemPermissions?.[String(roleId)] || [];
+      return Array.isArray(values) ? values.map(String) : [];
+    }
+
+    function rolePermissionsAreReadOnly(roleId) {
+      return (state.permissionReadOnlyRoleIds || []).map(String).includes(String(roleId));
+    }
+
     function renderPermissions() {
       const grid = document.getElementById("permissionsGrid");
       const roles = state.ticketRoles || [];
@@ -1359,33 +1387,53 @@
         return;
       }
 
+      const categories = [];
+      options.forEach(option => {
+        const category = option.category || "Otros";
+        if (!categories.includes(category)) categories.push(category);
+      });
+
       grid.innerHTML = `
-        <div class="permissions-list">
-          <div class="permissions-list-head">
-            <span>Rol</span>
-            ${options.map(option => `<span title="${escapeHtml(option.description)}">${escapeHtml(option.label)}</span>`).join("")}
-          </div>
+        <div class="permissions-list permissions-list-stacked">
           ${visibleRoles.map(role => {
-        const values = permissionValuesForRole(role.id);
-        const hasGlobal = values.includes("global");
+        const values = new Set(permissionValuesForRole(role.id));
+        const systemValues = systemPermissionValuesForRole(role.id);
+        const roleReadOnly = rolePermissionsAreReadOnly(role.id);
+        const roleEditable = state.canEditPermissions && !roleReadOnly;
         return `
-            <article class="permission-row" data-role-id="${escapeHtml(role.id)}">
+            <article class="permission-row permission-row-stacked" data-role-id="${escapeHtml(role.id)}">
               <div class="permission-role">
                 <strong>@${escapeHtml(role.name)}</strong>
                 <span class="muted">${escapeHtml(role.id)}</span>
+                ${roleReadOnly ? `<span class="muted">No puedes editar un rol que ya posees.</span>` : ""}
+                ${systemValues.length ? `<span class="muted">Este rol conserva permisos del sistema no editables.</span>` : ""}
               </div>
-              ${options.map(option => {
-                const checked = values.includes(option.key) ? " checked" : "";
-                const disabled = hasGlobal && option.key !== "global" ? " disabled" : "";
-                const active = checked ? " active" : "";
-                const globalClass = option.key === "global" ? " global" : "";
-                return `
-                  <label class="permission-pill${active}${globalClass}" title="${escapeHtml(option.description)}">
-                    <input type="checkbox" data-permission-role="${escapeHtml(role.id)}" data-permission-key="${escapeHtml(option.key)}"${checked}${disabled}>
-                    <span>${escapeHtml(option.label)}</span>
-                  </label>
-                `;
-              }).join("")}
+              <div class="permission-groups">
+                ${categories.map(category => {
+                  const categoryOptions = options.filter(option => (option.category || "Otros") === category);
+                  return `
+                    <section class="permission-group">
+                      <div class="permission-group-head">
+                        <strong>${escapeHtml(category)}</strong>
+                        <span>${escapeHtml(categoryOptions.length)} permiso${categoryOptions.length === 1 ? "" : "s"}</span>
+                      </div>
+                      <div class="permission-group-options">
+                        ${categoryOptions.map(option => {
+                          const checked = values.has(option.key) ? " checked" : "";
+                          const disabled = !roleEditable || !option.editable ? " disabled" : "";
+                          const active = values.has(option.key) ? " active" : "";
+                          return `
+                            <label class="permission-pill${active}" title="${escapeHtml(option.description)}">
+                              <input type="checkbox" data-permission-role="${escapeHtml(role.id)}" data-permission-key="${escapeHtml(option.key)}"${checked}${disabled}>
+                              <span>${escapeHtml(option.label)}</span>
+                            </label>
+                          `;
+                        }).join("")}
+                      </div>
+                    </section>
+                  `;
+                }).join("")}
+              </div>
             </article>
         `;
           }).join("")}
@@ -1394,6 +1442,8 @@
     }
 
     function renderAdminPanel() {
+      const hasElevationStatus = Boolean(state.adminElevation);
+      const elevation = state.adminElevation || {};
       const overview = state.adminOverview || {};
       const server = overview.server || {};
       const bot = overview.bot || {};
@@ -1401,6 +1451,54 @@
       const botStatus = bot.status === "connected" ? "Conectado" : "Fuera del servidor";
       const memberCount = server.member_count == null ? "No disponible" : formatNumber(server.member_count);
       const optionalCount = value => value == null ? "No disponible" : formatNumber(value);
+      const elevationForm = document.getElementById("adminElevationForm");
+      const elevationMessage = document.getElementById("adminElevationMessage");
+      const elevationMeta = document.getElementById("adminElevationMeta");
+      const elevationPassword = document.getElementById("adminElevationPassword");
+      const elevationSubmit = document.getElementById("adminElevationSubmit");
+      const elevationLogoutButton = document.getElementById("adminElevationLogoutButton");
+      const workspaceShell = document.getElementById("adminPanelWorkspaceShell");
+      const elevated = Boolean(elevation.elevated);
+      const uiMessage = state.adminElevationUiMessage || elevation.message || (hasElevationStatus ? "" : "Validando acceso reforzado...");
+
+      if (elevationForm) elevationForm.hidden = elevated;
+      if (elevationMessage) elevationMessage.textContent = uiMessage;
+      if (elevationPassword && elevated) elevationPassword.value = "";
+      if (elevationSubmit) {
+        elevationSubmit.disabled = state.adminElevationSubmitting || !state.guildId || elevated;
+        elevationSubmit.textContent = state.adminElevationSubmitting ? "Validando..." : "Desbloquear panel";
+      }
+      if (elevationLogoutButton) elevationLogoutButton.hidden = !elevated;
+      if (elevationMeta) {
+        if (elevated && elevation.expiresAt) {
+          elevationMeta.textContent = `Acceso elevado activo hasta ${formatDateTime(elevation.expiresAt)}.`;
+        } else if (Number(elevation.retryAfterSeconds || 0) > 0) {
+          elevationMeta.textContent = `Bloqueado temporalmente. Reintenta en ${formatDurationSeconds(elevation.retryAfterSeconds)}.`;
+        } else if (elevation.expired) {
+          elevationMeta.textContent = "La sesion elevada anterior vencio. Ingresa la clave secundaria otra vez.";
+        } else if (hasElevationStatus && !elevation.configReady) {
+          elevationMeta.textContent = "Hace falta completar la configuracion segura del panel administrativo en el entorno.";
+        } else if (!hasElevationStatus) {
+          elevationMeta.textContent = "Validando si ya existe una sesion elevada activa para este panel.";
+        } else {
+          elevationMeta.textContent = "La elevacion dura pocos minutos y protege todos los endpoints administrativos.";
+        }
+      }
+      if (workspaceShell) workspaceShell.hidden = !elevated || !state.adminOverview;
+
+      if (!elevated || !state.adminOverview) {
+        document.getElementById("adminGuildList").innerHTML = `<div class="empty">Desbloquea el panel para cargar servidores administrables.</div>`;
+        document.getElementById("adminServerName").textContent = "-";
+        document.getElementById("adminServerId").textContent = "-";
+        document.getElementById("adminBotStatus").textContent = "-";
+        document.getElementById("adminMemberCount").textContent = "-";
+        document.getElementById("adminChannelCount").textContent = "0";
+        document.getElementById("adminRoleCount").textContent = "0";
+        document.getElementById("adminServerDetails").innerHTML = `<div class="empty">El resumen administrativo se cargara despues de validar la clave secundaria.</div>`;
+        document.getElementById("adminFutureActions").innerHTML = "";
+        document.getElementById("adminPanelStatus").textContent = uiMessage;
+        return;
+      }
 
       document.getElementById("adminGuildList").innerHTML = state.adminGuilds.length
         ? state.adminGuilds.map(guild => {
@@ -1459,6 +1557,7 @@
           <span class="pill">${escapeHtml(action.status === "planned" ? "Preparado" : action.status || "Pendiente")}</span>
         </article>
       `).join("");
+      document.getElementById("adminPanelStatus").textContent = state.adminElevationUiMessage || "";
       renderAdminBotMessageForm();
     }
 
@@ -1784,10 +1883,11 @@
     }
 
     function collectBotPermissions() {
-      const permissions = { ...(state.botPermissions || {}) };
+      const permissions = {};
+      const roleIds = [];
       document.querySelectorAll(".permission-row").forEach(row => {
         const roleId = String(row.dataset.roleId || "");
-        if (roleId) delete permissions[roleId];
+        if (roleId) roleIds.push(roleId);
       });
       document.querySelectorAll("[data-permission-role]").forEach(input => {
         if (!input.checked) return;
@@ -1798,13 +1898,7 @@
         permissions[roleId].push(key);
       });
 
-      for (const [roleId, values] of Object.entries(permissions)) {
-        if (values.includes("global")) {
-          permissions[roleId] = ["global"];
-        }
-      }
-
-      return permissions;
+      return { permissions, roleIds };
     }
 
     function renderTicketPanelList() {
@@ -4338,10 +4432,12 @@
         audit: "audit",
         permissions: "permissions",
         "admin-panel": "adminPanel",
-        registration: "registration"
+        registration: "registration",
+        loot: "loot",
+        "report-calculator": "reportCalculator",
+        welcome: "welcome"
       };
       if (sectionAccess[section]) return Boolean(access[sectionAccess[section]]);
-      if (section === "report-calculator") return Boolean(state.guildId);
       return false;
     }
 
@@ -4399,9 +4495,17 @@
       state.auditSearch = "";
       state.auditFilters = createPageState(12);
       state.botPermissions = {};
+      state.botSystemPermissions = {};
       state.botPermissionOptions = [];
+      state.manageablePermissions = [];
+      state.permissionReadOnlyRoleIds = [];
+      state.canEditPermissions = false;
       state.adminGuilds = [];
       state.adminOverview = null;
+      state.adminElevation = null;
+      state.adminElevationGuildId = "";
+      state.adminElevationSubmitting = false;
+      state.adminElevationUiMessage = "";
       state.adminMessageChannels = [];
       state.adminMessageChannelsStatus = "idle";
       state.adminMessageChannelsError = "";
@@ -5089,18 +5193,24 @@
     }
 
     async function saveBotPermissions() {
+      const body = collectBotPermissions();
       const response = await fetch("/api/bot-permissions", {
         method: "POST",
         headers: csrfHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({
           guild_id: state.guildId,
-          permissions: collectBotPermissions()
+          permissions: body.permissions,
+          role_ids: body.roleIds
         })
       });
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.error || "No pude guardar los permisos.");
       state.botPermissions = payload.permissions || {};
+      state.botSystemPermissions = payload.system_permissions || {};
       state.botPermissionOptions = payload.options || state.botPermissionOptions;
+      state.manageablePermissions = payload.manageable_permissions || state.manageablePermissions;
+      state.permissionReadOnlyRoleIds = payload.read_only_role_ids || state.permissionReadOnlyRoleIds;
+      state.canEditPermissions = Boolean(payload.can_edit);
       document.getElementById("permissionsStatus").textContent = "Permisos guardados. Los comandos de Discord ya usan esta configuracion.";
       renderPermissions();
     }
@@ -5264,6 +5374,54 @@
       const button = event.target.closest("[data-admin-guild-id]");
       if (!button) return;
       selectAdminPanelGuild(button.dataset.adminGuildId).catch(showError);
+    });
+
+    document.getElementById("adminElevationForm").addEventListener("submit", event => {
+      event.preventDefault();
+      const passwordInput = document.getElementById("adminElevationPassword");
+      const password = passwordInput.value;
+      const page = window.NeoxDashboardPages?.["admin-panel"];
+      if (!page?.submitElevation) return;
+
+      state.adminElevationSubmitting = true;
+      state.adminElevationUiMessage = "Validando clave secundaria...";
+      renderAdminPanel();
+      page.submitElevation(createDashboardContext(), password)
+        .then(status => {
+          state.adminElevationSubmitting = false;
+          state.adminElevationUiMessage = status?.message || "Acceso elevado habilitado.";
+          passwordInput.value = "";
+          renderAdminPanel();
+          if (status?.elevated) {
+            return loadAdminPanelData({ force: true });
+          }
+          return null;
+        })
+        .then(() => {
+          renderAdminPanel();
+        })
+        .catch(error => {
+          state.adminElevationSubmitting = false;
+          state.adminElevationUiMessage = error.message || "No pude validar la clave secundaria.";
+          renderAdminPanel();
+        });
+    });
+
+    document.getElementById("adminElevationLogoutButton").addEventListener("click", () => {
+      const page = window.NeoxDashboardPages?.["admin-panel"];
+      if (!page?.logoutElevation) return;
+      state.adminElevationUiMessage = "Cerrando acceso elevado...";
+      renderAdminPanel();
+      page.logoutElevation(createDashboardContext())
+        .then(() => {
+          state.adminElevationSubmitting = false;
+          state.adminElevationUiMessage = "Acceso elevado cerrado.";
+          renderAdminPanel();
+        })
+        .catch(error => {
+          state.adminElevationUiMessage = error.message || "No pude cerrar el acceso elevado.";
+          renderAdminPanel();
+        });
     });
 
     document.getElementById("adminBotMessageForm").addEventListener("submit", event => {
@@ -5821,7 +5979,7 @@
     });
 
     document.getElementById("savePermissionsButton").addEventListener("click", () => {
-      state.botPermissions = collectBotPermissions();
+      state.botPermissions = collectBotPermissions().permissions;
       saveBotPermissions().catch(error => {
         document.getElementById("permissionsStatus").textContent = error.message;
       });
@@ -6106,6 +6264,7 @@
 
     document.getElementById("refreshAdminPanelButton").addEventListener("click", () => {
       state.adminPanelGuildId = "";
+      state.adminElevationGuildId = "";
       loadAdminPanelData({ force: true }).then(() => {
         document.getElementById("adminPanelStatus").textContent = "Panel administrativo recargado.";
         renderAdminPanel();
@@ -6116,13 +6275,13 @@
 
     document.getElementById("permissionsGrid").addEventListener("change", event => {
       if (!event.target.matches("[data-permission-role]")) return;
-      state.botPermissions = collectBotPermissions();
+      state.botPermissions = collectBotPermissions().permissions;
       document.getElementById("permissionsStatus").textContent = "Cambios sin guardar.";
       renderPermissions();
     });
 
     document.getElementById("permissionRoleSearch").addEventListener("input", event => {
-      state.botPermissions = collectBotPermissions();
+      state.botPermissions = collectBotPermissions().permissions;
       state.permissionSearch = event.target.value;
       renderPermissions();
     });

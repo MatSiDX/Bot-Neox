@@ -1,0 +1,645 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AvalonBot | Dashboard para Discord y Albion Online</title>
+  <meta
+    name="description"
+    content="AvalonBot centraliza economia, Avalonianas, tickets, auditoria, permisos y registro Albion en un dashboard web conectado con Discord."
+  >
+  <link rel="icon" type="image/png" href="/assets/AvalonBot.png">
+  <link rel="stylesheet" href="/static/css/landing.css">
+</head>
+<body>
+  <div class="landing-shell">
+    <header class="site-header" data-header>
+      <div class="site-header__inner">
+        <a class="brand" href="#inicio" aria-label="Ir al inicio de AvalonBot">
+          <img class="brand__logo" src="/assets/AvalonBot.png" alt="AvalonBot">
+          <span class="brand__copy">
+            <strong>AvalonBot</strong>
+            <span>Centro de control para Discord y Albion Online</span>
+          </span>
+        </a>
+
+        <button
+          class="nav-toggle"
+          type="button"
+          aria-expanded="false"
+          aria-controls="siteNav"
+          aria-label="Abrir menu principal"
+          data-nav-toggle
+        >
+          <span></span>
+          <span></span>
+          <span></span>
+        </button>
+
+        <nav class="site-nav" id="siteNav" aria-label="Principal" data-nav>
+          <a href="#inicio" data-nav-link>Inicio</a>
+          <a href="#funciones" data-nav-link>Funciones</a>
+          <a href="#dashboard" data-nav-link>Dashboard</a>
+          <a href="#seguridad" data-nav-link>Seguridad</a>
+          <a href="#preguntas" data-nav-link>Preguntas frecuentes</a>
+        </nav>
+
+        <div class="site-header__actions">
+          <a class="button button--secondary" href="<!--BOT_INVITE_URL-->" target="_blank" rel="noreferrer">Invitar bot</a>
+          <a class="button button--ghost" href="/login?remember=1">Iniciar sesion</a>
+          <a class="button button--primary" href="/dashboard">Abrir dashboard</a>
+        </div>
+      </div>
+    </header>
+
+    <main>
+      <section class="hero section" id="inicio">
+        <div class="hero__grid">
+          <div class="hero__copy" data-reveal>
+            <span class="eyebrow">Gestion integral para comunidades de Discord</span>
+            <h1>Administra tu servidor, tu economia y tus eventos desde un solo lugar</h1>
+            <p class="hero__lead">
+              AvalonBot conecta Discord con un dashboard web avanzado para gestionar balances,
+              Avalonianas, tickets, multas, reportes, permisos y registros de Albion Online.
+            </p>
+
+            <div class="hero__actions">
+              <a class="button button--primary button--large" href="<!--BOT_INVITE_URL-->" target="_blank" rel="noreferrer">Unir bot a Discord</a>
+              <a class="button button--primary button--large" href="/login?remember=1">Comenzar con Discord</a>
+              <a class="button button--secondary button--large" href="#funciones">Explorar funciones</a>
+            </div>
+
+            <p class="hero__support">
+              Acceso seguro mediante Discord OAuth. Configuracion independiente para cada servidor.
+            </p>
+
+            <div class="hero__highlights" aria-label="Capacidades principales">
+              <span>Economia y balances</span>
+              <span>Loot y calculadora</span>
+              <span>Tickets y transcripciones</span>
+              <span>Auditoria y permisos</span>
+            </div>
+          </div>
+
+          <div class="hero__visual" data-reveal>
+            <div class="dashboard-shot">
+              <div class="dashboard-shot__chrome">
+                <span></span>
+                <span></span>
+                <span></span>
+                <div class="dashboard-shot__topbar">
+                  <div class="dashboard-shot__server">
+                    <strong>Servidor activo</strong>
+                    <span>Avalon Academy</span>
+                  </div>
+                  <div class="dashboard-shot__top-actions">
+                    <span class="badge">Discord OAuth</span>
+                    <span class="badge badge--soft">Neox conectado</span>
+                  </div>
+                </div>
+              </div>
+
+              <div class="dashboard-shot__body">
+                <aside class="dashboard-shot__sidebar" aria-label="Modulos del dashboard">
+                  <div class="dashboard-shot__brand">
+                    <img src="/assets/AvalonBot.png" alt="">
+                    <div>
+                      <strong>AvalonBot</strong>
+                      <span>Panel operativo</span>
+                    </div>
+                  </div>
+                  <ul class="dashboard-shot__menu">
+                    <li class="is-active">Economia</li>
+                    <li>Plantillas</li>
+                    <li>Loot</li>
+                    <li>Calculadora</li>
+                    <li>Tickets</li>
+                    <li>Multas</li>
+                    <li>Registro Albion</li>
+                    <li>Bienvenidas</li>
+                    <li>Auditoria</li>
+                    <li>Permisos</li>
+                    <li>Panel Admin</li>
+                  </ul>
+                </aside>
+
+                <div class="dashboard-shot__panel">
+                  <div class="dashboard-shot__panel-head">
+                    <div>
+                      <strong>Centro de economia y eventos</strong>
+                      <span>Balances, registros, Avas e informes</span>
+                    </div>
+                    <div class="dashboard-shot__user">
+                      <span class="theme-dot" aria-hidden="true"></span>
+                      <span>Usuario conectado</span>
+                    </div>
+                  </div>
+
+                  <div class="dashboard-shot__metrics">
+                    <article>
+                      <span>Jugadores</span>
+                      <strong>148</strong>
+                    </article>
+                    <article>
+                      <span>Items</span>
+                      <strong>3,482</strong>
+                    </article>
+                    <article>
+                      <span>Silver</span>
+                      <strong>82.4M</strong>
+                    </article>
+                    <article>
+                      <span>Total</span>
+                      <strong>109.7M</strong>
+                    </article>
+                  </div>
+
+                  <div class="dashboard-shot__workspace">
+                    <div class="dashboard-shot__tabs" aria-label="Modulos visibles">
+                      <span class="is-active">Balances</span>
+                      <span>Registro Balance</span>
+                      <span>Registro Avas</span>
+                      <span>Registro Informes</span>
+                    </div>
+
+                    <div class="dashboard-shot__table" role="presentation">
+                      <div class="dashboard-shot__row dashboard-shot__row--head">
+                        <span>Jugador</span>
+                        <span>Items</span>
+                        <span>Silver</span>
+                        <span>Total</span>
+                      </div>
+                      <div class="dashboard-shot__row">
+                        <span>NayarbGBH</span>
+                        <span>74</span>
+                        <span>12.1M</span>
+                        <span>18.4M</span>
+                      </div>
+                      <div class="dashboard-shot__row">
+                        <span>Neox2008</span>
+                        <span>88</span>
+                        <span>15.8M</span>
+                        <span>24.9M</span>
+                      </div>
+                      <div class="dashboard-shot__row">
+                        <span>Main Caller</span>
+                        <span>53</span>
+                        <span>9.6M</span>
+                        <span>13.2M</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="trust-strip section" aria-label="Capacidades verificables">
+        <div class="trust-strip__track" data-reveal>
+          <span>Discord OAuth</span>
+          <span>Albion Online</span>
+          <span>SQLite</span>
+          <span>Gestion multiserver</span>
+          <span>Dashboard web</span>
+          <span>Backups</span>
+          <span>Auditoria</span>
+          <span>Permisos por rol</span>
+        </div>
+      </section>
+
+      <section class="section section--feature-grid" id="funciones">
+        <div class="section-heading" data-reveal>
+          <span class="eyebrow">Funciones principales</span>
+          <h2>Todo el control de tu comunidad en un unico panel</h2>
+          <p>
+            Cada modulo parte de una funcion real del proyecto. La landing resume el mismo flujo
+            que ya usa el dashboard para operar servidores, economia y eventos.
+          </p>
+        </div>
+
+        <div class="feature-grid">
+          <article class="feature-card" data-reveal>
+            <span class="feature-card__icon">01</span>
+            <h3>Economia centralizada</h3>
+            <p>Gestiona balances de jugadores, items, silver, totales y movimientos historicos.</p>
+            <div class="feature-card__mini">
+              <span>Balances</span>
+              <span>Registro de operaciones</span>
+              <span>Exportacion</span>
+            </div>
+          </article>
+
+          <article class="feature-card" data-reveal>
+            <span class="feature-card__icon">02</span>
+            <h3>Avalonianas y pings</h3>
+            <p>Crea plantillas, organiza participantes y registra anotaciones para eventos activos.</p>
+            <div class="feature-card__mini">
+              <span>Slots por rol</span>
+              <span>Plantillas por servidor</span>
+              <span>Publicacion operativa</span>
+            </div>
+          </article>
+
+          <article class="feature-card" data-reveal>
+            <span class="feature-card__icon">03</span>
+            <h3>Loot y repartos</h3>
+            <p>Analiza reportes, revisa precios y calcula descuentos, pagos, reparaciones o caller.</p>
+            <div class="feature-card__mini">
+              <span>Reportes</span>
+              <span>Calculadora</span>
+              <span>Costos y exclusiones</span>
+            </div>
+          </article>
+
+          <article class="feature-card" data-reveal>
+            <span class="feature-card__icon">04</span>
+            <h3>Tickets y transcripciones</h3>
+            <p>Configura paneles, administra estados y conserva historial para consultas posteriores.</p>
+            <div class="feature-card__mini">
+              <span>Paneles</span>
+              <span>Media protegida</span>
+              <span>Transcripciones</span>
+            </div>
+          </article>
+
+          <article class="feature-card" data-reveal>
+            <span class="feature-card__icon">05</span>
+            <h3>Multas y seguimiento</h3>
+            <p>Registra multas, conecta tickets relacionados y consulta el historial desde web.</p>
+            <div class="feature-card__mini">
+              <span>Estado</span>
+              <span>Historial</span>
+              <span>Control administrativo</span>
+            </div>
+          </article>
+
+          <article class="feature-card" data-reveal>
+            <span class="feature-card__icon">06</span>
+            <h3>Registro Albion</h3>
+            <p>Relaciona miembros de Discord con personajes, gremios y datos que usa el bot.</p>
+            <div class="feature-card__mini">
+              <span>Jugadores</span>
+              <span>Guilds</span>
+              <span>Sincronizacion operativa</span>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <section class="section section--demo" id="dashboard">
+        <div class="section-heading" data-reveal>
+          <span class="eyebrow">Dashboard en practica</span>
+          <h2>Una vista conectada con los modulos reales de AvalonBot</h2>
+          <p>
+            Cambia de modulo y revisa como se organizan las mismas areas que ya existen en el panel:
+            economia, eventos, tickets, auditoria y permisos.
+          </p>
+        </div>
+
+        <div class="demo-shell" data-reveal>
+          <div class="demo-tabs" role="tablist" aria-label="Vista del dashboard">
+            <button class="demo-tab is-active" type="button" role="tab" aria-selected="true" aria-controls="demo-panel-economia" id="demo-tab-economia" data-demo-tab="economia">Economia</button>
+            <button class="demo-tab" type="button" role="tab" aria-selected="false" aria-controls="demo-panel-eventos" id="demo-tab-eventos" data-demo-tab="eventos">Eventos</button>
+            <button class="demo-tab" type="button" role="tab" aria-selected="false" aria-controls="demo-panel-tickets" id="demo-tab-tickets" data-demo-tab="tickets">Tickets</button>
+            <button class="demo-tab" type="button" role="tab" aria-selected="false" aria-controls="demo-panel-auditoria" id="demo-tab-auditoria" data-demo-tab="auditoria">Auditoria</button>
+            <button class="demo-tab" type="button" role="tab" aria-selected="false" aria-controls="demo-panel-permisos" id="demo-tab-permisos" data-demo-tab="permisos">Permisos</button>
+          </div>
+
+          <div class="demo-panels">
+            <article class="demo-panel is-active" id="demo-panel-economia" role="tabpanel" aria-labelledby="demo-tab-economia" data-demo-panel="economia">
+              <div class="demo-panel__copy">
+                <h3>Economia y registros</h3>
+                <p>Balances por jugador, filtros operativos, pagina de registros y resumen de items, silver y total.</p>
+                <ul>
+                  <li>Totales por servidor y tabla navegable.</li>
+                  <li>Balances editables desde el dashboard.</li>
+                  <li>Exportacion de economia para seguimiento externo.</li>
+                </ul>
+              </div>
+              <div class="demo-panel__visual">
+                <div class="demo-visual demo-visual--table">
+                  <div class="demo-visual__stats">
+                    <span><strong>148</strong> jugadores</span>
+                    <span><strong>3,482</strong> items</span>
+                    <span><strong>82.4M</strong> silver</span>
+                  </div>
+                  <div class="demo-visual__list">
+                    <div><span>Neox2008</span><strong>24.9M</strong></div>
+                    <div><span>NayarbGBH</span><strong>18.4M</strong></div>
+                    <div><span>Oficial de banca</span><strong>14.2M</strong></div>
+                  </div>
+                </div>
+              </div>
+            </article>
+
+            <article class="demo-panel" id="demo-panel-eventos" role="tabpanel" aria-labelledby="demo-tab-eventos" data-demo-panel="eventos" hidden>
+              <div class="demo-panel__copy">
+                <h3>Avalonianas, pings e informes</h3>
+                <p>Plantillas de publicacion, participantes por slot y flujo de cierre para reportes o reparto.</p>
+                <ul>
+                  <li>Plantillas reutilizables por servidor.</li>
+                  <li>Slots por rol con orden de participacion.</li>
+                  <li>Publicacion y seguimiento de eventos activos.</li>
+                </ul>
+              </div>
+              <div class="demo-panel__visual">
+                <div class="demo-visual demo-visual--slots">
+                  <span class="slot-pill">Caller</span>
+                  <span class="slot-pill">Main Tank</span>
+                  <span class="slot-pill">Off Tank</span>
+                  <span class="slot-pill">Healer</span>
+                  <span class="slot-pill">SC</span>
+                  <span class="slot-pill">DPS x4</span>
+                </div>
+              </div>
+            </article>
+
+            <article class="demo-panel" id="demo-panel-tickets" role="tabpanel" aria-labelledby="demo-tab-tickets" data-demo-panel="tickets" hidden>
+              <div class="demo-panel__copy">
+                <h3>Tickets, paneles y transcripciones</h3>
+                <p>Configuracion de paneles, estados de soporte y acceso seguro a historiales o archivos.</p>
+                <ul>
+                  <li>Paneles con opciones y mensajes personalizados.</li>
+                  <li>Tickets en vivo y media protegida por permiso.</li>
+                  <li>Transcripciones para soporte y revisiones internas.</li>
+                </ul>
+              </div>
+              <div class="demo-panel__visual">
+                <div class="demo-visual demo-visual--cards">
+                  <article><strong>Soporte</strong><span>Abierto</span></article>
+                  <article><strong>Multa pendiente</strong><span>En revision</span></article>
+                  <article><strong>Apelacion</strong><span>Cerrado</span></article>
+                </div>
+              </div>
+            </article>
+
+            <article class="demo-panel" id="demo-panel-auditoria" role="tabpanel" aria-labelledby="demo-tab-auditoria" data-demo-panel="auditoria" hidden>
+              <div class="demo-panel__copy">
+                <h3>Auditoria operativa</h3>
+                <p>Eventos recientes, responsables, categorias y fechas para revisar cambios del servidor.</p>
+                <ul>
+                  <li>Acciones administrativas registradas en dashboard.</li>
+                  <li>Canales por categoria de auditoria.</li>
+                  <li>Historial util aunque no haya canal configurado.</li>
+                </ul>
+              </div>
+              <div class="demo-panel__visual">
+                <div class="demo-visual demo-visual--timeline">
+                  <div><strong>Roles</strong><span>Actualizados por Neox2008</span></div>
+                  <div><strong>Canales</strong><span>Panel de tickets republicado</span></div>
+                  <div><strong>Servidor</strong><span>Backup estructurado generado</span></div>
+                </div>
+              </div>
+            </article>
+
+            <article class="demo-panel" id="demo-panel-permisos" role="tabpanel" aria-labelledby="demo-tab-permisos" data-demo-panel="permisos" hidden>
+              <div class="demo-panel__copy">
+                <h3>Permisos por rol y modulo</h3>
+                <p>Accesos granulares para que cada usuario vea solo lo que necesita en web y Discord.</p>
+                <ul>
+                  <li>Permisos por modulo y accion.</li>
+                  <li>Compatibilidad con administradores y roles operativos.</li>
+                  <li>La misma fuente de verdad para comandos y dashboard.</li>
+                </ul>
+              </div>
+              <div class="demo-panel__visual">
+                <div class="demo-visual demo-visual--permissions">
+                  <div><span>Economia</span><strong>Permitido</strong></div>
+                  <div><span>Tickets</span><strong>Permitido</strong></div>
+                  <div><span>Panel Admin</span><strong>Restringido</strong></div>
+                </div>
+              </div>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section class="section section--workflow">
+        <div class="section-heading" data-reveal>
+          <span class="eyebrow">Flujo de trabajo</span>
+          <h2>De Discord al dashboard, sin procesos desordenados</h2>
+        </div>
+
+        <div class="workflow-grid">
+          <article data-reveal>
+            <span>1</span>
+            <h3>Inicia sesion con Discord</h3>
+            <p>Autentica tu acceso con OAuth para reconocer usuario, servidores y permisos disponibles.</p>
+          </article>
+          <article data-reveal>
+            <span>2</span>
+            <h3>Selecciona un servidor autorizado</h3>
+            <p>Trabaja solo sobre guilds donde el bot esta conectado y tu cuenta tiene acceso valido.</p>
+          </article>
+          <article data-reveal>
+            <span>3</span>
+            <h3>Configura modulos y permisos</h3>
+            <p>Activa vistas, define roles y ordena plantillas, tickets, auditoria o panel administrativo.</p>
+          </article>
+          <article data-reveal>
+            <span>4</span>
+            <h3>Gestiona desde Discord o web</h3>
+            <p>Opera eventos, revisa registros, exporta datos y conserva el contexto entre ambos canales.</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="section section--security" id="seguridad">
+        <div class="security-grid">
+          <div class="section-heading" data-reveal>
+            <span class="eyebrow">Seguridad real del proyecto</span>
+            <h2>Disenado para administrar sin perder el control</h2>
+            <p>
+              La portada refleja las capas que ya existen en Bot-Neox: autenticacion por Discord,
+              sesiones firmadas, permisos por servidor, auditoria, respaldos y variables sensibles en `.env`.
+            </p>
+          </div>
+
+          <div class="security-card" data-reveal>
+            <ul class="security-list">
+              <li>Inicio de sesion mediante Discord OAuth y sesiones protegidas.</li>
+              <li>Control de acceso por servidor, modulo y rol.</li>
+              <li>Validaciones administrativas adicionales para areas sensibles.</li>
+              <li>Persistencia principal en SQLite con compatibilidad controlada con JSON heredado.</li>
+              <li>Registro de eventos y acciones administrativas.</li>
+              <li>Backups de base de datos y configuracion operativa.</li>
+              <li>Variables sensibles administradas mediante `.env`.</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <section class="section section--architecture" id="arquitectura">
+        <div class="section-heading" data-reveal>
+          <span class="eyebrow">Capacidades tecnicas</span>
+          <h2>Una sola plataforma, dos formas de trabajar</h2>
+          <p>
+            AvalonBot une el bot de Discord, el dashboard web y los servicios internos para que cada
+            accion se pueda ejecutar, revisar o auditar desde el canal adecuado.
+          </p>
+        </div>
+
+        <div class="architecture-board" data-reveal>
+          <article><strong>Bot de Discord</strong><span>Comandos, tickets, pings, registros y automatizacion.</span></article>
+          <article><strong>Dashboard web</strong><span>Economia, permisos, auditoria, Albion y panel administrativo.</span></article>
+          <article><strong>Servicios internos</strong><span>Logica de negocio, validaciones y flujos compartidos.</span></article>
+          <article><strong>Repositorios</strong><span>Persistencia operativa con compatibilidad progresiva.</span></article>
+          <article><strong>SQLite + JSON</strong><span>Base principal con soporte controlado para datos heredados.</span></article>
+          <article><strong>Albion + Discord</strong><span>Integracion entre identidad, eventos, loot y contexto del servidor.</span></article>
+        </div>
+      </section>
+
+      <section class="section section--use-cases">
+        <div class="section-heading" data-reveal>
+          <span class="eyebrow">Casos de uso</span>
+          <h2>Creado para comunidades que necesitan orden</h2>
+        </div>
+
+        <div class="use-case-grid">
+          <article data-reveal>
+            <h3>Gremios de Albion Online</h3>
+            <p>Centralizan loot, asistentes, balances y configuraciones sin repartir informacion en varios canales.</p>
+          </article>
+          <article data-reveal>
+            <h3>Equipos administrativos</h3>
+            <p>Separan permisos, refuerzan accesos y dejan rastro de cambios en auditoria o panel admin.</p>
+          </article>
+          <article data-reveal>
+            <h3>Organizadores de eventos</h3>
+            <p>Preparan plantillas, controlan slots y revisan participantes antes y despues de cada Ava.</p>
+          </article>
+          <article data-reveal>
+            <h3>Responsables de economia</h3>
+            <p>Consulta balances, movimientos y exportaciones desde una vista clara por servidor.</p>
+          </article>
+          <article data-reveal>
+            <h3>Moderadores y soporte</h3>
+            <p>Atienden tickets, recuperan transcripciones y resguardan media con permisos de acceso reales.</p>
+          </article>
+          <article data-reveal>
+            <h3>Callers y responsables de Avalonianas</h3>
+            <p>Usan el mismo ecosistema para preparar pings, cerrar eventos y llevar reportes consistentes.</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="section section--faq" id="preguntas">
+        <div class="section-heading" data-reveal>
+          <span class="eyebrow">FAQ</span>
+          <h2>Preguntas frecuentes</h2>
+        </div>
+
+        <div class="faq-list" data-reveal>
+          <details class="faq-item">
+            <summary>Que es AvalonBot?</summary>
+            <p>Es una plataforma formada por el bot de Discord y un dashboard web para administrar economia, eventos, tickets, auditoria, permisos y datos de Albion.</p>
+          </details>
+          <details class="faq-item">
+            <summary>Necesito instalar algo para utilizar el dashboard?</summary>
+            <p>No. El acceso se realiza desde el navegador al dashboard que ejecuta Bot-Neox, manteniendo el bot y la interfaz dentro del mismo proyecto.</p>
+          </details>
+          <details class="faq-item">
+            <summary>Como se inicia sesion?</summary>
+            <p>El acceso usa Discord OAuth. La sesion queda asociada al usuario autenticado y a los servidores donde tiene permisos validos.</p>
+          </details>
+          <details class="faq-item">
+            <summary>Puedo administrar varios servidores?</summary>
+            <p>Si, siempre que el bot este conectado a esos servidores y tu cuenta tenga acceso administrativo o permisos de modulo suficientes.</p>
+          </details>
+          <details class="faq-item">
+            <summary>Todos los usuarios pueden acceder a todos los modulos?</summary>
+            <p>No. El dashboard filtra vistas y acciones por servidor, rol y modulo, y el panel administrativo puede requerir validacion adicional.</p>
+          </details>
+          <details class="faq-item">
+            <summary>El dashboard reemplaza los comandos de Discord?</summary>
+            <p>No. La idea es complementar los comandos del bot con una vista web para operar, revisar y auditar procesos complejos.</p>
+          </details>
+          <details class="faq-item">
+            <summary>Donde se guardan los datos?</summary>
+            <p>La persistencia principal esta en SQLite, con compatibilidad controlada para algunos JSON heredados que siguen siendo parte del runtime.</p>
+          </details>
+          <details class="faq-item">
+            <summary>Puedo exportar registros?</summary>
+            <p>Si. El dashboard ya contempla exportaciones para modulos como economia y plantillas, segun el acceso del usuario.</p>
+          </details>
+          <details class="faq-item">
+            <summary>El sistema incluye tickets y transcripciones?</summary>
+            <p>Si. El proyecto maneja paneles de tickets, estados, media protegida y transcripciones consultables desde el dashboard.</p>
+          </details>
+          <details class="faq-item">
+            <summary>Esta disenado unicamente para Albion Online?</summary>
+            <p>La integracion visible y varios modulos estan orientados a Albion Online, pero el esquema operativo tambien sirve para comunidades de Discord que requieren orden y trazabilidad.</p>
+          </details>
+        </div>
+      </section>
+
+      <section class="section section--cta">
+        <div class="cta-card" data-reveal>
+          <div>
+            <span class="eyebrow">Listo para operar con mas control</span>
+            <h2>Convierte tu servidor en una comunidad organizada</h2>
+            <p>Centraliza la administracion, reduce tareas manuales y manten un registro claro de cada operacion.</p>
+          </div>
+          <div class="cta-card__actions">
+            <a class="button button--primary button--large" href="<!--BOT_INVITE_URL-->" target="_blank" rel="noreferrer">Invitar bot</a>
+            <a class="button button--primary button--large" href="/login?remember=1">Ingresar con Discord</a>
+            <a class="button button--secondary button--large" href="/dashboard">Abrir dashboard</a>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <div class="site-footer__grid">
+        <div class="site-footer__brand">
+          <img src="/assets/AvalonBot.png" alt="AvalonBot">
+          <p>
+            AvalonBot unifica el trabajo operativo entre Discord y un dashboard web para comunidades
+            que necesitan economia, eventos, auditoria y permisos con seguimiento real.
+          </p>
+        </div>
+
+        <div>
+          <h3>Navegacion</h3>
+          <a href="#inicio">Inicio</a>
+          <a href="#funciones">Funciones</a>
+          <a href="#dashboard">Dashboard</a>
+          <a href="#preguntas">FAQ</a>
+        </div>
+
+        <div>
+          <h3>Acceso</h3>
+          <a href="<!--BOT_INVITE_URL-->" target="_blank" rel="noreferrer">Invitar bot</a>
+          <a href="/dashboard">Dashboard</a>
+          <a href="/login?remember=1">Iniciar sesion</a>
+          <a href="#seguridad">Seguridad</a>
+          <a href="#arquitectura">Arquitectura</a>
+        </div>
+
+        <div>
+          <h3>Recursos</h3>
+          <a href="#privacidad">Privacidad</a>
+          <a href="#terminos">Terminos</a>
+          <a href="#soporte">Soporte</a>
+          <p class="site-footer__credit">Creado por Neox2008 y NayarbGBH</p>
+        </div>
+      </div>
+
+      <div class="site-footer__meta">
+        <p id="privacidad"><strong>Privacidad:</strong> el acceso al dashboard depende de Discord OAuth y de las reglas de permisos configuradas en el proyecto.</p>
+        <p id="terminos"><strong>Terminos:</strong> la operacion del dashboard se rige por la configuracion del servidor y el uso responsable de modulos administrativos.</p>
+        <p id="soporte"><strong>Soporte:</strong> utiliza el acceso del dashboard o el canal operativo definido por tu comunidad para reportar incidencias.</p>
+      </div>
+
+      <div class="site-footer__bottom">
+        <span>&copy; <span id="footerYear"></span> AvalonBot</span>
+        <span>Dashboard web integrado con Bot-Neox</span>
+      </div>
+    </footer>
+  </div>
+
+  <script src="/static/js/landing.js"></script>
+</body>
+</html>
