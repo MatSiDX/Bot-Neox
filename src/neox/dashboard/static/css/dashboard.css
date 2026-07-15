@@ -604,6 +604,33 @@
       font-size: 18px;
     }
 
+    .admin-elevation-card {
+      display: grid;
+      gap: 14px;
+      margin-bottom: 18px;
+    }
+
+    .admin-elevation-form {
+      grid-template-columns: minmax(0, 1fr);
+      gap: 12px;
+    }
+
+    .admin-elevation-form .publish-row.full {
+      justify-content: flex-start;
+    }
+
+    .admin-elevation-form .status {
+      flex: 1 1 260px;
+      min-width: 0;
+      white-space: normal;
+      overflow-wrap: anywhere;
+    }
+
+    .admin-elevation-card .field-hint {
+      color: var(--muted);
+      overflow-wrap: anywhere;
+    }
+
     .admin-workspace {
       display: grid;
       grid-template-columns: minmax(300px, .9fr) minmax(380px, 1.1fr);
@@ -2634,6 +2661,10 @@
       min-width: 860px;
     }
 
+    .permissions-list-stacked {
+      min-width: 0;
+    }
+
     .permissions-grid {
       overflow-x: auto;
       padding-bottom: 4px;
@@ -2663,6 +2694,11 @@
       box-shadow: var(--shadow);
     }
 
+    .permission-row-stacked {
+      grid-template-columns: minmax(180px, .95fr) minmax(0, 2.2fr);
+      align-items: start;
+    }
+
     .permission-role {
       display: grid;
       gap: 3px;
@@ -2673,6 +2709,43 @@
       color: var(--ink);
       font-size: 14px;
       overflow-wrap: anywhere;
+    }
+
+    .permission-groups {
+      display: grid;
+      gap: 12px;
+      min-width: 0;
+    }
+
+    .permission-group {
+      display: grid;
+      gap: 8px;
+      padding: 10px;
+      border: 1px solid color-mix(in srgb, var(--line) 78%, transparent);
+      border-radius: 8px;
+      background: color-mix(in srgb, var(--control-bg) 82%, transparent);
+    }
+
+    .permission-group-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      align-items: center;
+      color: var(--muted);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: .04em;
+    }
+
+    .permission-group-head strong {
+      color: var(--ink);
+      font-size: 12px;
+    }
+
+    .permission-group-options {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
     }
 
     .permission-pill {
@@ -3588,6 +3661,10 @@
       .permission-row {
         grid-template-columns: 1fr;
         align-items: stretch;
+      }
+      .permission-group-head {
+        align-items: flex-start;
+        flex-direction: column;
       }
       .permission-pill {
         justify-content: flex-start;

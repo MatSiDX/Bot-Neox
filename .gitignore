@@ -17,6 +17,7 @@ venv/
 .tmp_import_data/
 .tmp_zip_import/
 .tmp_zip_import_new/
+/.tmp/
 %SystemDrive%/
 
 .env

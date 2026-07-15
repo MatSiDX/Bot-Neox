@@ -89,6 +89,33 @@ class ConfigRepository:
     def set_channel(self, guild_id, channel_type, channel_id):
         self.set_value(guild_id, channel_type, channel_id)
 
+    def get_value(self, guild_id, key, default=None):
+        guild_id = str(guild_id)
+        key = str(key)
+        with get_connection() as connection:
+            row = connection.execute(
+                """
+                SELECT value
+                FROM guild_config
+                WHERE guild_id = ? AND key = ?
+                """,
+                (guild_id, key),
+            ).fetchone()
+
+        if row:
+            return str(row["value"])
+
+        data = self._load_legacy_json()
+        guild_config = data.get(guild_id, {})
+        if not isinstance(guild_config, dict):
+            return default
+        if key in guild_config:
+            value = guild_config.get(key)
+            if value not in (None, ""):
+                self._set_value_sqlite(guild_id, key, value)
+                return str(value)
+        return default
+
     def _load_legacy_json(self):
         data = read_json(CONFIG_FILE, {})
         return self._normalize_storage(data)

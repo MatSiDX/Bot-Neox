@@ -116,3 +116,31 @@ class DashboardSessionStore:
             with self.sessions_lock:
                 self.sessions.pop(session_id, None)
                 self.save_persisted_sessions()
+
+    def get_elevated_session(self, session):
+        if not isinstance(session, dict):
+            return None
+        payload = session.get("admin_elevated_session")
+        return payload if isinstance(payload, dict) else None
+
+    def set_elevated_session(self, session, *, user_id, ttl_seconds):
+        if not isinstance(session, dict):
+            return None
+        ttl_seconds = max(1, int(ttl_seconds or 1))
+        payload = {
+            "user_id": str(user_id or ""),
+            "issued_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "expires_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + ttl_seconds)),
+        }
+        with self.sessions_lock:
+            session["admin_elevated_session"] = payload
+            self.save_persisted_sessions()
+        return dict(payload)
+
+    def clear_elevated_session(self, session):
+        if not isinstance(session, dict):
+            return None
+        with self.sessions_lock:
+            payload = session.pop("admin_elevated_session", None)
+            self.save_persisted_sessions()
+        return payload

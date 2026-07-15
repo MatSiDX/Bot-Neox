@@ -67,6 +67,10 @@ from services.config_service import ConfigService
 from services.dashboard_action_service import DashboardActionService
 from services.discord_metadata_service import DiscordMetadataCacheSettings, DiscordMetadataService
 from services.ping_template_service import MAX_TEMPLATES_PER_GUILD, SCRATCH_TEMPLATE_KEY, PingTemplateService
+from services.dashboard_admin_security_service import (
+    DashboardAdminAccessError,
+    DashboardAdminSecurityService,
+)
 from services.fine_service import FineService
 from services.albion_market_price_service import AlbionMarketPriceService
 from services.chest_table_service import ChestTableService
@@ -75,9 +79,6 @@ from services.report_service import ReportFormatService
 from services.server_backup_service import ServerBackupService
 from services.server_template_service import SERVER_TEMPLATE_ACTION_APPLY, ServerTemplateService
 from services.permission_service import (
-    BOT_PERMISSION_DEFINITIONS,
-    BOT_PERMISSION_KEYS,
-    BOT_PERMISSION_LABELS,
     MODULE_ADMIN_PANEL,
     MODULE_ALBION_REGISTRATION,
     MODULE_AUDIT,
@@ -86,11 +87,18 @@ from services.permission_service import (
     MODULE_EXPORT_TEMPLATES,
     MODULE_EXPORT_TICKETS,
     MODULE_FINES,
+    MODULE_LOOT,
     MODULE_PERMISSIONS,
+    MODULE_REPORT_CALCULATOR,
     MODULE_REPORTS,
     MODULE_TEMPLATES,
     MODULE_TICKETS,
-    PERMISSION_GLOBAL,
+    MODULE_WELCOME,
+    PERMISSION_ECONOMY_BALANCE_EDIT,
+    PERMISSION_LOOT_USE,
+    PERMISSION_TEMPLATES_CREATE,
+    PERMISSION_TEMPLATES_DELETE,
+    PERMISSION_TEMPLATES_EDIT,
     PermissionService,
 )
 from services.config_service import (
@@ -126,7 +134,6 @@ AUDIT_CATEGORIES = [
     ("messages", "Mensajes", "Mensajes editados o eliminados"),
     ("server", "Servidor", "Cambios generales del servidor, emojis e invitaciones"),
 ]
-BOT_PERMISSION_OPTIONS = list(BOT_PERMISSION_DEFINITIONS)
 TICKET_CHANNEL_PERMISSION_OPTIONS = [
     ("view_channel", "Ver canal"),
     ("send_messages", "Enviar mensajes"),
@@ -201,6 +208,8 @@ DISCORD_METADATA_CACHE_SETTINGS = DiscordMetadataCacheSettings(
     stale_fallback_seconds=DISCORD_METADATA_STALE_FALLBACK_SECONDS,
 )
 DISCORD_METADATA_SERVICE = None
+DASHBOARD_ADMIN_SECURITY_SERVICE = None
+DASHBOARD_ADMIN_SECURITY_LOCK = threading.RLock()
 
 
 def read_json_file(path, fallback):
@@ -2291,58 +2300,113 @@ def save_guild_ping_template(guild_id, payload):
 
 
 def normalize_bot_permission_values(values):
-    if isinstance(values, str):
-        values = [values]
-    if not isinstance(values, list):
-        values = []
-
-    normalized = []
-    for value in values:
-        permission = str(value or "").strip().lower()
-        if permission in BOT_PERMISSION_KEYS and permission not in normalized:
-            normalized.append(permission)
-
-    if PERMISSION_GLOBAL in normalized:
-        return [PERMISSION_GLOBAL]
-
-    return normalized
+    return PermissionService.normalize_permissions(values, include_system_permissions=False)
 
 
-def get_guild_bot_permissions(guild_id):
+def get_guild_bot_permissions(guild_id, *, actor_role_ids=None, is_actor_admin=False):
     service = PermissionService()
-    role_permissions = service.get_role_permissions(guild_id)
+    visible_permissions = service.get_role_permissions(guild_id, include_system_permissions=False)
+    hidden_permissions = service.get_hidden_role_permissions(guild_id)
     cleaned = {}
-    for role_id, permissions in role_permissions.items():
+    for role_id, permissions in visible_permissions.items():
         normalized = normalize_bot_permission_values(permissions)
         if normalized:
             cleaned[str(role_id)] = normalized
 
+    manageable_permissions = service.manageable_permission_keys(
+        guild_id,
+        role_ids=actor_role_ids or [],
+        is_admin=is_actor_admin,
+    )
     return {
         "permissions": cleaned,
+        "system_permissions": hidden_permissions,
         "options": [
-            {"key": key, "label": label, "description": description}
-            for key, label, description in BOT_PERMISSION_OPTIONS
+            {
+                "key": definition.key,
+                "label": definition.label,
+                "description": definition.description,
+                "category": definition.category,
+                "module": definition.module,
+                "scope": definition.scope,
+                "assignable": definition.assignable,
+                "editable": is_actor_admin or definition.key in manageable_permissions,
+            }
+            for definition in service.list_public_permissions()
         ],
+        "manageable_permissions": sorted(manageable_permissions),
+        "read_only_role_ids": [] if is_actor_admin else [str(role_id) for role_id in actor_role_ids or []],
+        "can_edit": bool(is_actor_admin or manageable_permissions),
     }
 
 
-def save_guild_bot_permissions(guild_id, payload):
+def save_guild_bot_permissions(guild_id, payload, *, actor_role_ids=None, is_actor_admin=False):
     service = PermissionService()
     permissions = payload.get("permissions", payload) if isinstance(payload, dict) else {}
     if not isinstance(permissions, dict):
         return None, "La configuracion de permisos no es valida."
 
-    cleaned = {}
+    visible_permissions = service.get_role_permissions(guild_id, include_system_permissions=False)
+    hidden_permissions = service.get_hidden_role_permissions(guild_id)
+    touched_roles = payload.get("role_ids", []) if isinstance(payload, dict) else []
+    if not isinstance(touched_roles, list):
+        touched_roles = []
+    touched_role_ids = {
+        str(role_id or "").strip()
+        for role_id in touched_roles
+        if str(role_id or "").strip().isdigit()
+    }
+
+    actor = type("DashboardActor", (), {
+        "roles": [type("DashboardRole", (), {"id": current_role_id})() for current_role_id in actor_role_ids or []],
+        "guild_permissions": type("DashboardPermissions", (), {"administrator": bool(is_actor_admin)})(),
+        "guild": type("DashboardGuild", (), {"owner_id": None})(),
+        "id": None,
+    })()
+
+    next_visible_permissions = {
+        str(role_id): normalize_bot_permission_values(values)
+        for role_id, values in visible_permissions.items()
+    }
     for role_id, values in permissions.items():
         role_id = str(role_id or "").strip()
         if not role_id.isdigit():
             continue
-        normalized = normalize_bot_permission_values(values)
-        if normalized:
-            cleaned[role_id] = normalized
+        touched_role_ids.add(role_id)
+        next_visible_permissions.setdefault(role_id, [])
+        normalized_values = normalize_bot_permission_values(values)
+        error = service.validate_role_permission_update(
+            guild_id,
+            actor,
+            role_id,
+            normalized_values,
+        )
+        if error:
+            return None, error
+        next_visible_permissions[role_id] = normalized_values
 
-    service.repo.set_guild_permissions(guild_id, cleaned)
-    return get_guild_bot_permissions(guild_id), None
+    for role_id in touched_role_ids:
+        error = service.validate_role_permission_update(
+            guild_id,
+            actor,
+            role_id,
+            next_visible_permissions.get(role_id, []),
+        )
+        if error:
+            return None, error
+        if role_id not in permissions:
+            next_visible_permissions[role_id] = []
+
+    service.set_role_permissions(
+        guild_id,
+        next_visible_permissions,
+        preserve_hidden_permissions=hidden_permissions,
+    )
+    return get_guild_bot_permissions(
+        guild_id,
+        actor_role_ids=actor_role_ids,
+        is_actor_admin=is_actor_admin,
+    ), None
 
 
 def normalize_ticket_panel(panel):
@@ -3122,15 +3186,36 @@ def build_dashboard_data(guild_id=None, allowed_guilds=None, bot_guild_ids=None,
         "access": {},
     }
 
-
 LOGIN_HTML = load_dashboard_template("login.html")
 INDEX_HTML = load_dashboard_template("dashboard.html")
+LANDING_HTML = load_dashboard_template("landing.html")
+BOT_INVITE_PLACEHOLDER = "<!--BOT_INVITE_URL-->"
 
 
 def render_login_html(next_path):
     return LOGIN_HTML.replace(
         "<!--DASHBOARD_NEXT_INPUT-->",
         f'<input type="hidden" name="next" value="{html.escape(next_path, quote=True)}">',
+    )
+
+
+def build_bot_invite_url():
+    client_id = str(DASHBOARD_CLIENT_ID or "").strip()
+    if not client_id:
+        return "https://discord.com/developers/applications"
+
+    params = urlencode({
+        "client_id": client_id,
+        "scope": "bot applications.commands",
+        "permissions": str(DISCORD_ADMINISTRATOR),
+    })
+    return f"https://discord.com/oauth2/authorize?{params}"
+
+
+def render_landing_html():
+    return LANDING_HTML.replace(
+        BOT_INVITE_PLACEHOLDER,
+        html.escape(build_bot_invite_url(), quote=True),
     )
 
 
@@ -3185,6 +3270,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def permission_service(self):
         return PermissionService()
 
+    def dashboard_admin_security_service(self):
+        global DASHBOARD_ADMIN_SECURITY_SERVICE
+        with DASHBOARD_ADMIN_SECURITY_LOCK:
+            if DASHBOARD_ADMIN_SECURITY_SERVICE is None:
+                DASHBOARD_ADMIN_SECURITY_SERVICE = DashboardAdminSecurityService(
+                    session_store=SESSION_STORE,
+                )
+            return DASHBOARD_ADMIN_SECURITY_SERVICE
+
     def server_backup_service(self):
         return ServerBackupService(
             fetch_guild_summary=fetch_discord_guild_summary,
@@ -3235,6 +3329,25 @@ class DashboardHandler(BaseHTTPRequestHandler):
         role_ids = self.session_role_ids(session, guild_id)
         return self.permission_service().has_module_access(guild_id, module_key, role_ids=role_ids)
 
+    def has_guild_permission(self, session, guild_id, *permission_keys):
+        guild_id = str(guild_id or "")
+        if not guild_id:
+            return False
+        bot_guild_ids = get_bot_guild_ids()
+        if bot_guild_ids is not None and guild_id not in bot_guild_ids:
+            return False
+        if guild_id not in self.session_member_guild_ids(session):
+            return False
+        if self.is_guild_admin(session, guild_id):
+            return True
+        role_ids = self.session_role_ids(session, guild_id)
+        return self.permission_service().has_module_access(
+            guild_id,
+            "",
+            role_ids=role_ids,
+            required_permissions=permission_keys,
+        )
+
     def can_access_tickets(self, session, guild_id):
         return self.can_access_module(session, guild_id, MODULE_TICKETS)
 
@@ -3249,6 +3362,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def can_access_admin_panel(self, session, guild_id):
         return self.can_access_module(session, guild_id, MODULE_ADMIN_PANEL)
+
+    def can_access_any_admin_panel(self, session):
+        allowed_guilds = self.dashboard_allowed_guilds(session)
+        return any(
+            self.can_access_admin_panel(session, guild_id)
+            for guild_id in allowed_guilds
+        )
 
     def session_guild_map(self, session):
         guilds = {}
@@ -3319,6 +3439,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "permissions": False,
                 "adminPanel": False,
                 "registration": False,
+                "loot": False,
+                "reportCalculator": False,
+                "welcome": False,
             }
         admin = self.is_guild_admin(session, guild_id)
         return {
@@ -3331,6 +3454,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "permissions": self.can_access_module(session, guild_id, MODULE_PERMISSIONS),
             "adminPanel": self.can_access_admin_panel(session, guild_id),
             "registration": self.can_access_module(session, guild_id, MODULE_ALBION_REGISTRATION),
+            "loot": self.can_access_module(session, guild_id, MODULE_LOOT),
+            "reportCalculator": self.can_access_module(session, guild_id, MODULE_REPORT_CALCULATOR),
+            "welcome": self.can_access_module(session, guild_id, MODULE_WELCOME),
         }
 
     def can_access_report_calculator(self, session, guild_id, caller_id):
@@ -3429,6 +3555,30 @@ class DashboardHandler(BaseHTTPRequestHandler):
             description=description,
             actor=self.dashboard_actor_label(session),
         )
+
+    def client_ip_address(self):
+        forwarded_for = str(self.headers.get("X-Forwarded-For") or "").split(",", 1)[0].strip()
+        if forwarded_for:
+            return forwarded_for
+        if isinstance(self.client_address, tuple) and self.client_address:
+            return str(self.client_address[0] or "")
+        return ""
+
+    def require_elevated_admin_panel(self, session, guild_id=None):
+        has_admin_permission = (
+            self.can_access_admin_panel(session, guild_id)
+            if guild_id
+            else self.can_access_any_admin_panel(session)
+        )
+        try:
+            return self.dashboard_admin_security_service().ensure_elevated_access(
+                session=session,
+                has_admin_permission=has_admin_permission,
+                ip_address=self.client_ip_address(),
+            )
+        except DashboardAdminAccessError as exc:
+            self.send_json(exc.status, {"error": str(exc)})
+            return None
 
     def send_internal_json_error(self, context, exc):
         log_event(f"DASHBOARD ERROR {context} | {type(exc).__name__}: {exc}")
@@ -3608,6 +3758,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
         )
 
     def handle_logout(self):
+        session = get_session_from_request(self)
+        if session:
+            try:
+                self.dashboard_admin_security_service().logout_elevated(
+                    session=session,
+                    ip_address=self.client_ip_address(),
+                    reason="logout",
+                )
+            except Exception as exc:
+                log_event(f"DASHBOARD ADMIN LOGOUT AUDIT ERROR | {type(exc).__name__}: {exc}")
         clear_session_from_request(self)
         self.send_redirect(
             "/",
@@ -3617,19 +3777,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
         if parsed.path == "/":
-            query = parse_qs(parsed.query)
-            next_path = safe_dashboard_next(query.get("next", ["/dashboard"])[0])
-            if get_session_from_request(self):
-                self.send_redirect(next_path)
-                return
-
-            self.send_text(200, render_login_html(next_path), "text/html")
+            self.send_text(200, render_landing_html(), "text/html")
             return
 
         if parsed.path == "/dashboard":
             if not get_session_from_request(self):
                 self.send_redirect(
-                    f"/?next={urlencode({'value': self.path})[6:]}"
+                    f"/login?remember=1&{urlencode({'next': self.path})}"
                 )
                 return
 
@@ -3774,6 +3928,31 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 })
             except Exception as exc:
                 self.send_internal_json_error("/api/dashboard/access", exc)
+            return
+
+        if parsed.path == "/api/admin-access/status":
+            session = self.get_authenticated_session()
+            if not session:
+                return
+
+            query = parse_qs(parsed.query)
+            guild_id = str(query.get("guild_id", [""])[0] or "").strip()
+            if not guild_id:
+                self.send_json(400, {"error": "Selecciona un servidor antes de abrir el panel administrativo."})
+                return
+
+            try:
+                self.send_json(200, {
+                    "status": self.dashboard_admin_security_service().get_status(
+                        session=session,
+                        has_admin_permission=self.can_access_admin_panel(session, guild_id),
+                        ip_address=self.client_ip_address(),
+                    ),
+                })
+            except DashboardAdminAccessError as exc:
+                self.send_json(exc.status, {"error": str(exc)})
+            except Exception as exc:
+                self.send_internal_json_error("/api/admin-access/status", exc)
             return
 
         if parsed.path == "/api/economy/summary":
@@ -4341,12 +4520,21 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.send_json(403, {"error": "No tienes acceso a ese servidor."})
                 return
 
-            self.send_json(200, get_guild_bot_permissions(guild_id))
+            self.send_json(
+                200,
+                get_guild_bot_permissions(
+                    guild_id,
+                    actor_role_ids=self.session_role_ids(session, guild_id),
+                    is_actor_admin=self.is_guild_admin(session, guild_id),
+                ),
+            )
             return
 
         if parsed.path == "/api/admin/guilds":
             session = self.get_authenticated_session()
             if not session:
+                return
+            if not self.require_elevated_admin_panel(session):
                 return
 
             try:
@@ -4362,7 +4550,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
             query = parse_qs(parsed.query)
             guild_id = query.get("guild_id", [""])[0]
-            if not guild_id or not self.can_access_admin_panel(session, guild_id):
+            if not guild_id:
+                self.send_json(400, {"error": "Selecciona un servidor antes de abrir el panel administrativo."})
+                return
+            if not self.require_elevated_admin_panel(session, guild_id):
+                return
+            if not self.can_access_admin_panel(session, guild_id):
                 self.send_json(403, {"error": "No tienes acceso administrativo a ese servidor."})
                 return
 
@@ -4395,7 +4588,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
             query = parse_qs(parsed.query)
             guild_id = query.get("guild_id", [""])[0]
-            if not guild_id or not self.can_access_admin_panel(session, guild_id):
+            if not guild_id:
+                self.send_json(400, {"error": "Selecciona un servidor antes de cargar canales administrativos."})
+                return
+            if not self.require_elevated_admin_panel(session, guild_id):
+                return
+            if not self.can_access_admin_panel(session, guild_id):
                 self.send_json(403, {"error": "No tienes acceso administrativo a ese servidor."})
                 return
 
@@ -4419,6 +4617,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             try:
                 query = parse_qs(parsed.query)
                 guild_id, channel_id, message_id = validate_bot_message_lookup_query(query)
+                if not self.require_elevated_admin_panel(session, guild_id):
+                    return
                 if not self.can_access_admin_panel(session, guild_id):
                     self.send_json(403, {"error": "No tienes acceso administrativo a ese servidor."})
                     return
@@ -4443,7 +4643,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
             query = parse_qs(parsed.query)
             guild_id = query.get("guild_id", [""])[0]
-            if not guild_id or not self.can_access_admin_panel(session, guild_id):
+            if not guild_id:
+                self.send_json(400, {"error": "Selecciona un servidor antes de consultar backups."})
+                return
+            if not self.require_elevated_admin_panel(session, guild_id):
+                return
+            if not self.can_access_admin_panel(session, guild_id):
                 self.send_json(403, {"error": "No tienes acceso administrativo a ese servidor."})
                 return
 
@@ -4469,6 +4674,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.send_internal_json_error("/api/admin/server-backups GET", exc)
             return
 
+        if parsed.path.startswith("/api/"):
+            self.send_text(404, "No encontrado", "text/plain")
+            return
+
         self.send_text(404, "No encontrado", "text/plain")
 
     def do_POST(self):
@@ -4483,7 +4692,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             try:
                 body = self.read_json_body()
                 guild_id = str(body.get("guild_id") or "")
-                if not guild_id or not self.can_access_any_dashboard_module(session, guild_id):
+                if not guild_id or not self.has_guild_permission(session, guild_id, PERMISSION_LOOT_USE):
                     self.send_json(403, {"error": "No tienes acceso a ese servidor."})
                     return
 
@@ -4522,7 +4731,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             try:
                 body = self.read_json_body()
                 guild_id = str(body.get("guild_id") or "")
-                if not guild_id or not self.can_access_module(session, guild_id, MODULE_ECONOMY):
+                if not guild_id or not self.has_guild_permission(session, guild_id, PERMISSION_ECONOMY_BALANCE_EDIT):
                     self.send_json(403, {"error": "No tienes acceso a ese servidor."})
                     return
 
@@ -5034,6 +5243,51 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.send_internal_json_error("/api/publish-ticket-panel", exc)
             return
 
+        if parsed.path == "/api/admin-access/verify":
+            session = self.get_authenticated_session()
+            if not session:
+                return
+            if not self.validate_csrf(session):
+                return
+
+            try:
+                body = self.read_json_body()
+                guild_id = str(body.get("guild_id") or "").strip()
+                password = str(body.get("password") or "")
+                if not guild_id:
+                    self.send_json(400, {"error": "Selecciona un servidor antes de validar la clave secundaria."})
+                    return
+                status = self.dashboard_admin_security_service().verify_password(
+                    session=session,
+                    has_admin_permission=self.can_access_admin_panel(session, guild_id),
+                    ip_address=self.client_ip_address(),
+                    password=password,
+                )
+                self.send_json(200, {"status": status})
+            except DashboardAdminAccessError as exc:
+                self.send_json(exc.status, {"error": str(exc)})
+            except Exception as exc:
+                self.send_internal_json_error("/api/admin-access/verify", exc)
+            return
+
+        if parsed.path == "/api/admin-access/logout":
+            session = self.get_authenticated_session()
+            if not session:
+                return
+            if not self.validate_csrf(session):
+                return
+
+            try:
+                closed = self.dashboard_admin_security_service().logout_elevated(
+                    session=session,
+                    ip_address=self.client_ip_address(),
+                    reason="logout",
+                )
+                self.send_json(200, {"ok": True, "closed": bool(closed)})
+            except Exception as exc:
+                self.send_internal_json_error("/api/admin-access/logout", exc)
+            return
+
         if parsed.path == "/api/admin/bot-message":
             session = self.get_authenticated_session()
             if not session:
@@ -5045,6 +5299,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 body = self.read_json_body()
                 payload = validate_bot_message_request_payload(body)
                 guild_id = payload["guild_id"]
+                if not self.require_elevated_admin_panel(session, guild_id):
+                    return
                 if not self.can_access_admin_panel(session, guild_id):
                     self.send_json(403, {"error": "No tienes acceso administrativo a ese servidor."})
                     return
@@ -5119,6 +5375,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 if not source_guild_id or not target_guild_id or not backup_id.isdigit():
                     self.send_json(400, {"error": "Debes seleccionar backup de origen y servidor destino."})
                     return
+                if not self.require_elevated_admin_panel(session, source_guild_id):
+                    return
+                if not self.require_elevated_admin_panel(session, target_guild_id):
+                    return
                 if not self.can_access_admin_panel(session, source_guild_id) or not self.can_access_admin_panel(session, target_guild_id):
                     self.send_json(403, {"error": "Necesitas permisos administrativos en origen y destino."})
                     return
@@ -5180,6 +5440,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     return
                 if not source_guild_id or not target_guild_id or not backup_id.isdigit():
                     self.send_json(400, {"error": "Debes seleccionar backup de origen y servidor destino."})
+                    return
+                if not self.require_elevated_admin_panel(session, source_guild_id):
+                    return
+                if not self.require_elevated_admin_panel(session, target_guild_id):
                     return
                 if not self.can_access_admin_panel(session, source_guild_id) or not self.can_access_admin_panel(session, target_guild_id):
                     self.send_json(403, {"error": "Necesitas permisos administrativos en origen y destino."})
@@ -5263,7 +5527,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
             try:
                 body = self.read_json_body()
                 guild_id = str(body.get("guild_id") or "").strip()
-                if not guild_id or not self.can_access_admin_panel(session, guild_id):
+                if not guild_id:
+                    self.send_json(400, {"error": "Selecciona un servidor antes de crear backups."})
+                    return
+                if not self.require_elevated_admin_panel(session, guild_id):
+                    return
+                if not self.can_access_admin_panel(session, guild_id):
                     self.send_json(403, {"error": "No tienes acceso administrativo a ese servidor."})
                     return
 
@@ -5386,7 +5655,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
             try:
                 body = self.read_json_body()
                 guild_id = str(body.get("guild_id") or "")
-                if not guild_id or not self.can_access_module(session, guild_id, MODULE_TEMPLATES):
+                if not guild_id or not self.has_guild_permission(
+                    session,
+                    guild_id,
+                    PERMISSION_TEMPLATES_CREATE,
+                    PERMISSION_TEMPLATES_EDIT,
+                ):
                     self.send_json(403, {"error": "No tienes acceso a ese servidor."})
                     return
 
@@ -5423,7 +5697,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     self.send_json(403, {"error": "No tienes acceso a ese servidor."})
                     return
 
-                payload, error = save_guild_bot_permissions(guild_id, body)
+                payload, error = save_guild_bot_permissions(
+                    guild_id,
+                    body,
+                    actor_role_ids=self.session_role_ids(session, guild_id),
+                    is_actor_admin=self.is_guild_admin(session, guild_id),
+                )
                 if error:
                     self.send_json(400, {"error": error})
                     return
@@ -5526,7 +5805,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 body = self.read_json_body()
                 guild_id = str(body.get("guild_id") or "")
                 key = str(body.get("key") or "")
-                if not guild_id or not self.can_access_module(session, guild_id, MODULE_TEMPLATES):
+                if not guild_id or not self.has_guild_permission(session, guild_id, PERMISSION_TEMPLATES_DELETE):
                     self.send_json(403, {"error": "No tienes acceso a ese servidor."})
                     return
 

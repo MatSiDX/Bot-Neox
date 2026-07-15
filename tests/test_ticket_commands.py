@@ -8,6 +8,7 @@ except ModuleNotFoundError:
     TicketRuntimeCog = None
 
 
+@unittest.skipIf(TicketRuntimeCog is None, "discord.py no esta disponible en el entorno de pruebas")
 class TicketCommandTests(unittest.IsolatedAsyncioTestCase):
     def test_close_ticket_command_is_registered(self):
         self.assertEqual(
@@ -168,7 +169,7 @@ class TicketCommandTests(unittest.IsolatedAsyncioTestCase):
     def test_bot_ticket_permission_can_use_ticket_actions(self):
         cog = TicketRuntimeCog.__new__(TicketRuntimeCog)
         cog.permission_service = Mock()
-        cog.permission_service.can_manage_tickets.return_value = True
+        cog.permission_service.has_module_access.return_value = True
         panel = {"permissions": {"close_roles": ["55"]}}
         record = {"owner_id": "10", "claimed_by_id": ""}
         member = SimpleNamespace(
@@ -179,12 +180,17 @@ class TicketCommandTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertTrue(cog.can_close(member, panel, record))
-        cog.permission_service.can_manage_tickets.assert_called_once_with(10, member)
+        cog.permission_service.has_module_access.assert_called_once_with(
+            10,
+            "tickets",
+            member=member,
+            required_permissions=("tickets.records.close",),
+        )
 
     def test_bot_ticket_permission_works_without_panel(self):
         cog = TicketRuntimeCog.__new__(TicketRuntimeCog)
         cog.permission_service = Mock()
-        cog.permission_service.can_manage_tickets.return_value = True
+        cog.permission_service.has_module_access.return_value = True
         member = SimpleNamespace(
             id=99,
             roles=[],
@@ -192,7 +198,12 @@ class TicketCommandTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertTrue(cog.can_close(member, None, {"status": "open"}, guild_id=10))
-        cog.permission_service.can_manage_tickets.assert_called_once_with(10, member)
+        cog.permission_service.has_module_access.assert_called_once_with(
+            10,
+            "tickets",
+            member=member,
+            required_permissions=("tickets.records.close",),
+        )
 
     def test_fine_ticket_is_resolved_from_fine_channel(self):
         cog = TicketRuntimeCog.__new__(TicketRuntimeCog)
@@ -338,8 +349,7 @@ class TicketCommandTests(unittest.IsolatedAsyncioTestCase):
     def test_fine_ticket_module_permission_can_delete(self):
         cog = TicketRuntimeCog.__new__(TicketRuntimeCog)
         cog.permission_service = Mock()
-        cog.permission_service.can_manage_tickets.return_value = False
-        cog.permission_service.can_manage_fines.return_value = True
+        cog.permission_service.has_module_access.side_effect = [False, True]
         record = {"ticket_type": "fine", "resolver_role_id": "55"}
         member = SimpleNamespace(
             roles=[],
@@ -347,8 +357,7 @@ class TicketCommandTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertTrue(cog.can_delete(member, None, guild_id=10, record=record))
-        cog.permission_service.can_manage_tickets.assert_called_once_with(10, member)
-        cog.permission_service.can_manage_fines.assert_called_once_with(10, member)
+        self.assertEqual(cog.permission_service.has_module_access.call_count, 2)
 
     def test_ticket_role_permissions_use_configured_channel_permissions(self):
         cog = TicketRuntimeCog.__new__(TicketRuntimeCog)
@@ -596,7 +605,7 @@ class TicketCommandTests(unittest.IsolatedAsyncioTestCase):
     async def test_close_ticket_prompt_allows_bot_permission_when_panel_is_missing(self):
         cog = TicketRuntimeCog.__new__(TicketRuntimeCog)
         cog.permission_service = Mock()
-        cog.permission_service.can_manage_tickets.return_value = True
+        cog.permission_service.has_module_access.return_value = True
         cog.get_record = Mock(return_value=({}, {"status": "open", "panel_id": "missing-panel"}))
         cog.find_panel = Mock(return_value=None)
         interaction = SimpleNamespace(

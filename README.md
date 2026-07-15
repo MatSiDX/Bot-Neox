@@ -66,6 +66,9 @@ Variables principales:
 - `TOKEN`: token principal del bot
 - `ECONOMY_TOKEN`: alias compatible del token del bot
 - `DASHBOARD_SESSION_SECRET`: secreto obligatorio para sesiones del dashboard
+- `DASHBOARD_ADMIN_PASSWORD_HASH`: hash Argon2id de la clave secundaria del panel administrativo
+- `DASHBOARD_ADMIN_PASSWORD_PEPPER`: pepper obligatoria para verificar la clave secundaria
+- `DASHBOARD_ADMIN_DEVELOPER_IDS`: IDs de Discord autorizados para elevar acceso administrativo
 - `DASHBOARD_CLIENT_ID`: cliente OAuth del dashboard
 - `DASHBOARD_CLIENT_SECRET`: secreto OAuth del dashboard
 - `DASHBOARD_REDIRECT_URI`: callback OAuth

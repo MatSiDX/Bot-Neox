@@ -56,6 +56,10 @@ http://127.0.0.1:8000/dashboard
 ### Dashboard
 
 - `DASHBOARD_SESSION_SECRET`: obligatorio para sesiones firmadas.
+- `DASHBOARD_ADMIN_PASSWORD_HASH`: hash Argon2id de la clave secundaria del panel administrativo.
+- `DASHBOARD_ADMIN_PASSWORD_PEPPER`: pepper obligatoria para verificar esa clave secundaria.
+- `DASHBOARD_ADMIN_DEVELOPER_IDS`: lista separada por comas con los IDs de Discord autorizados.
+- `DASHBOARD_ADMIN_ELEVATED_TTL_SECONDS`: duracion de la sesion elevada, acotada entre 10 y 15 minutos.
 - `DASHBOARD_CLIENT_ID`: cliente OAuth del dashboard.
 - `DASHBOARD_CLIENT_SECRET`: secreto OAuth del dashboard.
 - `DASHBOARD_REDIRECT_URI`: callback OAuth.

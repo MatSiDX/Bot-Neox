@@ -4,10 +4,14 @@ import re
 from urllib.parse import urlparse
 from datetime import datetime
 
-import aiohttp
 import discord
 from discord import app_commands
 from discord.ext import commands
+
+try:
+    import aiohttp
+except ModuleNotFoundError:
+    aiohttp = None
 
 from repositories.balance_repository import DATA_DIR
 from repositories.fine_repository import FineRepository
@@ -16,7 +20,16 @@ from utils.json_store import (
     read_json as read_json_file,
     write_json as write_json_file,
 )
-from services.permission_service import PermissionService
+from services.permission_service import (
+    PERMISSION_FINES_RECORDS_MANAGE,
+    PERMISSION_TICKETS_RECORDS_ADD_MEMBER,
+    PERMISSION_TICKETS_RECORDS_CLAIM,
+    PERMISSION_TICKETS_RECORDS_CLOSE,
+    PERMISSION_TICKETS_RECORDS_DELETE,
+    PERMISSION_TICKETS_RECORDS_REOPEN,
+    PERMISSION_TICKETS_RECORDS_TRANSCRIPT,
+    PermissionService,
+)
 from utils.console_logger import log_exception
 from utils.interaction_safety import describe_interaction, send_safe_interaction_error
 
@@ -95,7 +108,7 @@ def safe_discord_channel_name(value, fallback="ticket"):
 
 
 async def download_url_to_media(url, folder, filename):
-    if not url:
+    if not url or aiohttp is None:
         return ""
 
     os.makedirs(folder, exist_ok=True)
@@ -589,6 +602,21 @@ class TicketRuntimeCog(commands.Cog):
         permission_service = getattr(self, "permission_service", None)
         return bool(guild_id and permission_service and permission_service.can_manage_tickets(guild_id, member))
 
+    def has_ticket_permission(self, guild_id, member, *permission_keys):
+        if PermissionService.is_administrator(member):
+            return True
+
+        permission_service = getattr(self, "permission_service", None)
+        if not guild_id or not permission_service:
+            return False
+
+        return permission_service.has_module_access(
+            guild_id,
+            "tickets",
+            member=member,
+            required_permissions=permission_keys,
+        )
+
     def member_has_any_role(self, member, role_ids, guild_id=None):
         guild_id = guild_id or getattr(getattr(member, "guild", None), "id", None)
         if self.can_manage_ticket_action(guild_id, member):
@@ -597,9 +625,13 @@ class TicketRuntimeCog(commands.Cog):
         return any(role.id in role_ids for role in getattr(member, "roles", []) or [])
 
     def can_claim(self, member, panel, guild_id=None):
+        if self.has_ticket_permission(guild_id, member, PERMISSION_TICKETS_RECORDS_CLAIM):
+            return True
         return self.member_has_any_role(member, self.role_ids(panel, "claim_roles"), guild_id)
 
     def can_add_member(self, member, panel, guild_id=None):
+        if self.has_ticket_permission(guild_id, member, PERMISSION_TICKETS_RECORDS_ADD_MEMBER):
+            return True
         if not isinstance(panel, dict):
             return self.member_has_any_role(member, set(), guild_id)
 
@@ -617,16 +649,22 @@ class TicketRuntimeCog(commands.Cog):
     def can_close(self, member, panel, record, guild_id=None):
         if self.is_fine_record(record):
             return self.can_manage_fine_ticket_action(guild_id, member, record)
+        if self.has_ticket_permission(guild_id, member, PERMISSION_TICKETS_RECORDS_CLOSE):
+            return True
         return self.member_has_any_role(member, self.role_ids(panel, "close_roles"), guild_id)
 
     def can_delete(self, member, panel, guild_id=None, record=None):
         if self.is_fine_record(record):
             return self.can_manage_fine_ticket_action(guild_id, member, record)
+        if self.has_ticket_permission(guild_id, member, PERMISSION_TICKETS_RECORDS_DELETE):
+            return True
         return self.member_has_any_role(member, self.role_ids(panel, "delete_roles"), guild_id)
 
     def can_reopen(self, member, panel, guild_id=None, record=None):
         if self.is_fine_record(record):
             return self.can_manage_fine_ticket_action(guild_id, member, record)
+        if self.has_ticket_permission(guild_id, member, PERMISSION_TICKETS_RECORDS_REOPEN):
+            return True
         return self.member_has_any_role(member, self.role_ids(panel, "reopen_roles"), guild_id)
 
     def can_manage_fine_ticket_action(self, guild_id, member, record):
@@ -642,8 +680,22 @@ class TicketRuntimeCog(commands.Cog):
             return False
 
         return (
-            permission_service.can_manage_tickets(guild_id, member)
-            or permission_service.can_manage_fines(guild_id, member)
+            permission_service.has_module_access(
+                guild_id,
+                "tickets",
+                member=member,
+                required_permissions=(
+                    PERMISSION_TICKETS_RECORDS_CLOSE,
+                    PERMISSION_TICKETS_RECORDS_REOPEN,
+                    PERMISSION_TICKETS_RECORDS_DELETE,
+                ),
+            )
+            or permission_service.has_module_access(
+                guild_id,
+                "fines",
+                member=member,
+                required_permissions=(PERMISSION_FINES_RECORDS_MANAGE,),
+            )
         )
 
     async def apply_fine_ticket_permissions(self, interaction, record, *, closed):
@@ -1174,8 +1226,11 @@ class TicketRuntimeCog(commands.Cog):
 
         panel = self.find_panel(interaction.guild.id, record.get("panel_id"))
         can_transcript = (
+            self.has_ticket_permission(interaction.guild.id, interaction.user, PERMISSION_TICKETS_RECORDS_TRANSCRIPT)
+            or (
             self.can_close(interaction.user, panel, record, interaction.guild.id)
             or self.can_delete(interaction.user, panel, interaction.guild.id, record)
+            )
         )
         if not record or not can_transcript:
             await interaction.response.send_message("No tienes permiso para transcribir este ticket.", ephemeral=True)
