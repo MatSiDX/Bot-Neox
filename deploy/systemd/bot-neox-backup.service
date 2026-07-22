@@ -1,0 +1,24 @@
+[Unit]
+Description=Bot-Neox runtime backup
+Documentation=file:/opt/bot-neox/docs/DEPLOYMENT_VPS.md
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=botneox
+Group=botneox
+WorkingDirectory=/opt/bot-neox
+EnvironmentFile=/opt/bot-neox/.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=BOT_NEOX_BACKUP_DIR=/var/backups/bot-neox
+Environment=BOT_NEOX_BACKUP_RETENTION=7
+ExecStart=/opt/bot-neox/.venv/bin/python /opt/bot-neox/scripts/backup_runtime.py
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+LogsDirectory=bot-neox
+ReadWritePaths=/var/backups/bot-neox /var/log/bot-neox
+StandardOutput=journal
+StandardError=journal

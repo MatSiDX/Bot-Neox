@@ -9,6 +9,15 @@ except ImportError:
         return False
 
 TRUE_VALUES = ("1", "true", "yes", "on")
+PRODUCTION_ENVIRONMENTS = ("prod", "production")
+SECRET_PLACEHOLDER_FRAGMENTS = (
+    "your_",
+    "replace_with",
+    "change_me",
+    "changeme",
+    "example",
+    "placeholder",
+)
 
 
 def _read_env_value(name: str):
@@ -32,6 +41,27 @@ def _read_env_int(name: str, default: int):
     if value is None:
         return default
     return int(value)
+
+
+def _is_production_environment(value: str | None):
+    return str(value or "").strip().lower() in PRODUCTION_ENVIRONMENTS
+
+
+def _looks_like_placeholder(value: str | None):
+    cleaned = str(value or "").strip().lower()
+    return bool(cleaned) and any(fragment in cleaned for fragment in SECRET_PLACEHOLDER_FRAGMENTS)
+
+
+def _secret_is_configured(value: str | None):
+    return bool(value) and not _looks_like_placeholder(value)
+
+
+def _raise_missing_production_secrets(names):
+    joined = ", ".join(names)
+    raise RuntimeError(
+        "Faltan secretos obligatorios para produccion o contienen placeholders: "
+        f"{joined}. Configuralos fuera del repo en .env productivo o variables del sistema."
+    )
 
 
 _PROJECT_ROOT_PATH = Path(__file__).resolve().parents[3]
@@ -59,6 +89,12 @@ DASHBOARD_CLIENT_ID = _read_env_value("DASHBOARD_CLIENT_ID") or _read_env_value(
 DASHBOARD_CLIENT_SECRET = _read_env_value("DASHBOARD_CLIENT_SECRET") or _read_env_value("DISCORD_CLIENT_SECRET")
 DASHBOARD_REDIRECT_URI = _read_env_value("DASHBOARD_REDIRECT_URI")
 DASHBOARD_SESSION_SECRET = _read_env_value("DASHBOARD_SESSION_SECRET")
+DASHBOARD_HOST = _read_env_value("DASHBOARD_HOST") or "127.0.0.1"
+DASHBOARD_PORT = _read_env_int("DASHBOARD_PORT", 8000)
+DASHBOARD_COOKIE_SECURE = _read_env_bool(
+    "DASHBOARD_COOKIE_SECURE",
+    default=_read_env_bool("DASHBOARD_PUBLIC_HTTPS", default=False),
+)
 DASHBOARD_ADMIN_PASSWORD_HASH = _read_env_value("DASHBOARD_ADMIN_PASSWORD_HASH")
 DASHBOARD_ADMIN_PASSWORD_PEPPER = _read_env_value("DASHBOARD_ADMIN_PASSWORD_PEPPER")
 DASHBOARD_ADMIN_DEVELOPER_IDS = tuple(
@@ -93,11 +129,21 @@ DASHBOARD_PUBLIC_URL = (
     )
     or "http://localhost:8000"
 ).rstrip("/")
+APP_ENV = (_read_env_value("APP_ENV") or _read_env_value("DASHBOARD_ENV") or "development").lower()
+DASHBOARD_ENVIRONMENT = (_read_env_value("DASHBOARD_ENV") or APP_ENV).lower()
+DASHBOARD_PRODUCTION_MODE = (
+    _is_production_environment(APP_ENV)
+    or _is_production_environment(DASHBOARD_ENVIRONMENT)
+    or DASHBOARD_COOKIE_SECURE
+    or DASHBOARD_PUBLIC_URL.startswith("https://")
+)
 ALLOWED_ROLE_ID = _read_env_int("ALLOWED_ROLE_ID", 0)
 AVALONIAN_LOG_CHANNEL_ID = _read_env_int("AVALONIAN_LOG_CHANNEL_ID", 0)
 ENABLE_MEMBER_INTENT = _read_env_bool("ENABLE_MEMBER_INTENT", default=False)
 ENABLE_VOICE_INTENT = _read_env_bool("ENABLE_VOICE_INTENT", default=True)
 ENABLE_MESSAGE_CONTENT_INTENT = _read_env_bool("ENABLE_MESSAGE_CONTENT_INTENT", default=False)
+MUSIC_ENABLED = _read_env_bool("MUSIC_ENABLED", default=True)
+FFMPEG_PATH = _read_env_value("FFMPEG_PATH")
 DISCORD_METADATA_ROLES_TTL_SECONDS = _read_env_int("DISCORD_METADATA_ROLES_TTL_SECONDS", 900)
 DISCORD_METADATA_CHANNELS_TTL_SECONDS = _read_env_int("DISCORD_METADATA_CHANNELS_TTL_SECONDS", 300)
 DISCORD_METADATA_CATEGORIES_TTL_SECONDS = _read_env_int("DISCORD_METADATA_CATEGORIES_TTL_SECONDS", 300)
@@ -117,23 +163,30 @@ ECONOMY_COGS = [
     "cogs.export",
     "cogs.audit",
     "cogs.ticket_runtime",
-    "cogs.music",
 ]
+if MUSIC_ENABLED:
+    ECONOMY_COGS.append("cogs.music")
 
 
 @dataclass(frozen=True)
 class BotSettings:
     token: str | None
+    environment: str
+    production_mode: bool
     allowed_role_id: int
     avalonian_log_channel_id: int
     enable_member_intent: bool
     enable_voice_intent: bool
     enable_message_content_intent: bool
+    music_enabled: bool
+    ffmpeg_path: str | None
     cogs: tuple[str, ...]
 
     def require_token(self):
-        if self.token:
+        if self.token and (not self.production_mode or _secret_is_configured(self.token)):
             return self.token
+        if self.production_mode:
+            _raise_missing_production_secrets(["TOKEN o ECONOMY_TOKEN"])
         raise RuntimeError("Falta configurar ECONOMY_TOKEN o TOKEN en el archivo .env")
 
 
@@ -144,7 +197,12 @@ class DashboardSettings:
     client_secret: str | None
     redirect_uri: str | None
     public_url: str
+    host: str
+    port: int
+    environment: str
+    production_mode: bool
     session_secret: str | None
+    cookie_secure: bool
     admin_password_hash: str | None
     admin_password_pepper: str | None
     admin_developer_ids: tuple[str, ...]
@@ -157,6 +215,20 @@ class DashboardSettings:
         return bool(self.client_id and self.client_secret)
 
     def validate_startup(self):
+        if self.production_mode:
+            missing = []
+            if not _secret_is_configured(self.bot_token):
+                missing.append("TOKEN o ECONOMY_TOKEN")
+            if not _secret_is_configured(self.session_secret):
+                missing.append("DASHBOARD_SESSION_SECRET")
+            if not _secret_is_configured(self.admin_password_hash):
+                missing.append("DASHBOARD_ADMIN_PASSWORD_HASH")
+            if not _secret_is_configured(self.admin_password_pepper):
+                missing.append("DASHBOARD_ADMIN_PASSWORD_PEPPER")
+            if not self.admin_developer_ids:
+                missing.append("DASHBOARD_ADMIN_DEVELOPER_IDS")
+            if missing:
+                _raise_missing_production_secrets(missing)
         if not self.session_secret:
             raise RuntimeError(
                 "Falta configurar DASHBOARD_SESSION_SECRET en el archivo .env. "
@@ -179,11 +251,15 @@ class DashboardSettings:
 
 BOT_SETTINGS = BotSettings(
     token=ECONOMY_TOKEN,
+    environment=APP_ENV,
+    production_mode=DASHBOARD_PRODUCTION_MODE,
     allowed_role_id=ALLOWED_ROLE_ID,
     avalonian_log_channel_id=AVALONIAN_LOG_CHANNEL_ID,
     enable_member_intent=ENABLE_MEMBER_INTENT,
     enable_voice_intent=ENABLE_VOICE_INTENT,
     enable_message_content_intent=ENABLE_MESSAGE_CONTENT_INTENT,
+    music_enabled=MUSIC_ENABLED,
+    ffmpeg_path=FFMPEG_PATH,
     cogs=tuple(ECONOMY_COGS),
 )
 
@@ -193,7 +269,12 @@ DASHBOARD_SETTINGS = DashboardSettings(
     client_secret=DASHBOARD_CLIENT_SECRET,
     redirect_uri=DASHBOARD_REDIRECT_URI,
     public_url=DASHBOARD_PUBLIC_URL,
+    host=DASHBOARD_HOST,
+    port=DASHBOARD_PORT,
+    environment=DASHBOARD_ENVIRONMENT,
+    production_mode=DASHBOARD_PRODUCTION_MODE,
     session_secret=DASHBOARD_SESSION_SECRET,
+    cookie_secure=DASHBOARD_COOKIE_SECURE,
     admin_password_hash=DASHBOARD_ADMIN_PASSWORD_HASH,
     admin_password_pepper=DASHBOARD_ADMIN_PASSWORD_PEPPER,
     admin_developer_ids=DASHBOARD_ADMIN_DEVELOPER_IDS,

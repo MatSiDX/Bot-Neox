@@ -10,6 +10,7 @@ import re
 import secrets
 import shutil
 import socket
+import sys
 import threading
 import time
 from datetime import datetime
@@ -23,6 +24,11 @@ from config.settings import (
     DASHBOARD_BOT_TOKEN,
     DASHBOARD_CLIENT_ID,
     DASHBOARD_CLIENT_SECRET,
+    DASHBOARD_COOKIE_SECURE,
+    DASHBOARD_HOST,
+    DASHBOARD_PORT,
+    DASHBOARD_PRODUCTION_MODE,
+    DASHBOARD_PUBLIC_URL,
     DISCORD_METADATA_CATEGORIES_TTL_SECONDS,
     DISCORD_METADATA_CHANNELS_TTL_SECONDS,
     DISCORD_METADATA_EMOJIS_TTL_SECONDS,
@@ -219,6 +225,7 @@ COOKIE_MANAGER = DashboardCookieManager(
     session_cookie_name=SESSION_COOKIE,
     state_cookie_name=STATE_COOKIE,
     session_secret=SESSION_SECRET,
+    cookie_secure=DASHBOARD_COOKIE_SECURE,
 )
 make_cookie_value = COOKIE_MANAGER.make_session_cookie
 make_state_cookie = COOKIE_MANAGER.make_state_cookie
@@ -3679,8 +3686,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if DASHBOARD_REDIRECT_URI:
             return DASHBOARD_REDIRECT_URI
 
+        if DASHBOARD_PUBLIC_URL:
+            return f"{DASHBOARD_PUBLIC_URL.rstrip('/')}/oauth/callback"
+
         host = self.headers.get("Host", f"localhost:{self.server.server_port}")
-        return f"http://{host}/oauth/callback"
+        forwarded_proto = str(self.headers.get("X-Forwarded-Proto") or "").split(",", 1)[0].strip().lower()
+        scheme = forwarded_proto if forwarded_proto in {"http", "https"} else "http"
+        return f"{scheme}://{host}/oauth/callback"
 
     def handle_login(self):
         if not oauth_configured():
@@ -5834,10 +5846,36 @@ class DashboardHandler(BaseHTTPRequestHandler):
         print(f"[{timestamp}] {self.address_string()} {message}")
 
 
+PUBLIC_BIND_HOSTS = {"0.0.0.0", "::", "[::]"}
+
+
+def dashboard_host_default():
+    return DASHBOARD_HOST
+
+
+def dashboard_port_default():
+    return DASHBOARD_PORT
+
+
+def dashboard_production_mode():
+    return DASHBOARD_PRODUCTION_MODE
+
+
+def warn_if_public_bind_in_production(host):
+    normalized_host = str(host or "").strip().lower().strip("[]")
+    if dashboard_production_mode() and normalized_host in PUBLIC_BIND_HOSTS:
+        print(
+            "ADVERTENCIA: el dashboard esta iniciando en 0.0.0.0/:: en modo "
+            "produccion. Usa 127.0.0.1:8000 y publica solo mediante Caddy/Nginx.",
+            file=sys.stderr,
+            flush=True,
+        )
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Dashboard local de EconomyBot")
-    parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--host", default=dashboard_host_default())
+    parser.add_argument("--port", type=int, default=dashboard_port_default())
     return parser.parse_args()
 
 
@@ -5867,9 +5905,11 @@ def build_servers(host, port):
 def main():
     validate_dashboard_startup()
     args = parse_args()
+    warn_if_public_bind_in_production(args.host)
     servers = build_servers(args.host, args.port)
-    print(f"Dashboard disponible en http://localhost:{args.port}")
-    print(f"Tambien disponible en http://127.0.0.1:{args.port}")
+    print(f"Dashboard escuchando en {args.host}:{args.port}")
+    if str(args.host).strip().lower() in ("127.0.0.1", "localhost"):
+        print(f"Dashboard local disponible en http://127.0.0.1:{args.port}")
     print("Presiona Ctrl+C para detenerlo.")
     try:
         for server in servers:

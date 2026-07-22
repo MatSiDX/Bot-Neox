@@ -12,17 +12,23 @@ def safe_dashboard_next(value):
 
 
 class DashboardCookieManager:
-    def __init__(self, *, session_cookie_name, state_cookie_name, session_secret):
+    def __init__(self, *, session_cookie_name, state_cookie_name, session_secret, cookie_secure=False):
         self.session_cookie_name = session_cookie_name
         self.state_cookie_name = state_cookie_name
         self.session_secret = str(session_secret or "")
+        self.cookie_secure = bool(cookie_secure)
+
+    def _apply_security_attributes(self, morsel):
+        morsel["path"] = "/"
+        morsel["samesite"] = "Lax"
+        morsel["httponly"] = True
+        if self.cookie_secure:
+            morsel["secure"] = True
 
     def make_session_cookie(self, value, max_age=None):
         cookie = SimpleCookie()
         cookie[self.session_cookie_name] = value
-        cookie[self.session_cookie_name]["path"] = "/"
-        cookie[self.session_cookie_name]["samesite"] = "Lax"
-        cookie[self.session_cookie_name]["httponly"] = True
+        self._apply_security_attributes(cookie[self.session_cookie_name])
         if max_age is not None:
             cookie[self.session_cookie_name]["max-age"] = str(int(max_age))
         return cookie.output(header="").strip()
@@ -30,9 +36,7 @@ class DashboardCookieManager:
     def make_state_cookie(self, value, max_age=300):
         cookie = SimpleCookie()
         cookie[self.state_cookie_name] = value
-        cookie[self.state_cookie_name]["path"] = "/"
-        cookie[self.state_cookie_name]["samesite"] = "Lax"
-        cookie[self.state_cookie_name]["httponly"] = True
+        self._apply_security_attributes(cookie[self.state_cookie_name])
         cookie[self.state_cookie_name]["max-age"] = str(int(max_age))
         return cookie.output(header="").strip()
 

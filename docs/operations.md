@@ -46,6 +46,7 @@ http://127.0.0.1:8000/dashboard
 
 ### Bot
 
+- `APP_ENV`: entorno general. Usa `production` en VPS/systemd para validar secretos obligatorios al arrancar.
 - `TOKEN`: token principal del bot. Obligatorio si `ECONOMY_TOKEN` esta vacio.
 - `ECONOMY_TOKEN`: alias compatible del token del bot. Si existe, tiene prioridad sobre `TOKEN`.
 - `ALLOWED_ROLE_ID`: compatibilidad legacy para restricciones por rol.
@@ -55,15 +56,50 @@ http://127.0.0.1:8000/dashboard
 
 ### Dashboard
 
-- `DASHBOARD_SESSION_SECRET`: obligatorio para sesiones firmadas.
-- `DASHBOARD_ADMIN_PASSWORD_HASH`: hash Argon2id de la clave secundaria del panel administrativo.
-- `DASHBOARD_ADMIN_PASSWORD_PEPPER`: pepper obligatoria para verificar esa clave secundaria.
-- `DASHBOARD_ADMIN_DEVELOPER_IDS`: lista separada por comas con los IDs de Discord autorizados.
+- `DASHBOARD_SESSION_SECRET`: obligatorio para sesiones firmadas. En produccion debe ser aleatorio y externo al repo.
+- `DASHBOARD_ENV`: marca legacy del dashboard; si esta vacio hereda `APP_ENV`.
+- `DASHBOARD_HOST`: host interno del dashboard; default seguro `127.0.0.1`.
+- `DASHBOARD_PORT`: puerto interno del dashboard; default `8000`.
+- `DASHBOARD_ADMIN_PASSWORD_HASH`: hash Argon2id de la clave secundaria del panel administrativo. Obligatorio en produccion.
+- `DASHBOARD_ADMIN_PASSWORD_PEPPER`: pepper obligatoria para verificar esa clave secundaria. Obligatoria en produccion.
+- `DASHBOARD_ADMIN_DEVELOPER_IDS`: lista separada por comas con los IDs de Discord autorizados. Obligatoria en produccion.
 - `DASHBOARD_ADMIN_ELEVATED_TTL_SECONDS`: duracion de la sesion elevada, acotada entre 10 y 15 minutos.
 - `DASHBOARD_CLIENT_ID`: cliente OAuth del dashboard.
 - `DASHBOARD_CLIENT_SECRET`: secreto OAuth del dashboard.
 - `DASHBOARD_REDIRECT_URI`: callback OAuth.
 - `DASHBOARD_PUBLIC_URL`: URL publica base del dashboard.
+
+En `APP_ENV=production`, el arranque falla si faltan `TOKEN`/`ECONOMY_TOKEN`,
+`DASHBOARD_SESSION_SECRET`, `DASHBOARD_ADMIN_PASSWORD_HASH`,
+`DASHBOARD_ADMIN_PASSWORD_PEPPER` o `DASHBOARD_ADMIN_DEVELOPER_IDS`, o si aun
+contienen placeholders del ejemplo. Los errores no imprimen secretos completos.
+
+### Generar Secretos Del Dashboard
+
+`DASHBOARD_SESSION_SECRET`:
+
+```bat
+python -c "import secrets; print(secrets.token_urlsafe(48))"
+```
+
+`DASHBOARD_ADMIN_PASSWORD_PEPPER`:
+
+```bat
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
+`DASHBOARD_ADMIN_PASSWORD_HASH` con Argon2id:
+
+```bat
+python -c "import getpass; from argon2 import PasswordHasher; password=getpass.getpass('Admin password: '); pepper=getpass.getpass('Admin pepper: '); print(PasswordHasher(time_cost=3, memory_cost=65536, parallelism=4, hash_len=32, salt_len=16).hash(password + pepper))"
+```
+
+`DASHBOARD_ADMIN_DEVELOPER_IDS` debe contener IDs numericos de usuarios Discord,
+separados por coma, por ejemplo:
+
+```env
+DASHBOARD_ADMIN_DEVELOPER_IDS=123456789012345678,234567890123456789
+```
 
 ### Cache De Metadata De Discord
 

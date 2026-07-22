@@ -1,3 +1,10 @@
+"""Manager interactivo para uso local/manual.
+
+En produccion no se recomienda usar este archivo como supervisor principal.
+Para una VPS 24/7, usa los servicios systemd documentados en
+docs/DEPLOYMENT_VPS.md para autoarranque, autoreinicio y logs con journalctl.
+"""
+
 import os
 import subprocess
 import sys
@@ -6,16 +13,22 @@ import time
 from datetime import datetime
 
 try:
-    from config.settings import DASHBOARD_PUBLIC_URL as CONFIGURED_DASHBOARD_PUBLIC_URL
+    from config.settings import (
+        DASHBOARD_HOST as CONFIGURED_DASHBOARD_HOST,
+        DASHBOARD_PORT as CONFIGURED_DASHBOARD_PORT,
+        DASHBOARD_PUBLIC_URL as CONFIGURED_DASHBOARD_PUBLIC_URL,
+    )
 except Exception:
+    CONFIGURED_DASHBOARD_HOST = None
+    CONFIGURED_DASHBOARD_PORT = None
     CONFIGURED_DASHBOARD_PUBLIC_URL = None
 
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 BOT_SCRIPT = os.path.join(ROOT_DIR, "bot.py")
 DASHBOARD_SCRIPT = os.path.join(ROOT_DIR, "web_dashboard.py")
-DASHBOARD_HOST = "127.0.0.1"
-DASHBOARD_PORT = "8000"
+DASHBOARD_HOST = str(CONFIGURED_DASHBOARD_HOST or "127.0.0.1")
+DASHBOARD_PORT = str(CONFIGURED_DASHBOARD_PORT or 8000)
 DASHBOARD_URL = (
     str(CONFIGURED_DASHBOARD_PUBLIC_URL or "").rstrip("/")
     or f"http://{DASHBOARD_HOST}:{DASHBOARD_PORT}"

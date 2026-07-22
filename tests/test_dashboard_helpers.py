@@ -238,6 +238,48 @@ class DashboardHelperTests(unittest.TestCase):
         self.assertEqual(manager.decode_session_cookie(encoded), "session-123")
         self.assertIsNone(manager.decode_session_cookie("session-123.invalid"))
 
+    def test_session_cookie_secure_enabled_for_production_https(self):
+        manager = DashboardCookieManager(
+            session_cookie_name="dashboard_session",
+            state_cookie_name="dashboard_state",
+            session_secret="test-secret",
+            cookie_secure=True,
+        )
+
+        header = manager.make_session_cookie("encoded-session", max_age=3600)
+
+        self.assertIn("Secure", header)
+        self.assertIn("HttpOnly", header)
+        self.assertIn("SameSite=Lax", header)
+
+    def test_session_cookie_secure_disabled_for_local_http(self):
+        manager = DashboardCookieManager(
+            session_cookie_name="dashboard_session",
+            state_cookie_name="dashboard_state",
+            session_secret="test-secret",
+            cookie_secure=False,
+        )
+
+        header = manager.make_session_cookie("encoded-session", max_age=3600)
+
+        self.assertNotIn("Secure", header)
+        self.assertIn("HttpOnly", header)
+        self.assertIn("SameSite=Lax", header)
+
+    def test_state_cookie_keeps_security_attributes(self):
+        manager = DashboardCookieManager(
+            session_cookie_name="dashboard_session",
+            state_cookie_name="dashboard_state",
+            session_secret="test-secret",
+            cookie_secure=True,
+        )
+
+        header = manager.make_state_cookie("oauth-state")
+
+        self.assertIn("Secure", header)
+        self.assertIn("HttpOnly", header)
+        self.assertIn("SameSite=Lax", header)
+
     def test_oauth_configured_requires_both_values(self):
         self.assertTrue(oauth_configured("client-id", "client-secret"))
         self.assertFalse(oauth_configured("client-id", ""))

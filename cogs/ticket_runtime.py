@@ -596,6 +596,7 @@ class TicketRuntimeCog(commands.Cog):
         return {int(value) for value in values if str(value).isdigit()}
 
     def can_manage_ticket_action(self, guild_id, member):
+        guild_id = guild_id or getattr(getattr(member, "guild", None), "id", None)
         if PermissionService.is_administrator(member):
             return True
 
@@ -603,6 +604,7 @@ class TicketRuntimeCog(commands.Cog):
         return bool(guild_id and permission_service and permission_service.can_manage_tickets(guild_id, member))
 
     def has_ticket_permission(self, guild_id, member, *permission_keys):
+        guild_id = guild_id or getattr(getattr(member, "guild", None), "id", None)
         if PermissionService.is_administrator(member):
             return True
 
@@ -668,6 +670,7 @@ class TicketRuntimeCog(commands.Cog):
         return self.member_has_any_role(member, self.role_ids(panel, "reopen_roles"), guild_id)
 
     def can_manage_fine_ticket_action(self, guild_id, member, record):
+        guild_id = guild_id or getattr(getattr(member, "guild", None), "id", None)
         if PermissionService.is_administrator(member):
             return True
 
