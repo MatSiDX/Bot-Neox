@@ -12,20 +12,25 @@
   <header class="dashboard-header" role="banner">
     <div class="bar">
       <div class="top-brand">
-        <img class="brand-logo" src="/assets/AvalonBot.png" alt="AvalonBot">
+        <a class="brand-logo-link" href="/" aria-label="Volver al landing de AvalonBot">
+          <img class="brand-logo" src="/assets/AvalonBot.png" alt="AvalonBot">
+        </a>
         <div>
+          <span class="dashboard-kicker">Centro operativo</span>
           <strong>AvalonBot</strong>
-          <span>Panel de administracion</span>
+          <span>Panel de administracion para Discord y Albion</span>
         </div>
       </div>
       <div class="controls">
-        <select id="guildSelect" aria-label="Servidor"></select>
-        <input id="searchInput" type="search" placeholder="Buscar" aria-label="Buscar">
+        <label class="control-field control-field--server">
+          <span>Servidor</span>
+          <select id="guildSelect" aria-label="Servidor"></select>
+        </label>
       </div>
       <div class="session">
         <span id="userLabel">No conectado</span>
         <button id="themeToggle" class="theme-button" type="button" aria-label="Cambiar tema" title="Cambiar tema"></button>
-        <button id="logoutButton" type="button" hidden>Salir</button>
+        <button id="logoutButton" class="logout-button" type="button" hidden>Salir</button>
       </div>
     </div>
   </header>
@@ -55,6 +60,8 @@
         </div>
         <div id="sidebarSectionsLabel" class="section-label">Secciones</div>
         <nav id="sidebarSections" class="section-list" aria-labelledby="sidebarSectionsLabel">
+          <div class="sidebar-group">
+            <div class="sidebar-group-label">Operacion</div>
           <button class="section-button active" type="button" data-section="economy" title="Economia" aria-controls="economySection">
             <span class="section-icon">
               <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -64,17 +71,6 @@
               </svg>
             </span>
             <span class="section-copy"><span class="section-text">Economia</span><span class="section-hint">Balances y registros</span></span>
-          </button>
-          <button class="section-button" type="button" data-section="templates" title="Plantillas" aria-controls="templatesSection">
-            <span class="section-icon">
-              <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"></path>
-                <path d="M14 2v6h6"></path>
-                <path d="M8 13h8"></path>
-                <path d="M8 17h5"></path>
-              </svg>
-            </span>
-            <span class="section-copy"><span class="section-text">Plantillas</span><span class="section-hint">Pings y contenido</span></span>
           </button>
           <button class="section-button" type="button" data-section="loot" title="Analizador de loot" aria-controls="lootSection">
             <span class="section-icon">
@@ -98,6 +94,9 @@
             </span>
             <span class="section-copy"><span class="section-text">Calculadora</span><span class="section-hint">Reparto de informes</span></span>
           </button>
+          </div>
+          <div class="sidebar-group">
+            <div class="sidebar-group-label">Comunidad</div>
           <button class="section-button" type="button" data-section="tickets" title="Tickets" aria-controls="ticketsSection">
             <span class="section-icon">
               <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -108,15 +107,6 @@
               </svg>
             </span>
             <span class="section-copy"><span class="section-text">Tickets</span><span class="section-hint">Paneles y soporte</span></span>
-          </button>
-          <button class="section-button" type="button" data-section="fines" title="Multas" aria-controls="finesSection">
-            <span class="section-icon">
-              <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M12 2v20"></path>
-                <path d="M17 5H9.5a3.5 3.5 0 0 0 0 7H14a3.5 3.5 0 0 1 0 7H6"></path>
-              </svg>
-            </span>
-            <span class="section-copy"><span class="section-text">Multas</span><span class="section-hint">Roles y tickets multa</span></span>
           </button>
           <button class="section-button" type="button" data-section="registration" title="Registro Albion" aria-controls="registrationSection">
             <span class="section-icon">
@@ -139,6 +129,29 @@
             </span>
             <span class="section-copy"><span class="section-text">Bienvenidas</span><span class="section-hint">Ingreso de miembros</span></span>
           </button>
+          </div>
+          <div class="sidebar-group">
+            <div class="sidebar-group-label">Configuracion</div>
+          <button class="section-button" type="button" data-section="templates" title="Plantillas" aria-controls="templatesSection">
+            <span class="section-icon">
+              <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"></path>
+                <path d="M14 2v6h6"></path>
+                <path d="M8 13h8"></path>
+                <path d="M8 17h5"></path>
+              </svg>
+            </span>
+            <span class="section-copy"><span class="section-text">Plantillas</span><span class="section-hint">Pings y contenido</span></span>
+          </button>
+          <button class="section-button" type="button" data-section="fines" title="Multas" aria-controls="finesSection">
+            <span class="section-icon">
+              <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 2v20"></path>
+                <path d="M17 5H9.5a3.5 3.5 0 0 0 0 7H14a3.5 3.5 0 0 1 0 7H6"></path>
+              </svg>
+            </span>
+            <span class="section-copy"><span class="section-text">Multas</span><span class="section-hint">Roles y tickets multa</span></span>
+          </button>
           <button class="section-button" type="button" data-section="audit" title="Auditoria" aria-controls="auditSection">
             <span class="section-icon">
               <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -159,6 +172,9 @@
             </span>
             <span class="section-copy"><span class="section-text">Permisos</span><span class="section-hint">Accesos por rol</span></span>
           </button>
+          </div>
+          <div class="sidebar-group">
+            <div class="sidebar-group-label">Avanzado</div>
           <button class="section-button" type="button" data-section="admin-panel" title="Panel Administrativo" aria-controls="adminPanelSection">
             <span class="section-icon">
               <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -172,6 +188,7 @@
             </span>
             <span class="section-copy"><span class="section-text">Panel Administrativo</span><span class="section-hint">Control avanzado</span></span>
           </button>
+          </div>
         </nav>
       </aside>
 
@@ -203,6 +220,7 @@
 
           <section class="records-toolbar economy-toolbar" aria-label="Filtros de economia">
             <div class="ticket-actions">
+              <input id="searchInput" type="search" placeholder="Buscar en economia" aria-label="Buscar en economia">
               <select id="economyStatusFilter" aria-label="Estado del registro" hidden>
                 <option value="">Todos los estados</option>
                 <option value="open">Abierto</option>
@@ -1140,15 +1158,26 @@
           <div class="ticket-stat"><span>Permisos activos</span><strong id="permissionActiveTotal">0</strong></div>
           <div class="ticket-stat"><span>Roles disponibles</span><strong id="permissionAvailableTotal">0</strong></div>
         </section>
-        <div class="editor-section">
+        <div class="editor-section permissions-workspace">
           <div class="editor-section-header">
             <div>
               <strong>Permisos por rol</strong>
               <span>Activa permisos especificos o marca Global para darle acceso completo a ese rol.</span>
             </div>
           </div>
-          <div class="records-toolbar compact">
-            <input id="permissionRoleSearch" type="search" placeholder="Buscar rol por nombre o ID">
+          <div class="records-toolbar compact permissions-toolbar" aria-label="Filtros de permisos">
+            <input id="permissionRoleSearch" type="search" placeholder="Buscar rol, ID o permiso">
+            <select id="permissionCategoryFilter" aria-label="Filtrar por categoria de permisos">
+              <option value="">Todas las categorias</option>
+            </select>
+            <select id="permissionStatusFilter" aria-label="Filtrar roles por estado de permisos">
+              <option value="">Todos los roles</option>
+              <option value="configured">Con permisos activos</option>
+              <option value="empty">Sin permisos activos</option>
+              <option value="global">Con acceso global</option>
+              <option value="editable">Editables</option>
+              <option value="readonly">Solo lectura</option>
+            </select>
           </div>
           <div id="permissionsGrid" class="permissions-grid"></div>
         </div>

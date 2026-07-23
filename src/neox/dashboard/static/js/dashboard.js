@@ -20,11 +20,13 @@
     if (savedSection === "ticket-records") {
       localStorage.setItem("dashboardSection", "tickets");
     }
+    const savedSidebarCollapsed = localStorage.getItem("dashboardSidebarCollapsed");
+    const startsInMobileLayout = window.matchMedia?.("(max-width: 760px)")?.matches || false;
 
     const state = {
       data: null,
       section: linkedReportSection ? "report-calculator" : initialSection,
-      sidebarCollapsed: localStorage.getItem("dashboardSidebarCollapsed") === "1",
+      sidebarCollapsed: startsInMobileLayout ? true : savedSidebarCollapsed === "1",
       theme: localStorage.getItem("dashboardTheme") || "light",
       tab: "balances",
       guildId: localStorage.getItem("dashboardGuildId") || "",
@@ -107,6 +109,8 @@
       fineConfig: null,
       csrfToken: "",
       permissionSearch: "",
+      permissionCategoryFilter: "",
+      permissionStatusFilter: "",
       botPermissions: {},
       botSystemPermissions: {},
       botPermissionOptions: [],
@@ -1366,9 +1370,49 @@
       const roles = state.ticketRoles || [];
       const options = state.botPermissionOptions || [];
       const search = String(state.permissionSearch || "").trim().toLowerCase();
-      const visibleRoles = search
-        ? roles.filter(role => String(role.name || "").toLowerCase().includes(search) || String(role.id || "").includes(search))
-        : roles;
+      const categoryFilter = String(state.permissionCategoryFilter || "");
+      const statusFilter = String(state.permissionStatusFilter || "");
+      const categories = [];
+      options.forEach(option => {
+        const category = option.category || "Otros";
+        if (!categories.includes(category)) categories.push(category);
+      });
+      let filteredOptions = categoryFilter
+        ? options.filter(option => (option.category || "Otros") === categoryFilter)
+        : options;
+      const optionByKey = new Map(options.map(option => [String(option.key || ""), option]));
+      const optionMatchesSearch = option => {
+        if (!search) return false;
+        return [
+          option.key,
+          option.label,
+          option.description,
+          option.category,
+          option.scope
+        ].some(value => String(value || "").toLowerCase().includes(search));
+      };
+      const searchMatchesPermission = Boolean(search) && options.some(optionMatchesSearch);
+      if (searchMatchesPermission) {
+        filteredOptions = filteredOptions.filter(optionMatchesSearch);
+      }
+      const roleMatchesStatus = role => {
+        const values = permissionValuesForRole(role.id);
+        const valueSet = new Set(values);
+        if (statusFilter === "configured") return values.length > 0;
+        if (statusFilter === "empty") return values.length === 0;
+        if (statusFilter === "global") return valueSet.has("global");
+        if (statusFilter === "editable") return state.canEditPermissions && !rolePermissionsAreReadOnly(role.id);
+        if (statusFilter === "readonly") return rolePermissionsAreReadOnly(role.id);
+        return true;
+      };
+      const roleMatchesSearch = role => {
+        if (!search) return true;
+        const roleFields = [role.name, role.id];
+        if (roleFields.some(value => String(value || "").toLowerCase().includes(search))) return true;
+        if (searchMatchesPermission) return true;
+        return permissionValuesForRole(role.id).some(key => optionMatchesSearch(optionByKey.get(String(key)) || { key }));
+      };
+      const visibleRoles = roles.filter(role => roleMatchesStatus(role) && roleMatchesSearch(role));
       const configuredRoles = Object.values(state.botPermissions || {}).filter(values => Array.isArray(values) && values.length).length;
       const activeTotal = Object.values(state.botPermissions || {}).reduce((total, values) => total + (Array.isArray(values) ? values.length : 0), 0);
 
@@ -1376,6 +1420,10 @@
       document.getElementById("permissionActiveTotal").textContent = activeTotal;
       document.getElementById("permissionAvailableTotal").textContent = roles.length;
       document.getElementById("permissionRoleSearch").value = state.permissionSearch;
+      document.getElementById("permissionCategoryFilter").innerHTML = `<option value="">Todas las categorias</option>${categories.map(category => (
+        `<option value="${escapeHtml(category)}"${category === categoryFilter ? " selected" : ""}>${escapeHtml(category)}</option>`
+      )).join("")}`;
+      document.getElementById("permissionStatusFilter").value = statusFilter;
 
       if (!roles.length || !options.length) {
         grid.innerHTML = `<div class="ticket-empty-editor"><strong>Sin roles cargados</strong><p>Selecciona un servidor para cargar los roles disponibles.</p></div>`;
@@ -1383,17 +1431,20 @@
       }
 
       if (!visibleRoles.length) {
-        grid.innerHTML = `<div class="ticket-empty-editor"><strong>No encontre roles</strong><p>Prueba con otro nombre o ID.</p></div>`;
+        grid.innerHTML = `<div class="ticket-empty-editor"><strong>No encontre resultados</strong><p>Prueba otro rol, ID, permiso, categoria o estado.</p></div>`;
         return;
       }
 
-      const categories = [];
-      options.forEach(option => {
-        const category = option.category || "Otros";
-        if (!categories.includes(category)) categories.push(category);
-      });
+      if (!filteredOptions.length) {
+        grid.innerHTML = `<div class="ticket-empty-editor"><strong>No encontre permisos</strong><p>Prueba otra categoria o termino de busqueda.</p></div>`;
+        return;
+      }
 
       grid.innerHTML = `
+        <div class="permissions-results-summary">
+          <span>${escapeHtml(visibleRoles.length)} de ${escapeHtml(roles.length)} roles visibles</span>
+          <span>${escapeHtml(filteredOptions.length)} de ${escapeHtml(options.length)} permisos mostrados</span>
+        </div>
         <div class="permissions-list permissions-list-stacked">
           ${visibleRoles.map(role => {
         const values = new Set(permissionValuesForRole(role.id));
@@ -1410,7 +1461,9 @@
               </div>
               <div class="permission-groups">
                 ${categories.map(category => {
-                  const categoryOptions = options.filter(option => (option.category || "Otros") === category);
+                  if (categoryFilter && category !== categoryFilter) return "";
+                  const categoryOptions = filteredOptions.filter(option => (option.category || "Otros") === category);
+                  if (!categoryOptions.length) return "";
                   return `
                     <section class="permission-group">
                       <div class="permission-group-head">
@@ -1883,11 +1936,24 @@
     }
 
     function collectBotPermissions() {
-      const permissions = {};
-      const roleIds = [];
+      const permissions = Object.fromEntries(
+        Object.entries(state.botPermissions || {}).map(([roleId, values]) => [
+          String(roleId),
+          Array.isArray(values) ? values.map(String) : []
+        ])
+      );
+      const roleIds = (state.ticketRoles || []).map(role => String(role.id || "")).filter(Boolean);
+      const renderedPermissionKeysByRole = {};
       document.querySelectorAll(".permission-row").forEach(row => {
         const roleId = String(row.dataset.roleId || "");
-        if (roleId) roleIds.push(roleId);
+        if (!roleId) return;
+        renderedPermissionKeysByRole[roleId] = new Set(
+          Array.from(row.querySelectorAll("[data-permission-role]"))
+            .map(input => String(input.dataset.permissionKey || ""))
+            .filter(Boolean)
+        );
+        permissions[roleId] = (permissions[roleId] || [])
+          .filter(key => !renderedPermissionKeysByRole[roleId].has(String(key)));
       });
       document.querySelectorAll("[data-permission-role]").forEach(input => {
         if (!input.checked) return;
@@ -1895,7 +1961,7 @@
         const key = String(input.dataset.permissionKey || "");
         if (!roleId || !key) return;
         permissions[roleId] = permissions[roleId] || [];
-        permissions[roleId].push(key);
+        if (!permissions[roleId].includes(key)) permissions[roleId].push(key);
       });
 
       return { permissions, roleIds };
@@ -4411,13 +4477,17 @@
       document.getElementById("auditSection").hidden = state.section !== "audit";
       document.getElementById("permissionsSection").hidden = state.section !== "permissions";
       document.getElementById("adminPanelSection").hidden = state.section !== "admin-panel";
-      document.getElementById("searchInput").hidden = state.section !== "economy";
       document.querySelectorAll(".section-button").forEach(button => {
         button.hidden = !canUseSection(button.dataset.section);
         const active = button.dataset.section === state.section;
         button.classList.toggle("active", active);
         if (active) button.setAttribute("aria-current", "page");
         else button.removeAttribute("aria-current");
+      });
+      document.querySelectorAll(".sidebar-group").forEach(group => {
+        const hasVisibleSection = [...group.querySelectorAll(".section-button")]
+          .some(button => !button.hidden);
+        group.hidden = !hasVisibleSection;
       });
     }
 
@@ -4535,6 +4605,9 @@
       state.fineConfig = null;
       state.economyGuildId = "";
       state.search = "";
+      state.permissionSearch = "";
+      state.permissionCategoryFilter = "";
+      state.permissionStatusFilter = "";
       state.economyPages = {
         balances: createPageState(25),
         operations: createPageState(25),
@@ -5564,6 +5637,9 @@
       button.addEventListener("click", () => {
         if (!canUseSection(button.dataset.section)) return;
         state.section = button.dataset.section;
+        if (window.matchMedia?.("(max-width: 760px)")?.matches) {
+          state.sidebarCollapsed = true;
+        }
         localStorage.setItem("dashboardSection", state.section);
         render();
         loadCurrentSectionData().catch(showError);
@@ -6283,6 +6359,18 @@
     document.getElementById("permissionRoleSearch").addEventListener("input", event => {
       state.botPermissions = collectBotPermissions().permissions;
       state.permissionSearch = event.target.value;
+      renderPermissions();
+    });
+
+    document.getElementById("permissionCategoryFilter").addEventListener("change", event => {
+      state.botPermissions = collectBotPermissions().permissions;
+      state.permissionCategoryFilter = event.target.value;
+      renderPermissions();
+    });
+
+    document.getElementById("permissionStatusFilter").addEventListener("change", event => {
+      state.botPermissions = collectBotPermissions().permissions;
+      state.permissionStatusFilter = event.target.value;
       renderPermissions();
     });
 

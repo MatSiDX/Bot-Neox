@@ -56,22 +56,30 @@
       <section class="hero section" id="inicio">
         <div class="hero__grid">
           <div class="hero__copy" data-reveal>
-            <span class="eyebrow">Gestion integral para comunidades de Discord</span>
-            <h1>Administra tu servidor, tu economia y tus eventos desde un solo lugar</h1>
+            <span class="eyebrow">Del caos operativo al centro de control</span>
+            <h1>Tu servidor de Discord, finalmente ordenado</h1>
             <p class="hero__lead">
-              AvalonBot conecta Discord con un dashboard web avanzado para gestionar balances,
-              Avalonianas, tickets, multas, reportes, permisos y registros de Albion Online.
+              AvalonBot convierte balances dispersos, tickets pendientes, permisos confusos y
+              eventos de Albion en un panel claro para operar sin rebuscar entre canales.
             </p>
 
             <div class="hero__actions">
-              <a class="button button--primary button--large" href="<!--BOT_INVITE_URL-->" target="_blank" rel="noreferrer">Unir bot a Discord</a>
-              <a class="button button--primary button--large" href="/login?remember=1">Comenzar con Discord</a>
-              <a class="button button--secondary button--large" href="#funciones">Explorar funciones</a>
+              <a class="button button--primary button--large" href="/login?remember=1">Entrar al centro de control</a>
+              <a class="button button--secondary button--large" href="#dashboard">Ver dashboard en accion</a>
+              <a class="button button--ghost button--large" href="<!--BOT_INVITE_URL-->" target="_blank" rel="noreferrer">Invitar bot</a>
             </div>
 
             <p class="hero__support">
-              Acceso seguro mediante Discord OAuth. Configuracion independiente para cada servidor.
+              Acceso seguro por Discord OAuth, permisos por rol y configuracion independiente por servidor.
             </p>
+
+            <div class="hero__problem-strip" aria-label="Problemas que AvalonBot centraliza">
+              <span>Canales saturados</span>
+              <span>Balances manuales</span>
+              <span>Tickets perdidos</span>
+              <span>Permisos confusos</span>
+              <strong>→ AvalonBot lo centraliza</strong>
+            </div>
 
             <div class="hero__highlights" aria-label="Capacidades principales">
               <span>Economia y balances</span>
@@ -82,6 +90,8 @@
           </div>
 
           <div class="hero__visual" data-reveal>
+            <div class="hero-orbit hero-orbit--one" aria-hidden="true"></div>
+            <div class="hero-orbit hero-orbit--two" aria-hidden="true"></div>
             <div class="dashboard-shot">
               <div class="dashboard-shot__chrome">
                 <span></span>
@@ -209,6 +219,31 @@
         </div>
       </section>
 
+      <section class="section section--problem">
+        <div class="problem-grid" data-reveal>
+          <article class="problem-card problem-card--before">
+            <span class="eyebrow">Antes</span>
+            <h2>Todo pasa en Discord, pero no todo se entiende en Discord</h2>
+            <p>Balances repartidos entre mensajes, tickets que se pierden, permisos dificiles de auditar y reportes que dependen de memoria manual.</p>
+            <div class="problem-stack" aria-label="Problemas frecuentes">
+              <span>Canales saturados</span>
+              <span>Datos duplicados</span>
+              <span>Roles sin trazabilidad</span>
+            </div>
+          </article>
+          <article class="problem-card problem-card--after">
+            <span class="eyebrow">Con AvalonBot</span>
+            <h2>Un panel centraliza lo que tu comunidad ya hace</h2>
+            <p>El bot sigue trabajando en Discord, mientras el dashboard organiza economia, tickets, permisos, reportes y auditoria en vistas faciles de operar.</p>
+            <div class="problem-stack problem-stack--success" aria-label="Soluciones de AvalonBot">
+              <span>Servidor seleccionado</span>
+              <span>Acciones claras</span>
+              <span>Registro consultable</span>
+            </div>
+          </article>
+        </div>
+      </section>
+
       <section class="section section--feature-grid" id="funciones">
         <div class="section-heading" data-reveal>
           <span class="eyebrow">Funciones principales</span>
@@ -290,15 +325,33 @@
 
       <section class="section section--demo" id="dashboard">
         <div class="section-heading" data-reveal>
-          <span class="eyebrow">Dashboard en practica</span>
-          <h2>Una vista conectada con los modulos reales de AvalonBot</h2>
+          <span class="eyebrow">Dashboard en accion</span>
+          <h2>Una app operativa, no una lista de comandos</h2>
           <p>
-            Cambia de modulo y revisa como se organizan las mismas areas que ya existen en el panel:
-            economia, eventos, tickets, auditoria y permisos.
+            Cada vista responde a una tarea real: encontrar un dato, actuar rapido, guardar cambios
+            y volver a Discord con trazabilidad.
           </p>
         </div>
 
         <div class="demo-shell" data-reveal>
+          <div class="demo-command-center" aria-label="Resumen del centro de control">
+            <article>
+              <span>Servidor activo</span>
+              <strong>Ava de 10</strong>
+              <small>OAuth + permisos listos</small>
+            </article>
+            <article>
+              <span>Acciones rapidas</span>
+              <strong>4 modulos</strong>
+              <small>Economia, tickets, reportes y roles</small>
+            </article>
+            <article>
+              <span>Estado operativo</span>
+              <strong>Sin rebuscar</strong>
+              <small>Filtros, resumenes y actividad visible</small>
+            </article>
+          </div>
+
           <div class="demo-tabs" role="tablist" aria-label="Vista del dashboard">
             <button class="demo-tab is-active" type="button" role="tab" aria-selected="true" aria-controls="demo-panel-economia" id="demo-tab-economia" data-demo-tab="economia">Economia</button>
             <button class="demo-tab" type="button" role="tab" aria-selected="false" aria-controls="demo-panel-eventos" id="demo-tab-eventos" data-demo-tab="eventos">Eventos</button>
@@ -578,14 +631,23 @@
       <section class="section section--cta">
         <div class="cta-card" data-reveal>
           <div>
-            <span class="eyebrow">Listo para operar con mas control</span>
-            <h2>Convierte tu servidor en una comunidad organizada</h2>
-            <p>Centraliza la administracion, reduce tareas manuales y manten un registro claro de cada operacion.</p>
+            <span class="eyebrow">Listo para tomar control</span>
+            <h2>Entra al centro de control de tu comunidad</h2>
+            <p>Centraliza economia, tickets, reportes y permisos en una interfaz pensada para operar rapido y con registro claro.</p>
+          </div>
+          <div class="cta-preview" aria-label="Vista previa del centro de control">
+            <span>Centro de control</span>
+            <strong>3 alertas operativas</strong>
+            <div>
+              <small>Tickets abiertos</small>
+              <small>Roles pendientes</small>
+              <small>Reporte listo</small>
+            </div>
           </div>
           <div class="cta-card__actions">
-            <a class="button button--primary button--large" href="<!--BOT_INVITE_URL-->" target="_blank" rel="noreferrer">Invitar bot</a>
-            <a class="button button--primary button--large" href="/login?remember=1">Ingresar con Discord</a>
+            <a class="button button--primary button--large" href="/login?remember=1">Gestiona tu servidor ahora</a>
             <a class="button button--secondary button--large" href="/dashboard">Abrir dashboard</a>
+            <a class="button button--ghost button--large" href="<!--BOT_INVITE_URL-->" target="_blank" rel="noreferrer">Invitar bot</a>
           </div>
         </div>
       </section>
